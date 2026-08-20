@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiniMax H3 영상 생성</title>
+<style>
+:root{
+  --bg:#0b0f17; --card:#121826; --card2:#0f1522; --line:#1f2a3d;
+  --tx:#e6edf6; --tx2:#8b98ad; --acc:#4f8cff; --acc2:#2f6fe0;
+  --ok:#3ecf8e; --err:#ff6b6b; --warn:#f5b942;
+  --r:14px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--tx);
+  font-family:'Inter','Pretendard','Apple SD Gothic Neo','Malgun Gothic',system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased; min-height:100vh;
+}
+.wrap{max-width:720px;margin:0 auto;padding:20px 16px 60px}
+header{display:flex;align-items:center;gap:10px;margin:6px 0 18px}
+header .logo{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--acc),#8a5cff);display:flex;align-items:center;justify-content:center;font-size:18px}
+header h1{font-size:18px;margin:0;font-weight:700}
+header .sub{font-size:12px;color:var(--tx2);margin-top:2px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--warn);display:inline-block;margin-right:5px}
+.dot.on{background:var(--ok)} .dot.off{background:var(--err)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:18px;margin-bottom:14px}
+.card h2{font-size:13px;color:var(--tx2);margin:0 0 12px;letter-spacing:.4px;text-transform:uppercase;font-weight:600}
+label.fld{display:block;font-size:13px;color:var(--tx2);margin-bottom:6px}
+textarea,input[type=text],input[type=number]{
+  width:100%;background:var(--card2);border:1px solid var(--line);color:var(--tx);
+  border-radius:10px;padding:11px 12px;font-size:14px;font-family:inherit;outline:none;
+}
+textarea{min-height:96px;resize:vertical}
+textarea:focus,input:focus{border-color:var(--acc)}
+.row{display:flex;gap:10px}
+.row>*{flex:1}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{
+  background:var(--card2);border:1px solid var(--line);color:var(--tx2);
+  border-radius:999px;padding:8px 14px;font-size:13px;cursor:pointer;user-select:none;
+  transition:all .15s;
+}
+.chip:hover{border-color:#33415c;color:var(--tx)}
+.chip.on{background:rgba(79,140,255,.14);border-color:var(--acc);color:#bcd4ff;font-weight:600}
+.hint{font-size:11.5px;color:var(--tx2);margin-top:8px;line-height:1.5}
+.seg{display:flex;background:var(--card2);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.seg div{flex:1;text-align:center;padding:10px;font-size:13px;color:var(--tx2);cursor:pointer}
+.seg div.on{background:rgba(79,140,255,.14);color:#bcd4ff;font-weight:600}
+.btns{display:flex;gap:10px;margin-top:16px}
+button{
+  border:none;border-radius:12px;padding:14px 18px;font-size:15px;font-weight:700;cursor:pointer;
+  font-family:inherit;transition:transform .1s, opacity .15s;
+}
+button:active{transform:scale(.98)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.btn-go{flex:2;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff}
+.btn-stop{flex:1;background:#2a1420;color:#ff9d9d;border:1px solid #4a2430}
+/* progress */
+#jobbox{display:none}
+.statusline{display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:10px}
+.statusline .st{font-weight:700}
+.bar{height:6px;background:var(--card2);border-radius:99px;overflow:hidden;margin:10px 0 6px}
+.bar i{display:block;height:100%;width:0%;background:linear-gradient(90deg,var(--acc),#8a5cff);transition:width .6s}
+.meta{font-size:12px;color:var(--tx2);line-height:1.7}
+pre.err{background:#1a1020;border:1px solid #4a2430;color:#ff9d9d;border-radius:10px;padding:10px;font-size:12px;white-space:pre-wrap;word-break:break-all}
+/* results */
+.result{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
+.result video{width:100%;border-radius:12px;background:#000;max-height:420px}
+.dlrow{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+.dl{flex:1;min-width:140px;text-align:center;background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:12px;font-size:14px;font-weight:700;color:#bcd4ff;text-decoration:none}
+.dl:hover{border-color:var(--acc)}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:sp .8s linear infinite;vertical-align:-2px;margin-right:6px}
+@keyframes sp{to{transform:rotate(360deg)}}
+footer{margin-top:24px;font-size:11px;color:#4a5670;text-align:center;line-height:1.7}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">🎬</div>
+    <div>
+      <h1>MiniMax H3 영상 생성</h1>
+      <div class="sub"><span class="dot" id="cstat"></span><span id="ctext">ComfyUI 확인 중…</span> · 텍스트 → 영상+오디오 (24fps)</div>
+    </div>
+  </header>
+
+  <!-- MAIN GOAL -->
+  <div class="card">
+    <h2>Main Goal</h2>
+    <label class="fld">프롬프트 (영문 권장)</label>
+    <textarea id="prompt" placeholder="A golden retriever puppy running through a sunlit meadow, cinematic shot, soft bokeh..."></textarea>
+    <div class="hint">H3 텍스트→영상+오디오 단일 생성. 영문 프롬프트가 품질에서 안정적입니다.</div>
+  </div>
+
+  <!-- 화면 비율 -->
+  <div class="card">
+    <h2>화면 비율</h2>
+    <div class="chips" id="ar">
+      <div class="chip" data-w="608" data-h="352" data-lb="16:9 · 608×352">16:9</div>
+      <div class="chip" data-w="448" data-h="512" data-lb="5:4 · 448×512">5:4</div>
+      <div class="chip on" data-w="352" data-h="608" data-lb="9:16 · 352×608">9:16</div>
+      <div class="chip" data-w="512" data-h="512" data-lb="1:1 · 512×512">1:1</div>
+    </div>
+    <div class="hint">폭/높이는 32의 배수. H3 학습 해상도 대역(약 352–608px)에서 가장 안정적입니다.</div>
+  </div>
+
+  <!-- 지속시간 -->
+  <div class="card">
+    <h2>지속시간</h2>
+    <div class="chips" id="dur">
+      <div class="chip on" data-s="5">약 5초</div>
+      <div class="chip" data-s="8">약 8초</div>
+      <div class="chip" data-s="10">약 10초</div>
+      <div class="chip" data-s="12">약 12초</div>
+      <div class="chip" data-s="15">약 15초</div>
+      <div class="chip" data-s="20">약 20초</div>
+      <div class="chip" data-s="25">약 25초</div>
+      <div class="chip" data-s="30">약 30초</div>
+      <div class="chip" data-s="60">약 1분 · 분할 생성</div>
+    </div>
+    <div class="hint">24fps 기준 프레임 수가 모델 격자(17k+5)에 스냅됩니다. 15초 초과 생성은 오래 걸리며 OOM 위험이 있어 권장하지 않습니다.</div>
+  </div>
+
+  <!-- 생성 방식 -->
+  <div class="card">
+    <h2>생성 방식</h2>
+    <div class="seg" id="mode">
+      <div class="on" data-m="single">연속 단일 생성 · 장면 연속성 우선</div>
+      <div data-m="batch">분할 배치 생성 (15초씩 N회)</div>
+    </div>
+    <div class="hint" id="modehint">한 번에 전체 프레임을 생성합니다. 프레임 수는 모델이 자동으로 스냅합니다.</div>
+    <div class="row" id="batchrow" style="display:none;margin-top:10px">
+      <div>
+        <label class="fld">분할 횟수</label>
+        <input type="number" id="batchn" value="2" min="2" max="6">
+      </div>
+    </div>
+  </div>
+
+  <!-- 시드 / 파일명 -->
+  <div class="card">
+    <h2>시드 · 파일</h2>
+    <div class="row">
+      <div>
+        <label class="fld">시드 (-1 = 랜덤)</label>
+        <input type="number" id="seed" value="-1">
+      </div>
+      <div>
+        <label class="fld">파일 이름</label>
+        <input type="text" id="fname" value="h3web/video">
+      </div>
+    </div>
+  </div>
+
+  <!-- 설정 -->
+  <div class="card">
+    <h2>설정 확인</h2>
+    <div class="hint" id="cfgline" style="margin-top:0">
+      - 샘플링 스텝: <b style="color:var(--tx)">6</b><br>
+      - 샘플러: res_multistep · 스케줄러 simple · denoise 1.0<br>
+      - 오디오: 동시 생성 (VAEDecodeAudio)<br>
+      - 저장: PGX /home/aski/minimax-h3/web_output
+    </div>
+  </div>
+
+  <!-- job 상태 -->
+  <div class="card" id="jobbox">
+    <div class="statusline" id="stline"><span class="spin"></span><span class="st" id="sttext">작업 대기 중…</span></div>
+    <div class="bar"><i id="bar"></i></div>
+    <div class="meta" id="metatext"></div>
+    <pre class="err" id="errmsg" style="display:none"></pre>
+    <div class="result" id="result" style="display:none">
+      <video id="player" controls playsinline></video>
+      <div class="dlrow">
+        <a class="dl" id="dl1" download>⬇ MP4 다운로드</a>
+        <a class="dl" id="dl2" target="_blank" rel="noopener">🔗 새 탭에서 열기</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="btns">
+    <button class="btn-go" id="go">🎬 영상 생성</button>
+    <button class="btn-stop" id="stop" disabled>중단</button>
+  </div>
+
+  <footer>
+    MiniMax H3 (fl2va) · PGX ComfyUI :8188 · 24fps · 영상+오디오 동시 생성<br>
+    서버: h3-web :8300 — 생성 중에는 ComfyUI가 다른 작업을 대기열에 싣습니다.
+  </footer>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+let W=352,H=608,S=5,MODE="single",timer=null,curl=null;
+
+document.querySelectorAll('#ar .chip').forEach(c=>c.onclick=()=>{
+  document.querySelectorAll('#ar .chip').forEach(x=>x.classList.remove('on'));
+  c.classList.add('on'); W=+c.dataset.w; H=+c.dataset.h;
+});
+document.querySelectorAll('#dur .chip').forEach(c=>c.onclick=()=>{
+  document.querySelectorAll('#dur .chip').forEach(x=>x.classList.remove('on'));
+  c.classList.add('on'); S=+c.dataset.s;
+});
+document.querySelectorAll('#mode div').forEach(d=>d.onclick=()=>{
+  document.querySelectorAll('#mode div').forEach(x=>x.classList.remove('on'));
+  d.classList.add('on'); MODE=d.dataset.m;
+  $('#batchrow').style.display = MODE==='batch'?'flex':'none';
+  $('#modehint').textContent = MODE==='batch'
+    ? '오래된 H3은 장시간 단일 생성 시 품질 저하/OOM 위험 — 15초 이하 분할로 N회 생성 후 별도 병합(편집) 권장. 현재 분할 횟수만큼 순차 생성합니다.'
+    : '한 번에 전체 프레임을 생성합니다. 프레임 수는 모델이 자동으로 스냅합니다.';
+});
+
+function refreshStatus(){
+  fetch('/api/jobs').then(r=>r.json()).then(d=>{
+    if(d.comfy_up){ $('#cstat').className='dot on'; $('#ctext').textContent='ComfyUI 준비 완료'; }
+    else { $('#cstat').className='dot off'; $('#ctext').textContent='ComfyUI 꺼짐 — 생성 시 자동 기동'; }
+  }).catch(()=>{ $('#cstat').className='dot off'; $('#ctext').textContent='서버 접속 불가'; });
+}
+refreshStatus(); setInterval(refreshStatus, 10000);
+
+function setJobUI(j){
+  $('#jobbox').style.display='block';
+  $('#result').style.display='none';
+  $('#errmsg').style.display='none';
+  const m=$('#metatext');
+  if(j.status==='queued'||j.status==='starting'){
+    $('#stline').innerHTML='<span class="spin"></span><span class="st">'+(j.status==='starting'?'ComfyUI 기동/입력 준비 중…':'작업 대기 중…')+'</span>';
+    $('#bar').style.width='8%';
+    m.textContent='시드 준비 · 워크플로우 큐 삽입…';
+    $('#stop').disabled=false;
+  } else if(j.status==='running'){
+    const p=j.progress||{};
+    $('#stline').innerHTML='<span class="spin"></span><span class="st">영상 생성 중…</span>';
+    $('#bar').style.width='55%';
+    m.innerHTML='누적 '+ (p.elapsed??0)+'초 · 실행 대기열 '+ (p.queue_running??0) +' · 대기 '+ (p.queue_pending??0) +'<br>시드 '+(j.seed??'-')+' · '+(j.cfg?j.cfg.width+'×'+j.cfg.height+' · 프레임 '+(j.cfg?j.cfg.length:'-'):'');
+    $('#stop').disabled=true;
+  } else if(j.status==='done'){
+    $('#stline').innerHTML='<span class="st" style="color:var(--ok)">✅ 생성 완료</span>';
+    $('#bar').style.width='100%';
+    const dl='/api/download/'+j.id;
+    m.innerHTML='소요 '+j.elapsed+'초 · 시드 '+j.seed+'<br>파일 '+(j.file||'');
+    $('#player').src=dl; $('#result').style.display='block';
+    $('#dl1').href=dl; $('#dl1').download=j.id+'.mp4';
+    $('#dl2').href=dl;
+    $('#stop').disabled=true;
+    clearInterval(timer); timer=null;
+  } else if(j.status==='error'){
+    $('#stline').innerHTML='<span class="st" style="color:var(--err)">❌ 오류</span>';
+    $('#bar').style.width='100%';
+    $('#errmsg').textContent=j.error||'알 수 없는 오류'; $('#errmsg').style.display='block';
+    $('#stop').disabled=true; clearInterval(timer); timer=null;
+  } else if(j.status==='cancelled'){
+    $('#stline').innerHTML='<span class="st" style="color:var(--warn)">■ 중단됨</span>';
+    $('#stop').disabled=true; clearInterval(timer); timer=null;
+  }
+}
+
+$('#go').onclick=async()=>{
+  const prompt=$('#prompt').value.trim();
+  if(prompt.length<3){ alert('프롬프트를 3자 이상 입력하세요'); return; }
+  if(MODE==='batch'){
+    const n=Math.max(2,Math.min(6,parseInt($('#batchn').value)||2));
+    const chunk=Math.max(5,Math.min(15,Math.round(S/n*24)/24*0+Math.min(15,Math.ceil(5/5))));
+    // 분할: 총 S초를 15초 이하 청크로 나눠 순차 생성 (각 청크 = 1 job)
+    const parts=[]; let rem=S;
+    while(rem>0){ const c=Math.min(15,rem); parts.push(c); rem-=c; }
+    $('#stop').disabled=true;
+    for(let i=0;i<parts.length;i++){
+      const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({prompt, width:W, height:H, seconds:parts[i], steps:6,
+          seed:+$('#seed').value, filename:$('#fname').value+'_'+(i+1)+'/'+parts.length})});
+      const d=await r.json();
+      if(!d.ok){ alert('분할 '+ (i+1) +' 실패: '+(d.error||'')); break; }
+      if(!timer) poll(d.job);
+      if(i<parts.length-1) await new Promise(res=>setTimeout(res,1500));
+      if(i===parts.length-1) alert('분할 생성 '+parts.length+'건 큐 추가 완료 (순차 실행). 각 job은 아래에서 완료됨.');
+    }
+    return;
+  }
+  const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({prompt, width:W, height:H, seconds:S, steps:6,
+      seed:+$('#seed').value, filename:$('#fname').value})});
+  const d=await r.json();
+  if(!d.ok){ alert(d.error||'요청 실패'); return; }
+  poll(d.job);
+};
+
+function poll(id){
+  if(timer) clearInterval(timer);
+  timer=setInterval(async()=>{
+    try{
+      const r=await fetch('/api/job/'+id);
+      const d=await r.json();
+      if(d.job) setJobUI(d.job);
+    }catch(e){}
+  },4000);
+}
+
+$('#stop').onclick=async()=>{
+  const id=$('#metatext')?.dataset?.id;
+  const jobs=await (await fetch('/api/jobs')).json();
+  const j=jobs.jobs.find(x=>x.status==='queued'||x.status==='starting');
+  if(j){ await fetch('/api/cancel/'+j.id,{method:'POST'}); setJobUI({...j,status:'cancelled'}); }
+};
+</script>
+</body>
+</html>
