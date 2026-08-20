@@ -319,5 +319,74 @@ def main():
         pass
 
 
+def _lambda_main(environ, start_response):
+    """Vercel WSGI entry — request를 내부 HTTP 핸들러로 라우팅."""
+    path = environ.get("PATH_INFO", "/")
+    method = environ.get("REQUEST_METHOD", "GET")
+    body = b""
+    if environ.get("CONTENT_LENGTH"):
+        n = int(environ["CONTENT_LENGTH"])
+        body = environ.get("wsgi.input", None)
+        body = body.read(n) if body else b""
+
+    # Create a fake socket pair to feed into BaseHTTPRequestHandler
+    import io
+    req_lines = [f"{method} {path} HTTP/1.1", "Host: vercel", "Content-Length: " + str(len(body))]
+    for k, v in environ.items():
+        if k.startswith("HTTP_"):
+            req_lines.append(f"{k[5:].replace('_', '-')}: {v}")
+    req_data = "\r\n".join(req_lines).encode() + b"\r\n\r\n" + body
+
+    class _Resp:
+        def __init__(self):
+            self.status_code = 200
+            self.headers = {}
+            self._buf = io.BytesIO()
+        def send_response(self, code):
+            self.status_code = code
+        def send_header(self, k, v):
+            self.headers[k] = v
+        def end_headers(self):
+            pass
+        def wfile_write(self, data):
+            self._buf.write(data)
+        @property
+        def wfile(self):
+            self._wfile = self
+            return self
+        def write(self, data):
+            self._buf.write(data)
+
+    resp = _Resp()
+    handler = Handler.__new__(Handler)
+    handler.request_version = "HTTP/1.1"
+    handler.command = method
+    handler.path = path
+    handler.rfile = io.BytesIO(req_data)
+    handler.wfile = resp
+    handler.headers = {}
+    handler.server = None
+    handler.client_address = ("vercel", 0)
+    try:
+        if method == "GET":
+            handler.do_GET()
+        elif method == "POST":
+            handler.do_POST()
+        else:
+            handler.send_response(405); handler.end_headers()
+    except Exception as e:
+        resp.status_code = 500
+        resp._buf = io.BytesIO(str(e).encode())
+        resp.headers = {"Content-Type": "text/plain"}
+
+    headers = [(k, v) for k, v in resp.headers.items()]
+    start_response(f"{resp.status_code}", headers)
+    return [resp._buf.getvalue()]
+
+
+def handler(environ, start_response):
+    return _lambda_main(environ, start_response)
+
+
 if __name__ == "__main__":
     main()

@@ -6,14 +6,12 @@
       "use": "@vercel/python",
       "config": {
         "maxLambdaSize": "1mb",
-        "runtime": "python3.12"
+        "runtime": "python3.12",
+        "handler": "server.handler"
       }
     }
   ],
   "rewrites": [
     { "source": "/(.*)", "destination": "/server" }
-  ],
-  "routes": [
-    { "src": "/(.*)", "dest": "/server" }
   ]
 }
