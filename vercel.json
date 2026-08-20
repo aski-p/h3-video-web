@@ -1,17 +1,6 @@
 {
-  "version": 2,
-  "builds": [
-    {
-      "src": "server.py",
-      "use": "@vercel/python",
-      "config": {
-        "maxLambdaSize": "1mb",
-        "runtime": "python3.12",
-        "handler": "server.handler"
-      }
-    }
-  ],
   "rewrites": [
-    { "source": "/(.*)", "destination": "/server" }
+    {"source": "/api/(.*)", "destination": "https://h3-video-web.up.railway.app/api/$1"},
+    {"source": "/(.*)", "destination": "/$1"}
   ]
 }

@@ -1,1 +1,1 @@
-# stdlib only — no external deps
+# 표준 라이브러리만 사용

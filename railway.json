@@ -4,8 +4,10 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python server.py",
+    "startCommand": "python3 server.py",
+    "restartPolicyType": "ALWAYS",
     "healthcheckPath": "/api/jobs",
-    "restartPolicyType": "ALWAYS"
+    "healthcheckTimeout": 60,
+    "numReplicas": 1
   }
 }
