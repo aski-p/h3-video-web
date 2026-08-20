@@ -1,6 +1,19 @@
 {
-  "rewrites": [
-    {"source": "/api/(.*)", "destination": "https://h3-video-web.up.railway.app/api/$1"},
-    {"source": "/(.*)", "destination": "/$1"}
+  "version": 2,
+  "builds": [
+    {
+      "src": "backend_proxy.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/backend"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/$1"
+    }
   ]
 }
