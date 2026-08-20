@@ -8,27 +8,28 @@
 - /api/jobs          → 전체 job 리스트
 - /api/download/{id} → 완료 영상 mp4 서빙 (다운로드)
 - /api/cancel/{id}   → 큐 대기 job 취소
+- /                  → index.html 정적 서빙
 """
 import json
 import os
 import shutil
-import signal
 import subprocess
 import threading
 import time
 import uuid
-import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
-HOST = os.environ.get("H3_HOST", "127.0.0.1")
+HOST = os.environ.get("H3_HOST", "0.0.0.0")
 PORT = int(os.environ.get("H3_PORT", "8300"))
 COMFY = os.environ.get("COMFY_BASE", "http://127.0.0.1:8188")
 ASUI = os.environ.get("ASUI", "aski")
 OUT_DIR = os.environ.get("H3_OUT_DIR", os.path.expanduser("~/h3-web/output"))
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
-SYSTEMCTL_ENV = {"XDG_RUNTIME_DIR": "/run/user/1000", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}
+COMFY_OUT = "/home/aski/minimax-h3/output"
 
-JOBS = {}  # id -> dict
+JOBS = {}
 LOCK = threading.Lock()
 
 
@@ -57,7 +58,6 @@ def comfy_up():
 
 
 def run_asu(cmd, timeout=300, check=True):
-    """sudo -u aski 로 명령 실행 (systemctl user 서비스 제어용)."""
     full = ["sudo", "-n", "-u", ASUI, "bash", "-c", cmd]
     env = dict(os.environ)
     env.update({"XDG_RUNTIME_DIR": "/run/user/1000", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"})
@@ -107,6 +107,21 @@ def make_prompt(text, width, height, length, steps, seed, prefix):
     }
 
 
+def _resolve_output(fname):
+    fname = fname.replace("\\", "/")
+    parts = fname.split("/")
+    cand = os.path.join(COMFY_OUT, *parts)
+    if os.path.exists(cand):
+        return cand
+    import glob
+    hits = glob.glob(os.path.join(COMFY_OUT, "**", parts[-1]), recursive=True)
+    if hits:
+        p = sorted(hits)[-1]
+        if os.access(p, os.R_OK):
+            return p
+    raise RuntimeError(f"출력 파일 미발견 또는 읽기 권한 없음: {fname}")
+
+
 def run_job(job_id, cfg):
     with LOCK:
         JOBS[job_id]["status"] = "starting"
@@ -139,11 +154,10 @@ def run_job(job_id, cfg):
                 if not mp4:
                     raise RuntimeError("완료되었으나 mp4 파일 없음: " + str(files)[:300])
                 fname = mp4[0]
-                src = f"/tmp/ComfyUI_output/{fname}" if False else _resolve_output(fname)
+                src = _resolve_output(fname)
                 dst_dir = os.path.join(OUT_DIR, job_id)
                 os.makedirs(dst_dir, exist_ok=True)
                 dst = os.path.join(dst_dir, fname.split("/")[-1])
-                # aski output을 hermes 가 읽으면 copy, 안 되면 cp via asu
                 if os.access(src, os.R_OK):
                     shutil.copy2(src, dst)
                 else:
@@ -171,30 +185,7 @@ def run_job(job_id, cfg):
         log(f"job {job_id} ERROR: {str(e)[:200]}")
 
 
-def _resolve_output(fname):
-    """ComfyUI 출력 파일 실제 경로 찾기 (aski output dir 우선)."""
-    fname = fname.replace("\\", "/")
-    parts = fname.split("/")
-    base = "/home/aski/minimax-h3/output"
-    cand = os.path.join(base, *parts)
-    if os.path.exists(cand):
-        return cand
-    # fallback: 전체 이름으로 glob (hermes 가 읽을 수 있는 경우에만)
-    import glob
-    hits = glob.glob(os.path.join("/home/aski/minimax-h3/output", "**", parts[-1]), recursive=True)
-    if hits:
-        p = sorted(hits)[-1]
-        # hermes-agent 가 읽을 권한이 있는지 확인
-        if os.access(p, os.R_OK):
-            return p
-    raise RuntimeError(f"출력 파일 미발견 또는 읽기 권한 없음: {fname}")
-
-
-# ---------- HTTP (stdlib, CORS 있음) ----------
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
-
-
+# ---------- HTTP ----------
 def send_json(handler, obj, code=200):
     body = json.dumps(obj, ensure_ascii=False).encode()
     handler.send_response(code)
@@ -221,19 +212,32 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self._cors()
 
+    def _static(self, path):
+        if path in ("/", "/index.html"):
+            fname, ctype = "index.html", "text/html; charset=utf-8"
+        else:
+            fname = path.lstrip("/")
+            ctype = "application/octet-stream"
+            if fname.endswith(".html"): ctype = "text/html; charset=utf-8"
+            elif fname.endswith(".css"): ctype = "text/css"
+            elif fname.endswith(".js"): ctype = "application/javascript"
+        fpath = os.path.join(WEB_DIR, fname)
+        if not os.path.exists(fpath):
+            send_json(self, {"ok": False, "error": "not found"}, 404)
+            return
+        with open(fpath, "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         u = urlparse(self.path)
         p = u.path
-        if p in ("/", "/index.html"):
-            idx = os.path.join(WEB_DIR, "index.html")
-            with open(idx, "rb") as f:
-                body = f.read()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        elif p == "/api/jobs":
+        if p == "/api/jobs":
             with LOCK:
                 items = [dict(j, prompt=j.get("prompt", "")) for j in JOBS.values()]
             items.sort(key=lambda x: x.get("created", 0), reverse=True)
@@ -241,8 +245,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p.startswith("/api/job/"):
             jid = p.split("/")[2]
             with LOCK:
-                j = JOBS.get(jid)
-                j = dict(j) if j else None
+                j = dict(JOBS.get(jid)) if JOBS.get(jid) else None
             send_json(self, {"ok": True, "job": j}, code=200 if j else 404)
         elif p.startswith("/api/download/"):
             jid = p.split("/")[2]
@@ -261,7 +264,7 @@ class Handler(BaseHTTPRequestHandler):
             with open(j["src"], "rb") as f:
                 shutil.copyfileobj(f, self.wfile, length=1024 * 256)
         else:
-            send_json(self, {"ok": False, "error": "not found"}, 404)
+            self._static(p)
 
     def do_POST(self):
         u = urlparse(self.path)

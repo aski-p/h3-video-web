@@ -3,18 +3,17 @@
   "builds": [
     {
       "src": "server.py",
-      "use": "@vercel/python"
+      "use": "@vercel/python",
+      "config": {
+        "maxLambdaSize": "1mb",
+        "runtime": "python3.12"
+      }
     }
   ],
   "rewrites": [
-    {"source": "/api/(.*)", "destination": "/server.py"}
+    { "source": "/(.*)", "destination": "/server" }
   ],
   "routes": [
-    {"src": "/api/(.*)", "dest": "/server.py"},
-    {"src": "/(.*)", "dest": "/"}
-  ],
-  "env": {
-    "COMFY_BASE": "http://192.168.50.213:8188",
-    "H3_OUT_DIR": "/tmp/h3-web-output"
-  }
+    { "src": "/(.*)", "dest": "/server" }
+  ]
 }
