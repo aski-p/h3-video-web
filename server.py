@@ -25,7 +25,7 @@ COMFY = os.environ.get("COMFY_BASE", "http://127.0.0.1:8188")
 ASUI = os.environ.get("ASUI", "aski")
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
 COMFY_OUT = "/home/aski/minimax-h3/output"
-NAS_DIR = "/mnt/comfyui_videos/comfyui/video/h3web"
+NAS_DIR = "/mnt/comfyui_videos/comfyui/video"
 OUT_DIR = os.environ.get("H3_OUT_DIR", os.path.expanduser("~/h3-web/output"))
 
 # H3 모델: 24fps, 17k+5 프레임 그리드, 세그먼트당 ~4초
