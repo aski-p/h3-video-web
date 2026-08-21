@@ -48,18 +48,18 @@ def proxy(environ, start_response):
             return _proxy_response(r, start_response, is_download)
     except urllib.error.HTTPError as e:
         data = e.read()
-        headers = {"Content-Type": "application/json",
-                   "Access-Control-Allow-Origin": "*"}
+        headers = [("Content-Type", "application/json"),
+                   ("Access-Control-Allow-Origin", "*")]
         if is_download:
             cd = e.headers.get("Content-Disposition")
             if cd:
-                headers["Content-Disposition"] = cd
-        start_response(f"{e.code}", list(headers.items()))
+                headers.append(("Content-Disposition", cd))
+        start_response(f"{e.code}", headers)
         return [data]
     except Exception as e:
         err = json.dumps({"ok": False, "error": str(e)}).encode()
-        start_response("502", {"Content-Type": "application/json",
-                                "Access-Control-Allow-Origin": "*"})
+        start_response("502", [("Content-Type", "application/json"),
+                               ("Access-Control-Allow-Origin", "*")])
         return [err]
 
 def handler(environ, start_response):
