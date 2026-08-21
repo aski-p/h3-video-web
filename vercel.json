@@ -2,13 +2,8 @@
   "version": 2,
   "builds": [
     {
-      "src": "backend_proxy.py",
-      "use": "@vercel/python",
-      "config": {
-        "maxLambdaSize": "1mb",
-        "runtime": "python3.12",
-        "handler": "backend_proxy.handler"
-      }
+      "src": "index.html",
+      "use": "@vercel/static-build"
     }
   ],
   "routes": [
