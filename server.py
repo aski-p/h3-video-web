@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""MiniMax H3 영상 생성/다운로드 페이지 서버.
+"""MiniMax H3 영상 생성/다운로드 페이지 서버 v2.
 
-친구 페이지 스타일의 웹 UI + PGX ComfyUI(:8188) 미니맥스 H3 text-to-video+audio 연동.
-- ComfyUI 없으면 systemd user 서비스(minimax-h3-comfyui) 자동 기동
-- /api/generate      → 비동기 영상 생성 시작 (job)
-- /api/job/{id}      → 진행 상태 폴링
-- /api/jobs          → 전체 job 리스트
-- /api/download/{id} → 완료 영상 mp4 서빙 (다운로드)
-- /api/cancel/{id}   → 큐 대기 job 취소
-- /                  → index.html 정적 서빙
+- 30fps 출력 (H.264 리샘플링)
+- 최대 60초 (4초 세그먼트 분할 + ffconcat 스티치)
+- 생성 시간 추정
+- NAS 저장 (원본 보존) + 로컬 다운로드 서빙
+- Negative prompt 지원 (한방에 prompt에 병합)
+- ComfyUI 자동 기동
 """
 import json
 import os
@@ -25,9 +23,16 @@ HOST = os.environ.get("H3_HOST", "0.0.0.0")
 PORT = int(os.environ.get("H3_PORT", "8300"))
 COMFY = os.environ.get("COMFY_BASE", "http://127.0.0.1:8188")
 ASUI = os.environ.get("ASUI", "aski")
-OUT_DIR = os.environ.get("H3_OUT_DIR", os.path.expanduser("~/h3-web/output"))
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
 COMFY_OUT = "/home/aski/minimax-h3/output"
+NAS_DIR = "/mnt/comfyui_videos/comfyui/video/h3web"
+OUT_DIR = os.environ.get("H3_OUT_DIR", os.path.expanduser("~/h3-web/output"))
+
+# H3 모델: 24fps, 17k+5 프레임 그리드, 세그먼트당 ~4초
+SEG_SECONDS = 4
+SEG_FRAMES = snap_len = None  # set below
+MAX_SECONDS = 60
+SEGMENT_EST_SECONDS = 75  # segment당 예상 생성 시간 (초)
 
 JOBS = {}
 LOCK = threading.Lock()
@@ -35,6 +40,12 @@ LOCK = threading.Lock()
 
 def log(msg):
     print(time.strftime("[%H:%M:%S] ") + msg, flush=True)
+
+
+def snap_len(seconds):
+    """seconds를 17k+5 프레임 그리드에 스냅 (24fps 기준)."""
+    raw = max(124, round(seconds * 24))
+    return raw + (5 - (raw % 17)) % 17
 
 
 def comfy_get(path, timeout=15):
@@ -60,7 +71,8 @@ def comfy_up():
 def run_asu(cmd, timeout=300, check=True):
     full = ["sudo", "-n", "-u", ASUI, "bash", "-c", cmd]
     env = dict(os.environ)
-    env.update({"XDG_RUNTIME_DIR": "/run/user/1000", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"})
+    env.update({"XDG_RUNTIME_DIR": "/run/user/1000",
+                "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"})
     p = subprocess.run(full, capture_output=True, text=True, timeout=timeout, env=env)
     if check and p.returncode != 0:
         raise RuntimeError(f"asu cmd failed: {cmd}\n{p.stderr.strip()[:400]}")
@@ -83,18 +95,17 @@ def ensure_comfyui():
     raise RuntimeError("ComfyUI 기동 실패 (300초 대기 초과)")
 
 
-def snap_len(seconds):
-    raw = max(5, round(seconds * 24))
-    return raw + (5 - (raw % 17)) % 17
-
-
-def make_prompt(text, width, height, length, steps, seed, prefix):
+def make_prompt(text, width, height, length, steps, seed, prefix, negative=""):
+    # H3 단일 prompt 노드 → negative를 한방에 병합
+    full_prompt = text
+    if negative:
+        full_prompt = f"{text} (do NOT include: {negative})"
     return {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors", "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "type": "minimax", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_video_vae_fp16.safetensors"}},
         "4": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_audio_vae_fp32.safetensors"}},
-        "5": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["2", 0], "vae": ["3", 0], "prompt": text, "width": width, "height": height, "length": length}},
+        "5": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["2", 0], "vae": ["3", 0], "prompt": full_prompt, "width": width, "height": height, "length": length}},
         "6": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
         "7": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
         "8": {"class_type": "BasicScheduler", "inputs": {"model": ["1", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
@@ -108,7 +119,7 @@ def make_prompt(text, width, height, length, steps, seed, prefix):
 
 
 def _resolve_output(fname):
-    fname = fname.replace("\\", "/")
+    fname = str(fname).replace("\\", "/")
     parts = fname.split("/")
     cand = os.path.join(COMFY_OUT, *parts)
     if os.path.exists(cand):
@@ -122,63 +133,162 @@ def _resolve_output(fname):
     raise RuntimeError(f"출력 파일 미발견 또는 읽기 권한 없음: {fname}")
 
 
+def _copy_to_nas(src_path):
+    """원본 파일을 NAS에 저장. 실패해도 로컬은 유지."""
+    try:
+        os.makedirs(NAS_DIR, exist_ok=True)
+        dst = os.path.join(NAS_DIR, os.path.basename(src_path))
+        if os.access(src_path, os.R_OK):
+            shutil.copy2(src_path, dst)
+        else:
+            run_asu(f"cp '{src_path}' '{dst}' && chmod 644 '{dst}'", timeout=60)
+        log(f"  NAS 저장: {dst}")
+    except Exception as e:
+        log(f"  NAS 저장 실패 (로컬 유지): {e}")
+
+
+def _remux_30fps(src_path, dst_path):
+    """24fps mp4 → 30fps H.264 mp4로 리샘플링 (음성 포함)."""
+    cmd = ["ffmpeg", "-y", "-i", src_path,
+           "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+           "-c:a", "aac", "-b:a", "192k",
+           "-r", "30",
+           dst_path]
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if p.returncode != 0:
+        raise RuntimeError(f"ffmpeg 리샘플링 실패: {p.stderr.strip()[:300]}")
+    log(f"  30fps 변환: {os.path.basename(dst_path)}")
+
+
+def _stitch_segments(seg_files, dst_path):
+    """여러 세그먼트 mp4를 ffconcat으로 이어붙임 (동일 인코딩 → 무손실)."""
+    concat_file = dst_path + ".concat.txt"
+    with open(concat_file, "w") as f:
+        for sf in seg_files:
+            f.write(f"file '{sf}'\n")
+    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file,
+           "-c", "copy", dst_path]
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    os.remove(concat_file)
+    if p.returncode != 0:
+        raise RuntimeError(f"스티치 실패: {p.stderr.strip()[:300]}")
+    log(f"  스티치 완료: {len(seg_files)}개 → {os.path.basename(dst_path)}")
+
+
 def run_job(job_id, cfg):
     with LOCK:
         JOBS[job_id]["status"] = "starting"
     try:
         ensure_comfyui()
-        seed = cfg["seed"] if cfg["seed"] >= 0 else int.from_bytes(os.urandom(6), "big")
-        prefix = cfg["filename"] or "h3web/video"
-        workflow = make_prompt(cfg["prompt"], cfg["width"], cfg["height"], cfg["length"], cfg["steps"], seed, prefix)
-        cid = str(uuid.uuid4())
-        queued = comfy_post("/prompt", {"prompt": workflow, "client_id": cid})
-        if "error" in queued:
-            raise RuntimeError(json.dumps(queued, ensure_ascii=False)[:600])
-        pid = queued["prompt_id"]
+        total_seconds = min(cfg["seconds"], MAX_SECONDS)
+        segments = max(1, round(total_seconds / SEG_SECONDS))
+        seg_frames = snap_len(SEG_SECONDS)
+        total_frames = seg_frames * segments
+        # 생성 시간 추정: segment당 ~75초 (10스텝 기준), 스티치 ~10초
+        est = segments * SEGMENT_EST_SECONDS + 15
         with LOCK:
-            JOBS[job_id].update(status="running", seed=seed, prompt_id=pid, started=time.time())
-        log(f"job {job_id} queued pid={pid} seed={seed}")
-        while True:
-            h = comfy_get(f"/history/{pid}", timeout=30)
-            if pid in h:
-                result = h[pid]
-                status = result.get("status", {})
-                if status.get("status_str") == "error" or not status.get("completed", False):
-                    raise RuntimeError(json.dumps(result, ensure_ascii=False)[:800])
-                files = []
-                for out in result.get("outputs", {}).values():
-                    for key in ("videos", "gifs", "images"):
-                        for f in out.get(key, []):
-                            files.append(f)
-                mp4 = [f for f in files if str(f).lower().endswith(".mp4")] or files
-                if not mp4:
-                    raise RuntimeError("완료되었으나 mp4 파일 없음: " + str(files)[:300])
-                fname = mp4[0]
-                src = _resolve_output(fname)
-                dst_dir = os.path.join(OUT_DIR, job_id)
-                os.makedirs(dst_dir, exist_ok=True)
-                dst = os.path.join(dst_dir, fname.split("/")[-1])
-                if os.access(src, os.R_OK):
-                    shutil.copy2(src, dst)
-                else:
-                    run_asu(f"cp '{src}' '{dst}' && chmod 644 '{dst}'", timeout=60)
-                try:
-                    run_asu(f"chmod 644 '{dst}'", timeout=15, check=False)
-                except Exception:
-                    pass
-                with LOCK:
-                    JOBS[job_id].update(status="done", file=fname, src=dst,
-                                        elapsed=round(time.time() - JOBS[job_id].get("started", time.time()), 1))
-                log(f"job {job_id} done -> {dst}")
-                return
-            q = comfy_get("/queue", timeout=30)
+            JOBS[job_id].update(
+                segments=segments, total_seconds=total_seconds,
+                estimated_seconds=est,
+            )
+        log(f"job {job_id}: {total_seconds}s {segments}개 세그먼트 "
+            f"(각 {SEG_SECONDS}s, {seg_frames}프레임) 예상 {est}초")
+
+        # 각 세그먼트 생성
+        seg_files = []
+        for i in range(segments):
             with LOCK:
                 JOBS[job_id]["progress"] = {
+                    "phase": f"세그먼트 {i+1}/{segments} 생성 중",
                     "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1),
-                    "queue_running": len(q.get("queue_running", [])),
-                    "queue_pending": len(q.get("queue_pending", [])),
                 }
-            time.sleep(8)
+            seed = (cfg["seed"] if cfg["seed"] >= 0 else int.from_bytes(os.urandom(6), "big")) + i
+            prefix = f"h3web/{job_id}_s{i:02d}"
+            workflow = make_prompt(cfg["prompt"], cfg["width"], cfg["height"],
+                                   seg_frames, cfg["steps"], seed, prefix,
+                                   negative=cfg.get("negative", ""))
+            cid = str(uuid.uuid4())
+            queued = comfy_post("/prompt", {"prompt": workflow, "client_id": cid})
+            if "error" in queued:
+                raise RuntimeError(json.dumps(queued, ensure_ascii=False)[:600])
+            pid = queued["prompt_id"]
+            log(f"  seg {i+1}/{segments} queued pid={pid}")
+
+            # 폴링
+            while True:
+                h = comfy_get(f"/history/{pid}", timeout=30)
+                if pid in h:
+                    result = h[pid]
+                    status = result.get("status", {})
+                    if status.get("status_str") == "error" or not status.get("completed", False):
+                        raise RuntimeError(f"seg {i+1} 실패: " + json.dumps(result, ensure_ascii=False)[:800])
+                    files = []
+                    for out in result.get("outputs", {}).values():
+                        for key in ("videos", "gifs", "images"):
+                            for f in out.get(key, []):
+                                if isinstance(f, dict):
+                                    fn = f.get("filename", "")
+                                    sub = f.get("subfolder", "")
+                                    files.append(os.path.join(sub, fn) if sub else fn)
+                                else:
+                                    files.append(str(f))
+                    mp4 = [f for f in files if str(f).lower().endswith(".mp4")] or files
+                    if not mp4:
+                        raise RuntimeError(f"seg {i+1} 완료되었으나 mp4 없음: {str(files)[:300]}")
+                    fname = str(mp4[0])
+                    src = _resolve_output(fname)
+                    dst_dir = os.path.join(OUT_DIR, job_id)
+                    os.makedirs(dst_dir, exist_ok=True)
+                    dst = os.path.join(dst_dir, f"seg_{i:02d}.mp4")
+                    if os.access(src, os.R_OK):
+                        shutil.copy2(src, dst)
+                    else:
+                        run_asu(f"cp '{src}' '{dst}' && chmod 644 '{dst}'", timeout=60)
+                    seg_files.append(dst)
+                    log(f"  seg {i+1}/{segments} 완료 → {dst}")
+                    break
+                q = comfy_get("/queue", timeout=30)
+                with LOCK:
+                    JOBS[job_id]["progress"] = {
+                        "phase": f"세그먼트 {i+1}/{segments} 대기",
+                        "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1),
+                        "queue_running": len(q.get("queue_running", [])),
+                        "queue_pending": len(q.get("queue_pending", [])),
+                    }
+                time.sleep(8)
+
+        # 최종 파일 경로
+        dst_dir = os.path.join(OUT_DIR, job_id)
+        final_local = os.path.join(dst_dir, f"{job_id}.mp4")
+
+        if segments == 1:
+            # 단일 세그먼트: 30fps 리샘플링
+            with LOCK:
+                JOBS[job_id]["progress"] = {"phase": "30fps 변환 중", "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1)}
+            _remux_30fps(seg_files[0], final_local)
+        else:
+            # 다수 세그먼트: 먼저 스티치 → 30fps 변환
+            with LOCK:
+                JOBS[job_id]["progress"] = {"phase": "세그먼트 스티치 중", "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1)}
+            _stitch_segments(seg_files, final_local)
+            with LOCK:
+                JOBS[job_id]["progress"] = {"phase": "30fps 변환 중", "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1)}
+            _remux_30fps(final_local, final_local + ".tmp.mp4")
+            os.replace(final_local + ".tmp.mp4", final_local)
+
+        # NAS에 저장
+        with LOCK:
+            JOBS[job_id]["progress"] = {"phase": "NAS 저장 중", "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1)}
+        _copy_to_nas(final_local)
+
+        with LOCK:
+            JOBS[job_id].update(
+                status="done", file=os.path.basename(final_local), src=final_local,
+                elapsed=round(time.time() - JOBS[job_id].get("started", time.time()), 1),
+                segments=segments, total_seconds=total_seconds,
+            )
+        log(f"job {job_id} done → {final_local} ({segments}seg, {total_seconds}s, 30fps)")
+        return
     except Exception as e:
         with LOCK:
             JOBS[job_id].update(status="error", error=str(e)[:800])
@@ -243,26 +353,34 @@ class Handler(BaseHTTPRequestHandler):
             items.sort(key=lambda x: x.get("created", 0), reverse=True)
             send_json(self, {"ok": True, "jobs": items, "comfy_up": comfy_up()})
         elif p.startswith("/api/job/"):
-            jid = p.split("/")[2]
+            jid = p.split("/")[3]
             with LOCK:
                 j = dict(JOBS.get(jid)) if JOBS.get(jid) else None
             send_json(self, {"ok": True, "job": j}, code=200 if j else 404)
         elif p.startswith("/api/download/"):
-            jid = p.split("/")[2]
+            jid = p.split("/")[3]
+            # 1) JOBS에서 src 확인
             with LOCK:
                 j = JOBS.get(jid)
-            if not j or j.get("status") != "done" or not j.get("src") or not os.path.exists(j["src"]):
-                send_json(self, {"ok": False, "error": "다운로드 가능 영상 없음 (job 미완료)"}, 404)
+            src = j.get("src") if j and j.get("status") == "done" else None
+            # 2) 폴백: JOBS에 없어도 파일 기반 탐색
+            if not src or not os.path.exists(src):
+                src = os.path.join(OUT_DIR, jid, f"{jid}.mp4")
+            if not os.path.exists(src):
+                send_json(self, {"ok": False, "error": f"다운로드 가능 영상 없음 ({jid})"}, 404)
                 return
-            fsize = os.path.getsize(j["src"])
+            fsize = os.path.getsize(src)
             self.send_response(200)
             self.send_header("Content-Type", "video/mp4")
             self.send_header("Content-Length", str(fsize))
             self.send_header("Content-Disposition", f'attachment; filename="{jid}.mp4"')
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            with open(j["src"], "rb") as f:
+            with open(src, "rb") as f:
                 shutil.copyfileobj(f, self.wfile, length=1024 * 256)
+        elif p == "/api/health":
+            send_json(self, {"ok": True, "comfy_up": comfy_up(),
+                             "nas_ok": os.path.isdir(NAS_DIR)})
         else:
             self._static(p)
 
@@ -280,24 +398,38 @@ class Handler(BaseHTTPRequestHandler):
             if len(prompt) < 3:
                 send_json(self, {"ok": False, "error": "프롬프트가 너무 짧습니다"}, 400)
                 return
+            seconds = min(float(data.get("seconds", 5)), MAX_SECONDS)
+            segments = max(1, round(seconds / SEG_SECONDS))
+            est = segments * SEGMENT_EST_SECONDS + 15
             cfg = {
                 "prompt": prompt,
+                "negative": (data.get("negative") or "").strip(),
                 "width": int(data.get("width", 608)),
                 "height": int(data.get("height", 352)),
-                "length": snap_len(float(data.get("seconds", 5))),
+                "seconds": seconds,
                 "steps": int(data.get("steps", 6)),
                 "seed": int(data.get("seed", -1)),
-                "filename": (data.get("filename") or "").strip() or "h3web/video",
+                "filename": "h3web",
             }
             jid = str(uuid.uuid4())[:8]
             with LOCK:
-                JOBS[jid] = {"id": jid, "status": "queued", "created": time.time(),
-                             "cfg": cfg, "prompt": prompt}
+                JOBS[jid] = {
+                    "id": jid, "status": "queued", "created": time.time(),
+                    "cfg": cfg, "prompt": prompt,
+                    "segments": segments, "total_seconds": seconds,
+                    "estimated_seconds": est,
+                }
             threading.Thread(target=run_job, args=(jid, cfg), daemon=True).start()
-            log(f"new job {jid}: {prompt[:50]}... {cfg['width']}x{cfg['height']} len={cfg['length']} steps={cfg['steps']}")
-            send_json(self, {"ok": True, "job": jid})
+            log(f"new job {jid}: {prompt[:50]}... {cfg['width']}x{cfg['height']} "
+                f"{seconds}s {segments}seg steps={cfg['steps']}")
+            send_json(self, {
+                "ok": True, "job": jid,
+                "segments": segments, "total_seconds": seconds,
+                "estimated_seconds": est,
+                "message": f"{segments}개 세그먼트, 예상 {est}초"
+            })
         elif p.startswith("/api/cancel/"):
-            jid = p.split("/")[2]
+            jid = p.split("/")[3]
             with LOCK:
                 j = JOBS.get(jid)
                 if j and j["status"] in ("queued", "starting"):
@@ -311,82 +443,15 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     os.makedirs(WEB_DIR, exist_ok=True)
+    os.makedirs(OUT_DIR, exist_ok=True)
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
-    log(f"H3 웹 서버 시작 http://{HOST}:{PORT} (comfy={COMFY})")
+    log(f"H3 웹 서버 v2 시작 http://{HOST}:{PORT} (comfy={COMFY}, nas={NAS_DIR})")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
 
 
-def _lambda_main(environ, start_response):
-    """Vercel WSGI entry — request를 내부 HTTP 핸들러로 라우팅."""
-    path = environ.get("PATH_INFO", "/")
-    method = environ.get("REQUEST_METHOD", "GET")
-    body = b""
-    if environ.get("CONTENT_LENGTH"):
-        n = int(environ["CONTENT_LENGTH"])
-        body = environ.get("wsgi.input", None)
-        body = body.read(n) if body else b""
-
-    # Create a fake socket pair to feed into BaseHTTPRequestHandler
-    import io
-    req_lines = [f"{method} {path} HTTP/1.1", "Host: vercel", "Content-Length: " + str(len(body))]
-    for k, v in environ.items():
-        if k.startswith("HTTP_"):
-            req_lines.append(f"{k[5:].replace('_', '-')}: {v}")
-    req_data = "\r\n".join(req_lines).encode() + b"\r\n\r\n" + body
-
-    class _Resp:
-        def __init__(self):
-            self.status_code = 200
-            self.headers = {}
-            self._buf = io.BytesIO()
-        def send_response(self, code):
-            self.status_code = code
-        def send_header(self, k, v):
-            self.headers[k] = v
-        def end_headers(self):
-            pass
-        def wfile_write(self, data):
-            self._buf.write(data)
-        @property
-        def wfile(self):
-            self._wfile = self
-            return self
-        def write(self, data):
-            self._buf.write(data)
-
-    resp = _Resp()
-    handler = Handler.__new__(Handler)
-    handler.request_version = "HTTP/1.1"
-    handler.command = method
-    handler.path = path
-    handler.rfile = io.BytesIO(req_data)
-    handler.wfile = resp
-    handler.headers = {}
-    handler.server = None
-    handler.client_address = ("vercel", 0)
-    try:
-        if method == "GET":
-            handler.do_GET()
-        elif method == "POST":
-            handler.do_POST()
-        else:
-            handler.send_response(405); handler.end_headers()
-    except Exception as e:
-        resp.status_code = 500
-        resp._buf = io.BytesIO(str(e).encode())
-        resp.headers = {"Content-Type": "text/plain"}
-
-    headers = [(k, v) for k, v in resp.headers.items()]
-    start_response(f"{resp.status_code}", headers)
-    return [resp._buf.getvalue()]
-
-
-def handler(environ, start_response):
-    return _lambda_main(environ, start_response)
-
-
 if __name__ == "__main__":
     main()
+

@@ -5,6 +5,27 @@ import urllib.error
 
 BACKEND = "http://192.168.50.213:8300"
 
+def _proxy_response(r, start_response, is_download=False):
+    """HTTP response를 stream으로 반환 (다운로드 시 헤더 보존, 메모리 절감)."""
+    headers = [("Content-Type", r.headers.get("Content-Type", "application/json")),
+               ("Access-Control-Allow-Origin", "*")]
+    if is_download:
+        cd = r.headers.get("Content-Disposition")
+        if cd:
+            headers.append(("Content-Disposition", cd))
+        cl = r.headers.get("Content-Length")
+        if cl:
+            headers.append(("Content-Length", cl))
+    start_response(f"{r.status}", headers)
+    chunks = []
+    while True:
+        chunk = r.read(65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return chunks
+
+
 def proxy(environ, start_response):
     path = environ.get("PATH_INFO", "/")
     method = environ.get("REQUEST_METHOD", "GET")
@@ -13,22 +34,25 @@ def proxy(environ, start_response):
         n = int(environ["CONTENT_LENGTH"])
         body = environ.get("wsgi.input", b"").read(n)
 
+    # download 경로인지 확인 (대용량 파일 스트리밍 + 헤더 보존)
+    is_download = path.startswith("/api/download/")
+
     url = BACKEND + path
     req = urllib.request.Request(url, data=body if method == "POST" else None,
                                   method=method,
                                   headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            data = r.read()
-            status = r.status
-            headers = {"Content-Type": r.headers.get("Content-Type", "application/json"),
-                        "Access-Control-Allow-Origin": "*"}
-            start_response(f"{status}", list(headers.items()))
-            return [data]
+        with urllib.request.urlopen(req, timeout=300) as r:
+            return _proxy_response(r, start_response, is_download)
     except urllib.error.HTTPError as e:
         data = e.read()
-        start_response(f"{e.code}", {"Content-Type": "application/json",
-                                      "Access-Control-Allow-Origin": "*"})
+        headers = {"Content-Type": "application/json",
+                   "Access-Control-Allow-Origin": "*"}
+        if is_download:
+            cd = e.headers.get("Content-Disposition")
+            if cd:
+                headers["Content-Disposition"] = cd
+        start_response(f"{e.code}", list(headers.items()))
         return [data]
     except Exception as e:
         err = json.dumps({"ok": False, "error": str(e)}).encode()
@@ -38,3 +62,6 @@ def proxy(environ, start_response):
 
 def handler(environ, start_response):
     return proxy(environ, start_response)
+
+# Vercel Python 빌더는 모듈 최상위 app/application/handler 변수를 요구함
+app = proxy
