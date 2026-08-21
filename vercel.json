@@ -4,6 +4,15 @@
     {
       "src": "build.sh",
       "use": "@vercel/static-build"
+    },
+    {
+      "src": "backend_proxy.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxLambdaSize": "1mb",
+        "runtime": "python3.12",
+        "handler": "backend_proxy.handler"
+      }
     }
   ],
   "routes": [
