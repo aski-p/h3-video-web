@@ -18,7 +18,7 @@
   "routes": [
     {
       "src": "/api/(.*)",
-      "dest": "/backend"
+      "dest": "/backend_proxy.py"
     },
     {
       "src": "/(.*)",
