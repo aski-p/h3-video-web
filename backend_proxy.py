@@ -1,9 +1,11 @@
 """Vercel 백엔드 프록시 — API 요청을 실제 서버로 전달."""
 import json
+import os
 import urllib.request
 import urllib.error
 
-BACKEND = "http://192.168.50.213:8300"
+# 실제 백엔드 URL (네트워크 접근이 필요한 경우 환경변수로 지정)
+BACKEND = os.environ.get("H3_BACKEND", "http://192.168.50.213:8300")
 
 def _proxy_response(r, start_response, is_download=False):
     """HTTP response를 stream으로 반환 (다운로드 시 헤더 보존, 메모리 절감)."""
