@@ -23,6 +23,8 @@ header{display:flex;align-items:center;gap:12px;margin:6px 0 20px;position:relat
 header .logo{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,var(--acc),#7ec98a);display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 2px 8px rgba(78,143,94,.18)}
 header h1{font-size:19px;margin:0;font-weight:700;color:var(--tx)}
 header .sub{font-size:12px;color:var(--tx2);margin-top:2px}
+header .sub2{font-size:10.5px;color:var(--tx2);margin-top:3px;line-height:1.5;opacity:.8}
+header .sub2 b{color:var(--tx);font-weight:600}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--warn);display:inline-block;margin-right:5px}
 .dot.on{background:var(--ok)} .dot.off{background:var(--err)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:18px;margin-bottom:14px;box-shadow:0 1px 4px rgba(45,42,38,.04)}
@@ -164,7 +166,8 @@ footer{margin-top:24px;font-size:11px;color:#b0aaa0;text-align:center;line-heigh
     <div class="logo">🎬</div>
     <div style="flex:1">
       <h1>MiniMax H3 영상 생성</h1>
-      <div class="sub"><span class="dot" id="cstat"></span><span id="ctext">ComfyUI 확인 중…</span> · 텍스트 → 영상+오디오 (30fps 출력)</div>
+      <div class="sub"><span class="dot" id="cstat"></span><span id="ctext">ComfyUI 확인 중…</span></div>
+      <div class="sub2" id="csub"></div>
     </div>
     <!-- Kitbitz 일러스트 장식 -->
     <img class="kit-deco sun" src="/public/sun.svg" alt="">
@@ -379,12 +382,34 @@ function updateEst(){
 }
 updateEst();
 
-// ComfyUI 상태
+// ComfyUI 상세 상태
 function refreshStatus(){
   fetch('/api/jobs').then(r=>r.json()).then(d=>{
-    if(d.comfy_up){ $('#cstat').className='dot on'; $('#ctext').textContent='ComfyUI 준비 완료'; }
-    else { $('#cstat').className='dot off'; $('#ctext').textContent='ComfyUI 꺼짐 — 생성 시 자동 기동'; }
-  }).catch(()=>{ $('#cstat').className='dot off'; $('#ctext').textContent='서버 접속 불가'; });
+    const ci=d.comfy_info;
+    const nas=d.nas_ok;
+    const q=d.queue_len||0;
+    const act=d.active_job;
+    if(d.comfy_up){
+      $('#cstat').className='dot on';
+      $('#ctext').textContent='ComfyUI 준비 완료';
+      let sub='H3 INT8 + Turbo LoRA v4 · 6-step · 30fps';
+      if(ci&&ci.gpu){
+        sub+=` · <b>${ci.gpu.replace(/^NVIDIA /,'')}</b> ${ci.gpu_vram_free_gb||0}/${ci.gpu_vram_total_gb||0}GB`;
+      }
+      sub+=nas?' · NAS ✓':' · NAS ✗';
+      if(act) sub+=` · <b>${act.slice(0,8)}</b> 실행 중`;
+      else if(q>0) sub+=` · 대기 ${q}건`;
+      $('#csub').innerHTML=sub;
+    } else {
+      $('#cstat').className='dot off';
+      $('#ctext').textContent='ComfyUI 꺼짐 — 생성 시 자동 기동';
+      $('#csub').textContent='H3 INT8 + Turbo LoRA v4 · 6-step · 30fps · 자동 기동 대기 중';
+    }
+  }).catch(()=>{
+    $('#cstat').className='dot off';
+    $('#ctext').textContent='서버 접속 불가';
+    $('#csub').textContent='';
+  });
 }
 refreshStatus(); setInterval(refreshStatus, 10000);
 

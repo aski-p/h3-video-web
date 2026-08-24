@@ -261,14 +261,15 @@ def make_prompt(text, width, height, length, steps, seed, prefix, negative="", i
         full_prompt = f"{text} (do NOT include: {base_negative})"
     wf = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors", "weight_dtype": "default"}},
+        "1a": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": "minimax_h3_turbo_v4_step600_ema.safetensors", "strength": 1.0}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "type": "minimax", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_video_vae_fp16.safetensors"}},
         "4": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_audio_vae_fp32.safetensors"}},
         "5": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["2", 0], "vae": ["3", 0], "prompt": full_prompt, "width": width, "height": height, "length": length}},
         "6": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
         "7": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
-        "8": {"class_type": "BasicScheduler", "inputs": {"model": ["1", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
-        "9": {"class_type": "BasicGuider", "inputs": {"model": ["1", 0], "conditioning": ["5", 0]}},
+        "8": {"class_type": "BasicScheduler", "inputs": {"model": ["1a", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
+        "9": {"class_type": "BasicGuider", "inputs": {"model": ["1a", 0], "conditioning": ["5", 0]}},
         "10": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["6", 0], "guider": ["9", 0], "sampler": ["7", 0], "sigmas": ["8", 0], "latent_image": ["5", 1]}},
         "11": {"class_type": "VAEDecode", "inputs": {"samples": ["10", 0], "vae": ["3", 0]}},
         "12": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["10", 0], "vae": ["4", 0]}},
@@ -569,7 +570,25 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 items = [dict(j, prompt=j.get("prompt", "")) for j in JOBS.values()]
             items.sort(key=lambda x: x.get("created", 0), reverse=True)
-            send_json(self, {"ok": True, "jobs": items, "comfy_up": comfy_up()})
+            with QUEUE_LOCK:
+                q_len = len(QUEUE)
+            with LOCK:
+                active_id = ACTIVE[0]
+            # 상세 상태: ComfyUI 버전/GPU, NAS, 활성 job
+            cstats = comfy_get("/system_stats", timeout=3) if comfy_up() else {}
+            send_json(self, {
+                "ok": True, "jobs": items,
+                "comfy_up": comfy_up(),
+                "comfy_info": {
+                    "version": cstats.get("system", {}).get("comfyui_version", ""),
+                    "gpu": (cstats.get("devices") or [{}])[0].get("name", ""),
+                    "gpu_vram_free_gb": round((cstats.get("devices") or [{}])[0].get("vram_free", 0) / 1e9, 1),
+                    "gpu_vram_total_gb": round((cstats.get("devices") or [{}])[0].get("vram_total", 0) / 1e9, 1),
+                } if cstats else None,
+                "nas_ok": nas_ok(),
+                "queue_len": q_len,
+                "active_job": active_id,
+            })
         elif p.startswith("/api/job/"):
             jid = p.split("/")[3]
             with LOCK:
