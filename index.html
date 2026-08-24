@@ -316,13 +316,13 @@ pre.err{
 .imgzone .zicon{font-size:24px;margin-bottom:8px;opacity:.5}
 .imgzone .ztxt{font-size:12.5px;color:var(--tx3);line-height:1.6}
 .imgzone .ztxt small{color:var(--tx4);font-size:11px}
-.imghost{display:flex;align-items:center;gap:14px}
+.imghost{display:flex;align-items:center;gap:14px;background:rgba(255,255,255,0.02);border:1px solid var(--line);border-radius:var(--r-md);padding:12px}
 .imghost img{
   width:80px;height:80px;object-fit:cover;
   border-radius:var(--r-sm);
-  border:1px solid var(--line);background:#000;
+  border:1px solid var(--line);background:#000;flex-shrink:0;
 }
-.imgmeta{font-size:12px;color:var(--tx3);line-height:1.6;flex:1;word-break:break-all}
+.imgmeta{font-size:12px;color:var(--tx3);line-height:1.6;flex:1;word-break:break-all;min-width:0}
 .btn-rmimg{
   background:rgba(255,255,255,0.03);
   color:var(--tx3);
@@ -701,14 +701,19 @@ document.querySelectorAll('.mtab').forEach(t=>t.onclick=()=>{
 
 function setImgUI(state, msg){
   const box=document.getElementById('imgbox');
+  const zone=document.getElementById('imgzone');
   box.style.display='block';
   if(state==='ok'){
-    box.innerHTML=`<div class="imghost"><img id="imprev" src="" alt=""></div>
+    if(zone) zone.style.display='none';
+    box.innerHTML=`<div class="imghost">
+      <img id="imprev" alt="">
       <div class="imgmeta" id="imgmeta"></div>
-      <button class="btn-rmimg" id="rmimg">✕ 삭제</button>`;
+      <button class="btn-rmimg" id="rmimg">✕ 삭제</button>
+    </div>`;
     document.getElementById('imprev').src=URL.createObjectURL(window.__imgBlob||new Blob());
     document.getElementById('rmimg').onclick=clearImg;
   } else if(state==='err'){
+    if(zone) zone.style.display='';
     box.innerHTML=`<span style="color:var(--err)">${msg||'업로드 실패'}</span>
       <button class="btn-rmimg" id="rmimg">✕</button>`;
     document.getElementById('rmimg').onclick=clearImg;
@@ -719,6 +724,8 @@ function setImgUI(state, msg){
 function clearImg(){
   imgNonce=''; imgW=0; imgH=0; imgName=''; window.__imgBlob=null;
   document.getElementById('imgbox').style.display='none';
+  const zone=document.getElementById('imgzone');
+  if(zone) zone.style.display='';
   const inp=document.getElementById('imgfile');
   if(inp) inp.value='';
 }
