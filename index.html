@@ -6,10 +6,10 @@
 <title>MiniMax H3 영상 생성</title>
 <style>
 :root{
-  --bg:#0b0f17; --card:#121826; --card2:#0f1522; --line:#1f2a3d;
-  --tx:#e6edf6; --tx2:#8b98ad; --acc:#4f8cff; --acc2:#2f6fe0;
-  --ok:#3ecf8e; --err:#ff6b6b; --warn:#f5b942;
-  --r:14px;
+  --bg:#faf8f4; --card:#ffffff; --card2:#f5f2ec; --line:#e8e4dc;
+  --tx:#2d2a26; --tx2:#8a857c; --acc:#4e8f5e; --acc2:#3d7a4c;
+  --amber:#d99a3d; --ok:#3d9e6a; --err:#d9534f; --warn:#e0a832;
+  --r:16px;
 }
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
@@ -19,21 +19,22 @@ body{
   -webkit-font-smoothing:antialiased; min-height:100vh;
 }
 .wrap{max-width:720px;margin:0 auto;padding:20px 16px 60px}
-header{display:flex;align-items:center;gap:10px;margin:6px 0 18px}
-header .logo{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--acc),#8a5cff);display:flex;align-items:center;justify-content:center;font-size:18px}
-header h1{font-size:18px;margin:0;font-weight:700}
+header{display:flex;align-items:center;gap:12px;margin:6px 0 20px;position:relative}
+header .logo{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,var(--acc),#7ec98a);display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 2px 8px rgba(78,143,94,.18)}
+header h1{font-size:19px;margin:0;font-weight:700;color:var(--tx)}
 header .sub{font-size:12px;color:var(--tx2);margin-top:2px}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--warn);display:inline-block;margin-right:5px}
 .dot.on{background:var(--ok)} .dot.off{background:var(--err)}
-.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:18px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:18px;margin-bottom:14px;box-shadow:0 1px 4px rgba(45,42,38,.04)}
 .card h2{font-size:13px;color:var(--tx2);margin:0 0 12px;letter-spacing:.4px;text-transform:uppercase;font-weight:600}
 label.fld{display:block;font-size:13px;color:var(--tx2);margin-bottom:6px}
 textarea,input[type=text],input[type=number]{
   width:100%;background:var(--card2);border:1px solid var(--line);color:var(--tx);
   border-radius:10px;padding:11px 12px;font-size:14px;font-family:inherit;outline:none;
+  transition:border-color .15s;
 }
 textarea{min-height:96px;resize:vertical}
-textarea:focus,input:focus{border-color:var(--acc)}
+textarea:focus,input:focus{border-color:var(--acc);background:#fff}
 .row{display:flex;gap:10px}
 .row>*{flex:1}
 .chips{display:flex;flex-wrap:wrap;gap:8px}
@@ -42,8 +43,8 @@ textarea:focus,input:focus{border-color:var(--acc)}
   border-radius:999px;padding:8px 14px;font-size:13px;cursor:pointer;user-select:none;
   transition:all .15s;
 }
-.chip:hover{border-color:#33415c;color:var(--tx)}
-.chip.on{background:rgba(79,140,255,.14);border-color:var(--acc);color:#bcd4ff;font-weight:600}
+.chip:hover{border-color:var(--acc);color:var(--tx)}
+.chip.on{background:rgba(78,143,94,.10);border-color:var(--acc);color:var(--acc2);font-weight:600}
 .hint{font-size:11.5px;color:var(--tx2);margin-top:8px;line-height:1.5}
 .btns{display:flex;gap:10px;margin-top:16px}
 button{
@@ -52,66 +53,87 @@ button{
 }
 button:active{transform:scale(.98)}
 button:disabled{opacity:.45;cursor:not-allowed}
-.btn-go{flex:2;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff}
-.btn-stop{flex:1;background:#2a1420;color:#ff9d9d;border:1px solid #4a2430}
+.btn-go{flex:2;background:linear-gradient(135deg,var(--acc),#6aad7a);color:#fff;box-shadow:0 2px 8px rgba(78,143,94,.2)}
+.btn-stop{flex:1;background:#fdf0ee;color:#c0504d;border:1px solid #f0d4d2}
 #jobbox{display:none}
 .statusline{display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:10px}
 .statusline .st{font-weight:700}
 .bar{height:6px;background:var(--card2);border-radius:99px;overflow:hidden;margin:10px 0 6px}
-.bar i{display:block;height:100%;width:0%;background:linear-gradient(90deg,var(--acc),#8a5cff);transition:width .6s}
+.bar i{display:block;height:100%;width:0%;background:linear-gradient(90deg,var(--acc),#7ec98a);transition:width .6s}
 .meta{font-size:12px;color:var(--tx2);line-height:1.7}
-pre.err{background:#1a1020;border:1px solid #4a2430;color:#ff9d9d;border-radius:10px;padding:10px;font-size:12px;white-space:pre-wrap;word-break:break-all}
+pre.err{background:#fdf0ee;border:1px solid #f0d4d2;color:#c0504d;border-radius:10px;padding:10px;font-size:12px;white-space:pre-wrap;word-break:break-all}
 .result{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
-.result video{width:100%;border-radius:12px;background:#000;max-height:420px}
+.result video{width:100%;border-radius:12px;background:#1a1a1a;max-height:420px}
 .dlrow{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
-.dl{flex:1;min-width:140px;text-align:center;background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:12px;font-size:14px;font-weight:700;color:#bcd4ff;text-decoration:none}
-.dl:hover{border-color:var(--acc)}
-.dldel{background:#2a1420;color:#ff9d9d;border:1px solid #4a2430;cursor:pointer;font-family:inherit}
-.dldel:hover{border-color:#7a3a4a}
-.rbtn.del{color:#ff9d9d;border-color:#4a2430;background:#2a1420}
-.rbtn.del:hover{border-color:#7a3a4a;background:rgba(255,107,107,.08)}
-.promptbox{background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:12.5px;color:var(--tx2);line-height:1.6;white-space:pre-wrap;word-break:break-word;margin-top:10px}
-.promptbox .plbl{display:block;font-size:10.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:#5a6a85;margin-bottom:4px}
-.promptbox .pneg{color:#ff8f8f;margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)}
-.promptbox .pneg .plbl{margin-bottom:2px}
-button.pbtoggle{background:none;border:none;color:var(--acc);font-size:12px;font-weight:700;cursor:pointer;padding:0;font-family:inherit;margin-top:8px}
-button.pbtoggle:hover{text-decoration:underline}
-.spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:sp .8s linear infinite;vertical-align:-2px;margin-right:6px}
+.dl{flex:1;min-width:140px;text-align:center;background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:12px;font-size:14px;font-weight:700;color:var(--acc2);text-decoration:none;transition:all .15s}
+.dl:hover{border-color:var(--acc);background:rgba(78,143,94,.06)}
+.dldel{background:#fdf0ee;color:#c0504d;border:1px solid #f0d4d2;cursor:pointer;font-family:inherit}
+.dldel:hover{border-color:#e0a09d}
+.rbtn.del{color:#c0504d;border-color:#f0d4d2;background:#fdf0ee}
+.rbtn.del:hover{border-color:#e0a09d;background:rgba(217,83,79,.08)}
+
+/* ── 스크립트 팝업 (Modal) ── */
+.modal-overlay{
+  position:fixed;inset:0;background:rgba(45,42,38,.35);backdrop-filter:blur(4px);
+  display:none;align-items:center;justify-content:center;z-index:100;padding:20px;
+}
+.modal-overlay.show{display:flex}
+.modal{
+  background:var(--card);border:1px solid var(--line);border-radius:20px;
+  max-width:560px;width:100%;max-height:80vh;overflow-y:auto;padding:24px;
+  box-shadow:0 8px 32px rgba(45,42,38,.12);position:relative;
+}
+.modal h3{margin:0 0 16px;font-size:15px;font-weight:700;color:var(--tx);display:flex;align-items:center;gap:8px}
+.modal .close-btn{
+  position:absolute;top:14px;right:14px;width:32px;height:32px;border-radius:50%;
+  background:var(--card2);border:1px solid var(--line);color:var(--tx2);
+  font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;
+  transition:all .15s;
+}
+.modal .close-btn:hover{background:var(--line);color:var(--tx)}
+.modal .section{margin-bottom:14px}
+.modal .section:last-child{margin-bottom:0}
+.modal .plbl{display:block;font-size:10.5px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--tx2);margin-bottom:4px}
+.modal .ptext{background:var(--card2);border-radius:10px;padding:12px;font-size:13px;color:var(--tx);line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.modal .ptext.neg{color:#c0504d}
+.modal .ptext.cfg{font-size:12.5px;color:var(--tx2)}
+
+.spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(45,42,38,.15);border-top-color:var(--acc);border-radius:50%;animation:sp .8s linear infinite;vertical-align:-2px;margin-right:6px}
 @keyframes sp{to{transform:rotate(360deg)}}
-.est{display:inline-block;background:rgba(62,207,142,.12);color:var(--ok);border-radius:6px;padding:2px 8px;font-size:12px;font-weight:600;margin-left:8px}
+.est{display:inline-block;background:rgba(78,143,94,.10);color:var(--acc2);border-radius:6px;padding:2px 8px;font-size:12px;font-weight:600;margin-left:8px}
 .mtabs{display:flex;gap:6px;margin-bottom:14px}
 .mtab{
-  flex:1;text-align:center;padding:11px 0;border-radius:11px;cursor:pointer;user-select:none;
-  background:var(--card2);border:1px solid var(--line);color:var(--tx2);
+  flex:1;text-align:center;padding:12px 0;border-radius:14px;cursor:pointer;user-select:none;
+  background:var(--card);border:1px solid var(--line);color:var(--tx2);
   font-size:14px;font-weight:700;transition:all .15s;
 }
-.mtab:hover{border-color:#33415c;color:var(--tx)}
-.mtab.on{background:rgba(79,140,255,.16);border-color:var(--acc);color:#bcd4ff}
+.mtab:hover{border-color:var(--acc);color:var(--tx)}
+.mtab.on{background:rgba(78,143,94,.08);border-color:var(--acc);color:var(--acc2)}
 .mtab .msub{display:block;font-size:10.5px;font-weight:400;opacity:.75;margin-top:2px}
 #imgwrap{margin-top:12px}
 .imgzone{
-  border:1.5px dashed var(--line);border-radius:12px;padding:20px;text-align:center;cursor:pointer;
+  border:1.5px dashed var(--line);border-radius:14px;padding:20px;text-align:center;cursor:pointer;
   transition:all .15s;background:var(--card2);
 }
-.imgzone:hover{border-color:var(--acc);background:rgba(79,140,255,.05)}
+.imgzone:hover{border-color:var(--acc);background:rgba(78,143,94,.04)}
 .imgzone .zicon{font-size:26px;margin-bottom:6px}
 .imgzone .ztxt{font-size:13px;color:var(--tx2);line-height:1.5}
 .imghost{display:flex;align-items:center;gap:12px}
-.imghost img{width:88px;height:88px;object-fit:cover;border-radius:10px;border:1px solid var(--line);background:#000}
+.imghost img{width:88px;height:88px;object-fit:cover;border-radius:12px;border:1px solid var(--line);background:#1a1a1a}
 .imgmeta{font-size:12px;color:var(--tx2);line-height:1.6;flex:1;word-break:break-all}
 .btn-rmimg{
-  background:#2a1420;color:#ff9d9d;border:1px solid #4a2430;border-radius:8px;
+  background:#fdf0ee;color:#c0504d;border:1px solid #f0d4d2;border-radius:8px;
   padding:6px 10px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap;
 }
-.btn-rmimg:hover{border-color:#7a3a4a}
+.btn-rmimg:hover{border-color:#e0a09d}
 .recent{display:grid;gap:10px}
 .ritem{
   display:flex;align-items:center;gap:12px;background:var(--card2);
-  border:1px solid var(--line);border-radius:12px;padding:12px;transition:border-color .15s;
+  border:1px solid var(--line);border-radius:14px;padding:12px;transition:border-color .15s;
 }
-.ritem:hover{border-color:#33415c}
+.ritem:hover{border-color:var(--acc)}
 .rthumb{
-  width:72px;height:44px;border-radius:8px;background:#000;object-fit:cover;flex-shrink:0;
+  width:72px;height:44px;border-radius:8px;background:#1a1a1a;object-fit:cover;flex-shrink:0;
   border:1px solid var(--line);
 }
 .rmeta{flex:1;min-width:0}
@@ -120,23 +142,35 @@ button.pbtoggle:hover{text-decoration:underline}
 .rsub .ok{color:var(--ok)} .rsub .err{color:var(--err)} .rsub .run{color:var(--warn)}
 .rbtn{
   flex-shrink:0;background:var(--card);border:1px solid var(--line);border-radius:10px;
-  padding:8px 14px;font-size:12px;font-weight:700;color:#bcd4ff;text-decoration:none;
+  padding:8px 14px;font-size:12px;font-weight:700;color:var(--acc2);text-decoration:none;
   white-space:nowrap;transition:all .15s;
 }
-.rbtn:hover{border-color:var(--acc);background:rgba(79,140,255,.1)}
+.rbtn:hover{border-color:var(--acc);background:rgba(78,143,94,.06)}
 .rbtn.open{color:var(--tx2)}
 .rempty{font-size:13px;color:var(--tx2);text-align:center;padding:16px 0}
-footer{margin-top:24px;font-size:11px;color:#4a5670;text-align:center;line-height:1.7}
+footer{margin-top:24px;font-size:11px;color:#b0aaa0;text-align:center;line-height:1.7}
+
+/* Kitbitz decorative illustrations */
+.kit-deco{position:absolute;opacity:.5;pointer-events:none}
+.kit-deco.sun{top:-8px;right:0;width:48px;height:48px}
+.kit-deco.cloud{top:6px;right:60px;width:36px;height:36px}
+.kit-deco.leaf{bottom:-4px;left:-6px;width:28px;height:28px;opacity:.35}
+.kit-deco.grass{bottom:-8px;right:12px;width:32px;height:32px;opacity:.3}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <div class="logo">🎬</div>
-    <div>
+    <div style="flex:1">
       <h1>MiniMax H3 영상 생성</h1>
       <div class="sub"><span class="dot" id="cstat"></span><span id="ctext">ComfyUI 확인 중…</span> · 텍스트 → 영상+오디오 (30fps 출력)</div>
     </div>
+    <!-- Kitbitz 일러스트 장식 -->
+    <img class="kit-deco sun" src="/public/sun.svg" alt="">
+    <img class="kit-deco cloud" src="/public/cloud.svg" alt="">
+    <img class="kit-deco leaf" src="/public/leaf.svg" alt="">
+    <img class="kit-deco grass" src="/public/grass.svg" alt="">
   </header>
 
   <!-- 모드 -->
@@ -211,7 +245,7 @@ footer{margin-top:24px;font-size:11px;color:#4a5670;text-align:center;line-heigh
     <div class="hint" style="margin-top:0">
       - 프레임: <b style="color:var(--tx)">30fps</b> (출력) · H.264<br>
       - 샘플링: res_multistep · simple · 6 스텝<br>
-      - 저장: NAS (aski_main/comfyui/video) + 로컬<br>
+      - 저장: NAS (aski_main/comfyui/h3_videos) + 로컬<br>
       - 분할: 4초/개 → 자동 ffconcat 스티치
     </div>
   </div>
@@ -221,7 +255,6 @@ footer{margin-top:24px;font-size:11px;color:#4a5670;text-align:center;line-heigh
     <div class="statusline" id="stline"><span class="spin"></span><span class="st" id="sttext">작업 대기 중…</span></div>
     <div class="bar"><i id="bar"></i></div>
     <div class="meta" id="metatext"></div>
-    <div class="promptbox" id="promptbox" style="display:none"></div>
     <pre class="err" id="errmsg" style="display:none"></pre>
     <div class="result" id="result" style="display:none">
       <video id="player" controls playsinline></video>
@@ -229,6 +262,7 @@ footer{margin-top:24px;font-size:11px;color:#4a5670;text-align:center;line-heigh
         <a class="dl" id="dl1" download>⬇ MP4 다운로드</a>
         <a class="dl" id="dl2" target="_blank" rel="noopener">🔗 새 탭에서 열기</a>
         <button class="dl dldel" id="del1">🗑 삭제</button>
+        <button class="dl" id="viewScript">📝 스크립트</button>
       </div>
     </div>
   </div>
@@ -248,6 +282,15 @@ footer{margin-top:24px;font-size:11px;color:#4a5670;text-align:center;line-heigh
     MiniMax H3 (fl2va) · PGX ComfyUI :8188 · 30fps 출력 · 영상+오디오<br>
     NAS 자동 저장 · h3-web :8300
   </footer>
+</div>
+
+<!-- 스크립트 팝업 -->
+<div class="modal-overlay" id="scriptModal">
+  <div class="modal">
+    <button class="close-btn" id="modalClose">✕</button>
+    <h3>📝 스크립트 / 프롬프트</h3>
+    <div id="modalBody"></div>
+  </div>
 </div>
 
 <script>
@@ -310,7 +353,7 @@ document.getElementById('imgfile').onchange=e=>{
       imgNonce=d.nonce; imgW=d.width||0; imgH=d.height||0; imgName=d.name||f.name;
       setImgUI('ok');
       document.getElementById('imgmeta').textContent=
-        `${imgName} · ${imgW||'?' }×${imgH||'?'}px · ${(f.size/1048576).toFixed(1)}MB`;
+        `${imgName} · ${imgW||'?'}×${imgH||'?'}px · ${(f.size/1048576).toFixed(1)}MB`;
     })
     .catch(e=>setImgUI('err', String(e)));
 };
@@ -380,11 +423,11 @@ function setJobUI(j){
     const nasWarn=(j.nas_saved===false)?'<br><span style="color:var(--warn)">⚠️ NAS 저장 실패 — 로컬에만 저장됨</span>':'';
     m.innerHTML='소요 '+(j.elapsed||'?')+'초 · '+(j.segments||1)+'개 세그먼트 · '+(j.total_seconds||S)+'초 · 30fps<br>'
       +(j.nas_saved===false?'NAS 저장 실패 · ':'NAS 저장 완료 · ')+'파일: '+(j.file||'')+nasWarn;
-    showPrompt(j);
     $('#player').src=dl; $('#result').style.display='block';
     $('#dl1').href=dl; $('#dl1').download=j.id+'.mp4';
     $('#dl2').href=dl;
     $('#del1').onclick=()=>delJob(j.id);
+    $('#viewScript').onclick=()=>showPrompt(j);
     $('#stop').disabled=true;
     clearInterval(timer); timer=null; currentJob=null;
   } else if(j.status==='error'){
@@ -441,19 +484,25 @@ $('#stop').onclick=async()=>{
   if(j){ await fetch('/api/cancel/'+j.id,{method:'POST'}); setJobUI({...j,status:'cancelled'}); }
 };
 
-// 스크립트/프롬프트 보기
+// 스크립트 팝업 (Modal)
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function showPrompt(j){
-  const box=$('#promptbox');
-  if(!j||!j.prompt){ box.style.display='none'; return; }
+  if(!j||!j.prompt) return;
   const c=j.cfg||{};
   const neg=c.negative||j.negative||'';
-  let h=`<span class="plbl">스크립트 / 프롬프트</span>${esc(j.prompt)}`;
-  if(neg) h+=`<div class="pneg"><span class="plbl">배제</span>${esc(neg)}</div>`;
-  if(c.width) h+=`<div class="pneg"><span class="plbl">설정</span>${c.width}×${c.height} · ${j.mode||c.mode||'t2v'} · seed ${c.seed!=null?c.seed:'-1'} · ${j.steps||c.steps||6}스텝 · ${j.segments||1}세그먼트</div>`;
-  box.innerHTML=h;
-  box.style.display='block';
+  let h='';
+  h+='<div class="section"><span class="plbl">스크립트 / 프롬프트</span><div class="ptext">'+esc(j.prompt)+'</div></div>';
+  if(neg) h+='<div class="section"><span class="plbl">배제 (Negative)</span><div class="ptext neg">'+esc(neg)+'</div></div>';
+  if(c.width) h+='<div class="section"><span class="plbl">설정</span><div class="ptext cfg">'+c.width+'×'+c.height+' · '+(j.mode||c.mode||'t2v')+' · seed '+(c.seed!=null?c.seed:'-1')+' · '+(j.steps||c.steps||6)+'스텝 · '+(j.segments||1)+'세그먼트</div></div>';
+  $('#modalBody').innerHTML=h;
+  $('#scriptModal').classList.add('show');
 }
+function closePrompt(){
+  $('#scriptModal').classList.remove('show');
+}
+$('#modalClose').onclick=closePrompt;
+$('#scriptModal').onclick=e=>{ if(e.target===e.currentTarget) closePrompt(); };
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closePrompt(); });
 
 // 삭제
 function delJob(jid){
@@ -462,23 +511,17 @@ function delJob(jid){
     .then(r=>r.json())
     .then(d=>{
       if(!d.ok){ alert(d.error||'삭제 실패'); return; }
-      // player + 결과 카드 정리
       try{$('#player').pause();}catch(e){}
       $('#player').removeAttribute('src');
       $('#result').style.display='none';
-      // jobbox 상태 정리
       $('#jobbox').style.display='none';
       $('#stline').innerHTML='';
       $('#bar').style.width='0%';
       $('#metatext').textContent='';
-      $('#promptbox').style.display='none';
-      // del1 버튼 onclear
       const d1=$('#del1');
       if(d1) d1.onclick=null;
-      // currentJob/timer 정리
       if(currentJob===jid) currentJob=null;
       if(timer){ clearInterval(timer); timer=null; }
-      // stop 버튼 리셋
       $('#stop').disabled=true;
       loadRecent();
     })
