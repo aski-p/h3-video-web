@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """MiniMax H3 영상 생성/다운로드 페이지 서버 v2.
 
-- 30fps 출력 (H.264 리샘플링)
+- 24fps 출력 (H.264 고품질)
 - 최대 60초 (4초 세그먼트 분할 + ffconcat 스티치)
 - 생성 시간 추정
 - NAS 저장 (원본 보존) + 로컬 다운로드 서빙
@@ -350,17 +350,17 @@ def _copy_to_nas(src_path):
         return False
 
 
-def _remux_30fps(src_path, dst_path):
-    """24fps mp4 → 30fps H.264 고품질 mp4 (CRF 16, 음성 포함)."""
+def _remux_24fps(src_path, dst_path):
+    """24fps H.264 고품질 mp4 (CRF 16, 음성 포함)."""
     cmd = ["ffmpeg", "-y", "-i", src_path,
            "-c:v", "libx264", "-preset", "medium", "-crf", "16",
            "-c:a", "aac", "-b:a", "192k",
-           "-r", "30",
+           "-r", "24",
            dst_path]
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if p.returncode != 0:
-        raise RuntimeError(f"ffmpeg 리샘플링 실패: {p.stderr.strip()[:300]}")
-    log(f"  30fps 변환: {os.path.basename(dst_path)}")
+        raise RuntimeError(f"ffmpeg 리인코딩 실패: {p.stderr.strip()[:300]}")
+    log(f"  24fps 변환: {os.path.basename(dst_path)}")
 
 
 def _stitch_segments(seg_files, dst_path):
@@ -459,15 +459,15 @@ def run_job(job_id, cfg):
         final_local = os.path.join(dst_dir, f"{job_id}.mp4")
 
         if segments == 1:
-            # 단일 세그먼트: 30fps 리샘플링
-            update_job(job_id, progress={"phase": "30fps 변환 중", "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1)})
-            _remux_30fps(seg_files[0], final_local)
+            # 단일 세그먼트: 24fps 고품질 리인코딩
+            update_job(job_id, progress={"phase": "24fps 변환 중", "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1)})
+            _remux_24fps(seg_files[0], final_local)
         else:
-            # 다수 세그먼트: 먼저 스티치 → 30fps 변환
+            # 다수 세그먼트: 먼저 스티치 → 24fps 변환
             update_job(job_id, progress={"phase": "세그먼트 스티치 중", "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1)})
             _stitch_segments(seg_files, final_local)
-            update_job(job_id, progress={"phase": "30fps 변환 중", "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1)})
-            _remux_30fps(final_local, final_local + ".tmp.mp4")
+            update_job(job_id, progress={"phase": "24fps 변환 중", "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1)})
+            _remux_24fps(final_local, final_local + ".tmp.mp4")
             os.replace(final_local + ".tmp.mp4", final_local)
 
         # NAS에 저장
@@ -482,7 +482,7 @@ def run_job(job_id, cfg):
             size=fsize,
             nas_saved=nas_success,
         )
-        log(f"job {job_id} done → {final_local} ({segments}seg, {total_seconds}s, 30fps, {fsize//1048576}MB, nas={'OK' if nas_success else 'FAIL'})")
+        log(f"job {job_id} done → {final_local} ({segments}seg, {total_seconds}s, 24fps, {fsize//1048576}MB, nas={'OK' if nas_success else 'FAIL'})")
         return
     except Exception as e:
         update_job(job_id, status="error", error=str(e)[:800])
@@ -750,6 +750,7 @@ class Handler(BaseHTTPRequestHandler):
             seconds = min(float(data.get("seconds", 5)), MAX_SECONDS)
             segments = max(1, round(seconds / SEG_SECONDS))
             est = segments * SEGMENT_EST_SECONDS + 15
+            fname = re.sub(r'[^\w\-]', '_', (data.get("filename") or "video")).strip()[:40] or "video"
             cfg = {
                 "mode": mode,
                 "prompt": prompt,
@@ -759,7 +760,7 @@ class Handler(BaseHTTPRequestHandler):
                 "seconds": seconds,
                 "steps": int(data.get("steps", 6)),
                 "seed": int(data.get("seed", -1)),
-                "filename": "h3web",
+                "filename": fname,
                 "image_name": image_name,
             }
             jid = str(uuid.uuid4())[:8]

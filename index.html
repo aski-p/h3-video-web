@@ -230,13 +230,17 @@ footer{margin-top:24px;font-size:11px;color:#b0aaa0;text-align:center;line-heigh
     <div class="hint">4초씩 분할 생성 후 자동으로 이어붙입니다. 60초 = 15개 세그먼트.</div>
   </div>
 
-  <!-- 시드 -->
+  <!-- 시드 & 파일 이름 -->
   <div class="card">
-    <h2>시드</h2>
+    <h2>시드 &amp; 파일 이름</h2>
     <div class="row">
       <div>
         <label class="fld">시드 (-1 = 랜덤)</label>
         <input type="number" id="seed" value="-1">
+      </div>
+      <div>
+        <label class="fld">파일 이름</label>
+        <input type="text" id="fname" value="video" placeholder="video">
       </div>
     </div>
     <div class="hint">세그먼트마다 시드+1, +2… 순으로 적용되어 연속성이 유지됩니다.</div>
@@ -246,8 +250,11 @@ footer{margin-top:24px;font-size:11px;color:#b0aaa0;text-align:center;line-heigh
   <div class="card">
     <h2>설정</h2>
     <div class="hint" style="margin-top:0">
-      - 프레임: <b style="color:var(--tx)">30fps</b> (출력) · H.264<br>
+      - 프레임: <b style="color:var(--tx)">24fps</b> (출력) · H.264<br>
       - 샘플링: res_multistep · simple · 6 스텝<br>
+      - 체크포인트: minimax_h3_fl2va_pruned_int8_convrot.safetensors<br>
+      - LoRA: minimax_h3_turbo_v4_step600_ema.safetensors (strength 1.0)<br>
+      - 인코더: Qwen3-VL 32B NVFP4 AWQ<br>
       - 저장: NAS (aski_main/comfyui/h3_videos) + 로컬<br>
       - 분할: 4초/개 → 자동 ffconcat 스티치
     </div>
@@ -278,11 +285,12 @@ footer{margin-top:24px;font-size:11px;color:#b0aaa0;text-align:center;line-heigh
   <!-- 최근 작업 -->
   <div class="card" id="recentcard" style="display:none">
     <h2>최근 작업</h2>
+    <div style="font-size:11px;color:var(--tx2);margin-bottom:10px">서버 저장 · 재접속 복원 · 완료 파일 삭제</div>
     <div class="recent" id="recentlist"></div>
   </div>
 
   <footer>
-    MiniMax H3 (fl2va) · PGX ComfyUI :8188 · 30fps 출력 · 영상+오디오<br>
+    MiniMax H3 (fl2va) · PGX ComfyUI :8188 · 24fps 출력 · 영상+오디오<br>
     NAS 자동 저장 · h3-web :8300
   </footer>
 </div>
@@ -392,7 +400,7 @@ function refreshStatus(){
     if(d.comfy_up){
       $('#cstat').className='dot on';
       $('#ctext').textContent='ComfyUI 준비 완료';
-      let sub='H3 INT8 + Turbo LoRA v4 · 6-step · 30fps';
+      let sub='H3 INT8 + Turbo LoRA v4 · 6-step · 24fps';
       if(ci&&ci.gpu){
         sub+=` · <b>${ci.gpu.replace(/^NVIDIA /,'')}</b> ${ci.gpu_vram_free_gb||0}/${ci.gpu_vram_total_gb||0}GB`;
       }
@@ -403,7 +411,7 @@ function refreshStatus(){
     } else {
       $('#cstat').className='dot off';
       $('#ctext').textContent='ComfyUI 꺼짐 — 생성 시 자동 기동';
-      $('#csub').textContent='H3 INT8 + Turbo LoRA v4 · 6-step · 30fps · 자동 기동 대기 중';
+      $('#csub').textContent='H3 INT8 + Turbo LoRA v4 · 6-step · 24fps · 자동 기동 대기 중';
     }
   }).catch(()=>{
     $('#cstat').className='dot off';
@@ -420,7 +428,7 @@ function setJobUI(j){
   $('#errmsg').style.display='none';
   const m=$('#metatext');
   const p=j.progress||{};
-  const phases=['작업 대기','기동 준비','생성 중','스티치','30fps 변환','NAS 저장'];
+  const phases=['작업 대기','기동 준비','생성 중','스티치','24fps 변환','NAS 저장'];
   if(j.status==='queued'){
     $('#stline').innerHTML='<span class="spin"></span><span class="st">작업 대기 중…</span>';
     $('#bar').style.width='5%';
@@ -438,7 +446,7 @@ function setJobUI(j){
     m.innerHTML='누적 '+(p.elapsed||0)+'초 · 예상 '+(j.estimated_seconds||'?')+'초<br>'+
       (j.segments?'세그먼트 '+j.segments+'개 · ':'')+
       (j.total_seconds?j.total_seconds+'초 · ':'')+
-      '30fps 출력';
+      '24fps 출력';
     if(p.queue_running!=null) m.innerHTML+=' · 대기열 '+p.queue_running;
     $('#stop').disabled=true;
   } else if(j.status==='done'){
@@ -446,7 +454,7 @@ function setJobUI(j){
     $('#bar').style.width='100%';
     const dl='/api/download/'+j.id;
     const nasWarn=(j.nas_saved===false)?'<br><span style="color:var(--warn)">⚠️ NAS 저장 실패 — 로컬에만 저장됨</span>':'';
-    m.innerHTML='소요 '+(j.elapsed||'?')+'초 · '+(j.segments||1)+'개 세그먼트 · '+(j.total_seconds||S)+'초 · 30fps<br>'
+    m.innerHTML='소요 '+(j.elapsed||'?')+'초 · '+(j.segments||1)+'개 세그먼트 · '+(j.total_seconds||S)+'초 · 24fps<br>'
       +(j.nas_saved===false?'NAS 저장 실패 · ':'NAS 저장 완료 · ')+'파일: '+(j.file||'')+nasWarn;
     $('#player').src=dl; $('#result').style.display='block';
     $('#dl1').href=dl; $('#dl1').download=j.id+'.mp4';
@@ -473,13 +481,14 @@ $('#go').onclick=async()=>{
   if(MODE==='i2v' && !imgNonce){ alert('I2V 모드에서는 이미지를 먼저 업로드해 주세요'); return; }
   const negative=$('#negative').value.trim();
   const seed=parseInt($('#seed').value)||-1;
+  const fname=$('#fname').value.trim()||'video';
 
   $('#go').disabled=true;
   $('#jobbox').style.display='block';
   $('#stline').innerHTML='<span class="spin"></span><span class="st">요청 중…</span>';
   $('#bar').style.width='2%';
 
-  const body={prompt, negative, width:W, height:H, seconds:S, steps:6, seed, mode:MODE};
+  const body={prompt, negative, width:W, height:H, seconds:S, steps:6, seed, mode:MODE, filename:fname};
   if(MODE==='i2v') body.image=imgNonce;
   const r=await fetch('/api/generate',{
     method:'POST',
@@ -518,7 +527,10 @@ function showPrompt(j){
   let h='';
   h+='<div class="section"><span class="plbl">스크립트 / 프롬프트</span><div class="ptext">'+esc(j.prompt)+'</div></div>';
   if(neg) h+='<div class="section"><span class="plbl">배제 (Negative)</span><div class="ptext neg">'+esc(neg)+'</div></div>';
-  if(c.width) h+='<div class="section"><span class="plbl">설정</span><div class="ptext cfg">'+c.width+'×'+c.height+' · '+(j.mode||c.mode||'t2v')+' · seed '+(c.seed!=null?c.seed:'-1')+' · '+(j.steps||c.steps||6)+'스텝 · '+(j.segments||1)+'세그먼트</div></div>';
+  if(c.width) h+='<div class="section"><span class="plbl">설정</span><div class="ptext cfg">'+c.width+'×'+c.height+' · '+(j.mode||c.mode||'t2v')+' · seed '+(c.seed!=null?c.seed:'-1')+' · '+(j.steps||c.steps||6)+'스텝 · '+(j.segments||1)+'세그먼트 · 24fps<br>'+
+    '체크포인트: minimax_h3_fl2va_pruned_int8_convrot.safetensors<br>'+
+    'LoRA: minimax_h3_turbo_v4_step600_ema.safetensors (1.0)<br>'+
+    '인코더: Qwen3-VL 32B NVFP4 AWQ</div></div>';
   $('#modalBody').innerHTML=h;
   $('#scriptModal').classList.add('show');
 }
@@ -582,6 +594,9 @@ function loadRecent(){
       else if(st==='running'||st==='starting'||st==='queued'){ stTxt='진행 중'; stCls='run'; }
       else { stTxt=st; stCls=''; }
       const size=j.size?fmtSize(j.size):'';
+      const c=j.cfg||{};
+      const res=c.width&&c.height?`${c.width}×${c.height}`:'';
+      const mode=j.mode==='i2v'?'I2V':'T2V';
       const item=document.createElement('div');
       item.className='ritem';
       item.innerHTML=`
@@ -590,17 +605,18 @@ function loadRecent(){
           <div class="rprompt" title="${(j.prompt||'').replace(/"/g,'&quot;')}">${j.prompt||j.id}</div>
           <div class="rsub">
             <span class="${stCls}">${stTxt}</span> · ${fmtAgo(j.created||0)}
+            ${res?' · '+res:''}
             ${j.total_seconds?' · '+j.total_seconds+'초':''}
+            ${mode==='I2V'?' · I2V':''}
             ${size?' · '+size:''}
           </div>
         </div>
         ${st==='done'
-          ?`<a class="rbtn" href="${dl}" download="${j.id}.mp4">⬇ 저장</a>
+          ?`<button class="rbtn pview" title="스크립트 보기">📝</button>
             <a class="rbtn open" href="${dl}" target="_blank">열기</a>
-            <button class="rbtn del">🗑</button>`
+            <button class="rbtn del">삭제</button>`
           :''
         }
-        ${j.prompt?`<button class="rbtn open pview" title="스크립트/프롬프트 보기">📝</button>`:''}
       `;
       const pv=item.querySelector('.pview');
       if(pv) pv.onclick=()=>showPrompt(j);
