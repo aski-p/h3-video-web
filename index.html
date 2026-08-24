@@ -247,6 +247,36 @@ pre.err{
   background:#000;max-height:420px;
   border:1px solid var(--line);
 }
+/* I2V 이미지 프리뷰 → 비디오 전환 */
+.i2v-stage{position:relative;width:100%;border-radius:var(--r-md);overflow:hidden;border:1px solid var(--line);background:#000}
+.i2v-stage video{width:100%;display:block;max-height:420px}
+.i2v-frame{
+  position:absolute;inset:0;
+  background-size:cover;background-position:center;
+  display:flex;align-items:center;justify-content:center;
+  transition:opacity .8s ease;
+  z-index:1;
+}
+.i2v-frame .badge{
+  position:absolute;bottom:12px;left:12px;
+  background:rgba(0,0,0,0.65);backdrop-filter:blur(8px);
+  border:1px solid rgba(255,255,255,0.1);
+  border-radius:999px;padding:4px 12px;
+  font-size:11px;font-weight:510;color:rgba(255,255,255,0.8);
+  letter-spacing:.2px;
+}
+.i2v-frame .fade-hint{
+  position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+  font-size:13px;color:rgba(255,255,255,0.7);
+  background:rgba(0,0,0,0.5);backdrop-filter:blur(8px);
+  padding:6px 16px;border-radius:999px;
+  border:1px solid rgba(255,255,255,0.08);
+  animation:pulse-soft 1.5s ease-in-out infinite;
+}
+@keyframes pulse-soft{
+  0%,100%{opacity:.6}
+  50%{opacity:1}
+}
 .dlrow{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
 .dl{
   flex:1;min-width:130px;text-align:center;
@@ -590,7 +620,10 @@ footer{
     <div class="meta" id="metatext"></div>
     <pre class="err" id="errmsg" style="display:none"></pre>
     <div class="result" id="result" style="display:none">
-      <video id="player" controls playsinline></video>
+      <div class="i2v-stage" id="i2vstage">
+        <video id="player" controls playsinline></video>
+        <div class="i2v-frame" id="i2vframe" style="display:none"></div>
+      </div>
       <div class="dlrow">
         <a class="dl" id="dl1" download>⬇ MP4 다운로드</a>
         <a class="dl" id="dl2" target="_blank" rel="noopener">새 탭에서 열기</a>
@@ -792,6 +825,7 @@ function fmtEta(s){
 function setJobUI(j){
   $('#jobbox').style.display='block';
   $('#result').style.display='none';
+  const i2v=$('#i2vframe'); if(i2v){i2v.style.display='none';i2v.style.opacity='0';i2v.style.backgroundImage='';}
   $('#errmsg').style.display='none';
   const m=$('#metatext');
   const p=j.progress||{};
@@ -835,6 +869,30 @@ function setJobUI(j){
     m.innerHTML='소요 '+(j.elapsed||'?')+'초 · '+stratLine+(j.total_seconds||S)+'초 · 24fps<br>'+
       (j.nas_saved===false?'NAS 저장 실패 · ':'NAS 저장 완료 · ')+'파일: '+(j.file||'')+nasWarn;
     $('#player').src=dl; $('#result').style.display='block';
+    // I2V 모드: 원본 이미지를 2.5초간 보여준 후 자동으로 비디오로 전환
+    if(j.mode==='i2v' && window.__imgBlob){
+      const frame=$('#i2vframe');
+      frame.style.display='flex';
+      frame.style.opacity='1';
+      frame.innerHTML=`
+        <div class="fade-hint">첫 프레임</div>
+        <div class="badge">I2V · ${imgName||'이미지'} → 영상</div>`;
+      frame.style.backgroundImage=`url(${URL.createObjectURL(window.__imgBlob)})`;
+      // 비디오가 준비되면 2.5초 후 페이드아웃
+      const player=$('#player');
+      const fadeTimer=setTimeout(()=>{
+        frame.style.opacity='0';
+        setTimeout(()=>{ frame.style.display='none'; }, 800);
+      }, 2500);
+      player.oncanplay=()=>{
+        // 비디오가 재생 준비되면 타이머가 시작됨 (이미 시작됨)
+      };
+      player.onloadeddata=()=>{
+        // 데이터 로드 확인, 타이머는 이미 진행 중
+      };
+    } else {
+      $('#i2vframe').style.display='none';
+    }
     $('#dl1').href=dl; $('#dl1').download=j.id+'.mp4';
     $('#dl2').href=dl;
     $('#del1').onclick=()=>delJob(j.id);
@@ -930,6 +988,7 @@ function delJob(jid){
       if(!d.ok){ alert(d.error||'삭제 실패'); return; }
       try{$('#player').pause();}catch(e){}
       $('#player').removeAttribute('src');
+      const i2v=$('#i2vframe'); if(i2v){i2v.style.display='none';i2v.style.opacity='0';i2v.style.backgroundImage='';}
       $('#result').style.display='none';
       $('#jobbox').style.display='none';
       $('#stline').innerHTML='';
