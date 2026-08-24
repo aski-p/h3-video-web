@@ -580,6 +580,7 @@ def send_json(handler, obj, code=200):
     handler.send_header("Access-Control-Allow-Origin", "*")
     handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
     handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+    handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)

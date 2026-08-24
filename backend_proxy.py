@@ -11,7 +11,8 @@ BACKEND = os.environ.get("H3_BACKEND", "https://families-eligibility-arising-coo
 def _proxy_response(r, start_response, is_download=False):
     """HTTP response를 stream으로 반환 (다운로드 시 헤더 보존, 메모리 절감)."""
     headers = [("Content-Type", r.headers.get("Content-Type", "application/json")),
-               ("Access-Control-Allow-Origin", "*")]
+               ("Access-Control-Allow-Origin", "*"),
+               ("Cache-Control", "no-store, no-cache, must-revalidate")]
     if is_download:
         cd = r.headers.get("Content-Disposition")
         if cd:
