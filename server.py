@@ -2,11 +2,13 @@
 """MiniMax H3 영상 생성/다운로드 페이지 서버 v2.
 
 - 24fps 출력 (H.264 고품질)
-- 최대 60초 (4초 세그먼트 분할 + ffconcat 스티치)
+- 최대 60초 (세그먼트 분할 + ffconcat 스티치 / 연속 단일 생성 선택 가능)
 - 생성 시간 추정
 - NAS 저장 (원본 보존) + 로컬 다운로드 서빙
 - Negative prompt 지원 (한방에 prompt에 병합)
 - ComfyUI 자동 기동
+- 샘플링 스텝 조절 가능 (기본 6스텝)
+- 생성 방식: 연속 단일 생성 / 세그먼트 분할 선택
 """
 import json
 import os
@@ -30,11 +32,24 @@ COMFY_OUT = "/home/aski/minimax-h3/output"
 NAS_DIR = "/mnt/comfyui_videos/comfyui/h3_videos"
 OUT_DIR = os.environ.get("H3_OUT_DIR", os.path.expanduser("~/h3-web/output"))
 
-# H3 모델: 24fps, 17k+5 프레임 그리드, 세그먼트당 ~4초
-SEG_SECONDS = 4
-SEG_FRAMES = snap_len = None  # set below
+# H3 모델: 24fps, 17k+5 프레임 그리드
 MAX_SECONDS = 60
-SEGMENT_EST_SECONDS = 75  # segment당 예상 생성 시간 (초)
+
+# 세그먼트 길이 (초)
+SEG_CHOICES = (2, 4, 8)
+SEG_SECONDS = 4  # 기본값
+
+# 생성 방식
+STRATEGY_CHOICES = ("single", "split")
+STRATEGY_SINGLE = "single"  # 연속 단일 생성 (장면 연속성 우선)
+STRATEGY_SPLIT = "split"   # 세그먼트 분할 (정확한 길이 우선)
+
+# 샘플링 스텝
+STEPS_MIN, STEPS_MAX, STEPS_DEFAULT = 2, 30, 6
+
+# 예상 시간 계수 (초/4초세그먼트, 6스텝 기준)
+EST_BASE_SECONDS = 75
+EST_STEP_COEF = 8.0  # 스텝당 추가 (6스텝 대비)
 
 JOBS = {}
 LOCK = threading.Lock()
@@ -125,8 +140,10 @@ def queue_worker():
             log(f"job {jid} 실행 시작 (worker)")
             run_job(jid, cfg)
         except Exception as e:
+            import traceback
             update_job(jid, status="error", error=str(e)[:800])
             log(f"job {jid} worker ERROR: {str(e)[:200]}")
+            traceback.print_exc()
         finally:
             with LOCK:
                 ACTIVE[0] = None
@@ -136,10 +153,36 @@ def log(msg):
     print(time.strftime("[%H:%M:%S] ") + msg, flush=True)
 
 
+def _prog(job_id, phase, **extra):
+    """progress 객체: phase + elapsed + pct + eta + (추가 필드)."""
+    j = JOBS.get(job_id) or {}
+    est = j.get("estimated_seconds") or 75
+    now = time.time()
+    elapsed = round(now - j.get("started", now), 1)
+    total = (j.get("segments") or 1) + 3  # 생성 + 스티치 + 24fps + NAS
+    done = extra.get("seg_done", 0) + extra.get("done_phase", 0)
+    pct = min(95.0, round(5 + 85 * done / total, 1))
+    remain = round(est - elapsed, 0)
+    out = {"phase": phase, "elapsed": elapsed, "pct": pct, "eta": max(0, int(remain))}
+    out.update(extra)
+    return out
+
+
 def snap_len(seconds):
     """seconds를 17k+5 프레임 그리드에 스냅 (24fps 기준)."""
     raw = max(124, round(seconds * 24))
     return raw + (5 - (raw % 17)) % 17
+
+
+def estimate_seconds(total_seconds, seg_seconds, strategy, steps):
+    """생성 시간 추정 (초). 6스텝 기준 75초/4초세그먼트."""
+    step_factor = 1.0 + EST_STEP_COEF * (steps - STEPS_DEFAULT) / max(STEPS_DEFAULT, 1)
+    if strategy == STRATEGY_SINGLE:
+        # 단일 세그먼트 (길이 그대로, 1회 생성)
+        n = max(1, total_seconds / 4.0)
+    else:
+        n = max(1, round(total_seconds / max(1, seg_seconds)))
+    return int(round(n * EST_BASE_SECONDS * step_factor)) + 15
 
 
 def comfy_get(path, timeout=15):
@@ -251,31 +294,40 @@ def ensure_comfyui():
     raise RuntimeError("ComfyUI 기동 실패 (300초 대기 초과)")
 
 
-def make_prompt(text, width, height, length, steps, seed, prefix, negative="", image_name=""):
-    """H3 워크플로우. image_name 지정 시 I2V (first_frame), 미지정 시 T2V."""
-    # 항상 텍스트/자막/스크립트 오버레이 제외
+def build_workflow(text, negative, width, height, length, steps, seed, image_name=None, prefix="h3"):
+    """T2V/I2V 워크플로우 — H3 전용. Wan 폴백 제거 (사용자 지정)."""
     base_negative = "text, subtitles, captions, watermark, logo, script overlay, on-screen text, UI elements"
     if negative:
         full_prompt = f"{text} (do NOT include: {base_negative}, {negative})"
     else:
         full_prompt = f"{text} (do NOT include: {base_negative})"
+
+    # ---- H3 워크플로우 (원본) ----
+    lora_name = "minimax_h3_turbo_v4_step600_ema.safetensors"
+    lora_avail = any(
+        os.path.exists(os.path.join(d, lora_name))
+        for d in ["/home/aski/ComfyUI/models/loras",
+                  "/home/aski/ComfyUI/models/loras/split_files/loras"]
+    )
+    model_ref = ["1a", 0] if lora_avail else ["1", 0]
     wf = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors", "weight_dtype": "default"}},
-        "1a": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": "minimax_h3_turbo_v4_step600_ema.safetensors", "strength": 1.0}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "type": "minimax", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_video_vae_fp16.safetensors"}},
         "4": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_audio_vae_fp32.safetensors"}},
         "5": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["2", 0], "vae": ["3", 0], "prompt": full_prompt, "width": width, "height": height, "length": length}},
         "6": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
         "7": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
-        "8": {"class_type": "BasicScheduler", "inputs": {"model": ["1a", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
-        "9": {"class_type": "BasicGuider", "inputs": {"model": ["1a", 0], "conditioning": ["5", 0]}},
+        "8": {"class_type": "BasicScheduler", "inputs": {"model": model_ref, "scheduler": "simple", "steps": steps, "denoise": 1.0}},
+        "9": {"class_type": "BasicGuider", "inputs": {"model": model_ref, "conditioning": ["5", 0]}},
         "10": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["6", 0], "guider": ["9", 0], "sampler": ["7", 0], "sigmas": ["8", 0], "latent_image": ["5", 1]}},
         "11": {"class_type": "VAEDecode", "inputs": {"samples": ["10", 0], "vae": ["3", 0]}},
         "12": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["10", 0], "vae": ["4", 0]}},
         "13": {"class_type": "CreateVideo", "inputs": {"images": ["11", 0], "audio": ["12", 0], "fps": 24.0, "bit_depth": 8}},
         "14": {"class_type": "SaveVideo", "inputs": {"video": ["13", 0], "filename_prefix": prefix, "format": "mp4", "codec": "h264", "encoding": "re-encode", "crf": 18.0}},
     }
+    if lora_avail:
+        wf["1a"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": lora_name, "strength": 1.0}}
     if image_name:
         wf["15"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
         wf["5"]["inputs"]["first_frame"] = ["15", 0]
@@ -382,35 +434,43 @@ def run_job(job_id, cfg):
     try:
         ensure_comfyui()
         total_seconds = min(cfg["seconds"], MAX_SECONDS)
-        segments = max(1, round(total_seconds / SEG_SECONDS))
-        seg_frames = snap_len(SEG_SECONDS)
+        strategy = cfg.get("strategy", STRATEGY_SPLIT)
+        seg_seconds = int(cfg.get("seg_seconds", SEG_SECONDS))
+        if strategy == STRATEGY_SINGLE:
+            # 연속 단일 생성: 길이 그대로 1회 생성 (정확한 길이)
+            segments = 1
+            seg_len = total_seconds
+        else:
+            # 세그먼트 분할: seg_seconds씩 분할 (세그먼트 경계에서 스티치)
+            segments = max(1, round(total_seconds / seg_seconds))
+            seg_len = seg_seconds
+        seg_frames = snap_len(seg_len)
         total_frames = seg_frames * segments
-        # 생성 시간 추정: segment당 ~75초 (10스텝 기준), 스티치 ~10초
-        est = segments * SEGMENT_EST_SECONDS + 15
+        est = estimate_seconds(total_seconds, seg_seconds, strategy, cfg["steps"])
         update_job(job_id, segments=segments, total_seconds=total_seconds,
                    estimated_seconds=est)
-        log(f"job {job_id}: {total_seconds}s {segments}개 세그먼트 "
-            f"(각 {SEG_SECONDS}s, {seg_frames}프레임) 예상 {est}초")
+        log(f"job {job_id}: {total_seconds}s [{strategy}] {segments}개 세그먼트 "
+            f"(각 {seg_len}s, {seg_frames}프레임) steps={cfg['steps']} 예상 {est}초")
 
         # 각 세그먼트 생성
         seg_files = []
         for i in range(segments):
-            update_job(job_id, progress={
-                "phase": f"세그먼트 {i+1}/{segments} 생성 중",
-                "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1),
-            })
+            update_job(job_id, progress=_prog(job_id,
+                f"세그먼트 {i+1}/{segments} 생성 중" if segments > 1 else "영상 생성 중",
+                seg_done=i))
             seed = (cfg["seed"] if cfg["seed"] >= 0 else int.from_bytes(os.urandom(6), "big")) + i
+            update_job(job_id, seed=seed)
             prefix = f"h3web/{job_id}_s{i:02d}"
-            workflow = make_prompt(cfg["prompt"], cfg["width"], cfg["height"],
-                                   seg_frames, cfg["steps"], seed, prefix,
-                                   negative=cfg.get("negative", ""),
-                                   image_name=cfg.get("image_name", ""))
+            workflow = build_workflow(cfg["prompt"], cfg.get("negative", ""), cfg["width"], cfg["height"],
+                                   seg_frames, cfg["steps"], seed,
+                                   image_name=cfg.get("image_name", ""), prefix=prefix)
             cid = str(uuid.uuid4())
             queued = comfy_post("/prompt", {"prompt": workflow, "client_id": cid})
             if "error" in queued:
-                raise RuntimeError(json.dumps(queued, ensure_ascii=False)[:600])
+                err_msg = json.dumps(queued, ensure_ascii=False)
+                raise RuntimeError(err_msg[:600])
             pid = queued["prompt_id"]
-            log(f"  seg {i+1}/{segments} queued pid={pid}")
+            log(f"  seg {i+1}/{segments} queued pid={pid} (H3)")
 
             # 폴링
             while True:
@@ -446,12 +506,10 @@ def run_job(job_id, cfg):
                     log(f"  seg {i+1}/{segments} 완료 → {dst}")
                     break
                 q = comfy_get("/queue", timeout=30)
-                update_job(job_id, progress={
-                    "phase": f"세그먼트 {i+1}/{segments} 대기",
-                    "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1),
-                    "queue_running": len(q.get("queue_running", [])),
-                    "queue_pending": len(q.get("queue_pending", [])),
-                })
+                update_job(job_id, progress=_prog(job_id,
+                    f"세그먼트 {i+1}/{segments} 대기", seg_done=i,
+                    queue_running=len(q.get("queue_running", [])),
+                    queue_pending=len(q.get("queue_pending", []))))
                 time.sleep(8)
 
         # 최종 파일 경로
@@ -460,18 +518,18 @@ def run_job(job_id, cfg):
 
         if segments == 1:
             # 단일 세그먼트: 24fps 고품질 리인코딩
-            update_job(job_id, progress={"phase": "24fps 변환 중", "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1)})
+            update_job(job_id, progress=_prog(job_id, "24fps 변환 중", seg_done=segments, done_phase=1))
             _remux_24fps(seg_files[0], final_local)
         else:
             # 다수 세그먼트: 먼저 스티치 → 24fps 변환
-            update_job(job_id, progress={"phase": "세그먼트 스티치 중", "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1)})
+            update_job(job_id, progress=_prog(job_id, "세그먼트 스티치 중", seg_done=segments, done_phase=1))
             _stitch_segments(seg_files, final_local)
-            update_job(job_id, progress={"phase": "24fps 변환 중", "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1)})
+            update_job(job_id, progress=_prog(job_id, "24fps 변환 중", seg_done=segments, done_phase=2))
             _remux_24fps(final_local, final_local + ".tmp.mp4")
             os.replace(final_local + ".tmp.mp4", final_local)
 
         # NAS에 저장
-        update_job(job_id, progress={"phase": "NAS 저장 중", "elapsed": round(time.time() - JOBS[job_id].get("started", time.time()), 1)})
+        update_job(job_id, progress=_prog(job_id, "NAS 저장 중", seg_done=segments, done_phase=3))
         nas_success = _copy_to_nas(final_local)
 
         fsize = os.path.getsize(final_local)
@@ -748,8 +806,25 @@ class Handler(BaseHTTPRequestHandler):
                     send_json(self, {"ok": False, "error": f"이미지 전송 실패: {e}"}, 500)
                     return
             seconds = min(float(data.get("seconds", 5)), MAX_SECONDS)
-            segments = max(1, round(seconds / SEG_SECONDS))
-            est = segments * SEGMENT_EST_SECONDS + 15
+            strategy = (data.get("strategy") or STRATEGY_SPLIT).strip().lower()
+            if strategy not in STRATEGY_CHOICES:
+                strategy = STRATEGY_SPLIT
+            try:
+                seg_seconds = int(data.get("seg_seconds", SEG_SECONDS))
+            except Exception:
+                seg_seconds = SEG_SECONDS
+            if seg_seconds not in SEG_CHOICES:
+                seg_seconds = SEG_SECONDS
+            if strategy == STRATEGY_SINGLE:
+                segments = 1
+            else:
+                segments = max(1, round(seconds / seg_seconds))
+            try:
+                steps = int(data.get("steps", STEPS_DEFAULT))
+            except Exception:
+                steps = STEPS_DEFAULT
+            steps = max(STEPS_MIN, min(STEPS_MAX, steps))
+            est = estimate_seconds(seconds, seg_seconds, strategy, steps)
             fname = re.sub(r'[^\w\-]', '_', (data.get("filename") or "video")).strip()[:40] or "video"
             cfg = {
                 "mode": mode,
@@ -758,7 +833,9 @@ class Handler(BaseHTTPRequestHandler):
                 "width": int(data.get("width", 608)),
                 "height": int(data.get("height", 352)),
                 "seconds": seconds,
-                "steps": int(data.get("steps", 6)),
+                "strategy": strategy,
+                "seg_seconds": seg_seconds,
+                "steps": steps,
                 "seed": int(data.get("seed", -1)),
                 "filename": fname,
                 "image_name": image_name,
@@ -776,11 +853,13 @@ class Handler(BaseHTTPRequestHandler):
             with QUEUE_LOCK:
                 QUEUE.append(jid)
             log(f"new job {jid} [{mode}]: {prompt[:50]}... {cfg['width']}x{cfg['height']} "
-                f"{seconds}s {segments}seg steps={cfg['steps']}"
+                f"{seconds}s [{strategy}] {segments}seg steps={cfg['steps']}"
                 + (f" img={image_name}" if image_name else ""))
             send_json(self, {
                 "ok": True, "job": jid,
                 "segments": segments, "total_seconds": seconds,
+                "strategy": strategy, "seg_seconds": seg_seconds,
+                "steps": steps,
                 "estimated_seconds": est,
                 "message": f"{segments}개 세그먼트, 예상 {est}초"
             })
