@@ -32,7 +32,15 @@ COMFY_OUT = "/home/aski/minimax-h3/output"
 NAS_DIR = "/mnt/comfyui_videos/comfyui/h3_videos"
 OUT_DIR = os.environ.get("H3_OUT_DIR", os.path.expanduser("~/h3-web/output"))
 
-# H3 모델: 24fps, 17k+5 프레임 그리드
+# MiniMax H3 Eros E3 production profile. Override filenames with env vars when
+# the PGX model directory uses a different revision.
+H3_UNET = os.environ.get("H3_UNET", "minimax_h3_fl2va_pruned_int8_convrot.safetensors")
+H3_CLIP = os.environ.get("H3_CLIP", "qwen3vl_32b_minimax_h3_bf16.safetensors")
+H3_VIDEO_VAE = os.environ.get("H3_VIDEO_VAE", "minimax_h3_video_vae_fp16.safetensors")
+H3_AUDIO_VAE = os.environ.get("H3_AUDIO_VAE", "minimax_h3_audio_vae_fp32.safetensors")
+H3_LORA = os.environ.get("H3_LORA", "minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors")
+
+# H3 model: 24fps, 17k+5 frame grid
 MAX_SECONDS = 60
 
 # 세그먼트 길이 (초)
@@ -303,7 +311,7 @@ def build_workflow(text, negative, width, height, length, steps, seed, image_nam
         full_prompt = f"{text} (do NOT include: {base_negative})"
 
     # ---- H3 워크플로우 (원본) ----
-    lora_name = "minimax_h3_turbo_v4_step600_ema.safetensors"
+    lora_name = H3_LORA
     lora_avail = any(
         os.path.exists(os.path.join(d, lora_name))
         for d in ["/home/aski/ComfyUI/models/loras",
@@ -311,10 +319,10 @@ def build_workflow(text, negative, width, height, length, steps, seed, image_nam
     )
     model_ref = ["1a", 0] if lora_avail else ["1", 0]
     wf = {
-        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors", "weight_dtype": "default"}},
-        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "type": "minimax", "device": "default"}},
-        "3": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_video_vae_fp16.safetensors"}},
-        "4": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_audio_vae_fp32.safetensors"}},
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": H3_UNET, "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": H3_CLIP, "type": "minimax", "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": H3_VIDEO_VAE}},
+        "4": {"class_type": "VAELoader", "inputs": {"vae_name": H3_AUDIO_VAE}},
         "5": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["2", 0], "vae": ["3", 0], "prompt": full_prompt, "width": width, "height": height, "length": length}},
         "6": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
         "7": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},

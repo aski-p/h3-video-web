@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>MiniMax H3 영상 생성</title>
+<title>MiniMax H3 · Eros E3 영상 생성</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 /* ─────────────────────────────────────────────
@@ -487,7 +487,7 @@ footer{
   <header>
     <div class="logo">▶</div>
     <div class="ht">
-      <h1>MiniMax H3 영상 생성</h1>
+      <h1>MiniMax H3 · Eros E3 영상 생성</h1>
       <div class="sub"><span class="dot" id="cstat"></span><span id="ctext">ComfyUI 확인 중…</span></div>
       <div class="sub2" id="csub"></div>
     </div>
@@ -531,14 +531,14 @@ footer{
       <div class="chip" data-w="352" data-h="608">9:16 · 352×608</div>
       <div class="chip" data-w="512" data-h="512">1:1 · 512×512</div>
     </div>
-    <div class="hint">H3 학습 해상도 대역(약 352–608px)에서 가장 안정적입니다.</div>
+    <div class="hint">Eros E3 학습 해상도 대역(약 352–608px)에서 가장 안정적입니다. 16:9 기본값을 권장합니다.</div>
   </div>
 
   <!-- 영상 길이 -->
   <div class="card">
     <h2>영상 길이</h2>
     <div class="chips" id="dur">
-      <div class="chip on" data-s="5">약 5초</div>
+      <div class="chip on" data-s="5">약 5초 · 권장</div>
       <div class="chip" data-s="10">약 10초</div>
       <div class="chip" data-s="12">약 12초</div>
       <div class="chip" data-s="20">약 20초</div>
@@ -603,8 +603,9 @@ footer{
     <div class="hint" style="margin-top:0">
       - 프레임: <b>24fps</b> (출력) · H.264<br>
       - 체크포인트: minimax_h3_fl2va_pruned_int8_convrot.safetensors<br>
-      - LoRA: minimax_h3_turbo_v4_step600_ema.safetensors (strength 1.0)<br>
-      - 인코더: Qwen3-VL 32B NVFP4 AWQ<br>
+      - LoRA: minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors (strength 1.0)<br>
+      - 프로파일: <b>MiniMax H3 Eros E3 · Turbo 6-step</b><br>
+      - 인코더: Qwen3-VL 32B (PGX 로컬)<br>
       - 저장: NAS (aski_main/comfyui/h3_videos) + 로컬<br>
       - 분할: 선택된 세그먼트 길이 → 자동 ffconcat 스티치
     </div>
@@ -649,7 +650,7 @@ footer{
   </div>
 
   <footer>
-    MiniMax H3 (fl2va) · PGX ComfyUI :8188 · 24fps 출력 · 영상+오디오<br>
+    MiniMax H3 Eros E3 (fl2va) · PGX ComfyUI :8188 · 24fps 출력 · 영상+오디오<br>
     NAS 자동 저장 · h3-web :8300
   </footer>
 </div>

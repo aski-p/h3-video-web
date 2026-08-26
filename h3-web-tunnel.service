@@ -1,0 +1,11 @@
+[Unit]
+Description=MiniMax H3 Eros E3 web backend Cloudflare quick tunnel
+After=network-online.target
+
+[Service]
+ExecStart=/home/aski/cloudflared tunnel --url http://127.0.0.1:8300 --no-autoupdate
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
