@@ -798,7 +798,7 @@ function refreshStatus(){
     const act=d.active_job;
     if(d.comfy_up){
       $('#cstat').className='dot on';
-      $('#ctext').textContent='ComfyUI 준비 완료';
+      $('#ctext').textContent='ComfyUI 켜짐 — 준비 완료';
       let sub='H3 INT8 + Turbo LoRA v4 · '+(STEPS||6)+'-step · 24fps';
       if(ci&&ci.gpu){
         sub+=` · <b>${ci.gpu.replace(/^NVIDIA /,'')}</b> ${ci.gpu_vram_free_gb||0}/${ci.gpu_vram_total_gb||0}GB`;

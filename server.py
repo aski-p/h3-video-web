@@ -267,9 +267,10 @@ def comfy_upload_image(data: bytes, filename: str, subfolder: str = "", overwrit
 
 def comfy_up():
     try:
-        comfy_get("/system_stats", timeout=5)
+        comfy_get("/system_stats", timeout=8)
         return True
-    except Exception:
+    except Exception as e:
+        log(f"  comfy_up probe failed: {e}")
         return False
 
 def run_asu(cmd, timeout=300, check=True):
