@@ -1,0 +1,151 @@
+[08:34:33]   job 9개 복원 (/home/aski/hermes-official/home/h3-web/jobs)
+[08:34:33] H3 웹 서버 v2.1 시작 http://0.0.0.0:8300 (comfy=http://127.0.0.1:8188, nas=/mnt/comfyui_videos/comfyui/h3_videos)
+[08:34:44] "GET /api/health HTTP/1.1" 200 -
+[08:46:05]   job 9개 복원 (/home/aski/hermes-official/home/h3-web/jobs)
+[08:46:05] H3 웹 서버 v2.1 시작 http://0.0.0.0:8300 (comfy=http://127.0.0.1:8188, nas=/mnt/comfyui_videos/comfyui/h3_videos)
+[08:46:13] "GET /api/health HTTP/1.1" 200 -
+[08:46:22] new job 7a50283e [t2v]: A white cat walking on a green grass field, sunny ... 512x512 5.0s 1seg steps=10
+[08:46:22] "POST /api/generate HTTP/1.1" 200 -
+[08:46:22] job 7a50283e 실행 시작 (worker)
+[08:46:22] job 7a50283e: 5.0s 1개 세그먼트 (각 4s, 124프레임) 예상 90초
+[08:46:22]   seg 1/1 queued pid=e59d9844-0f44-4ece-a7bb-2b0620acd460
+[08:48:30]   seg 1/1 완료 → /home/aski/hermes-official/home/h3-web/output/7a50283e/seg_00.mp4
+[08:48:31]   30fps 변환: 7a50283e.mp4
+[08:48:31]   직접 NAS 쓰기 실패 ([Errno 1] Operation not permitted: '/mnt/comfyui_videos/comfyui/h3_videos/7a50283e.mp4') -> run_asu 폴백
+[08:48:31]   NAS 저장 실패 (로컬 유지): asu cmd failed: cp '/home/aski/hermes-official/home/h3-web/output/7a50283e/7a50283e.mp4' '/mnt/comfyui_videos/comfyui/h3_videos/7a50283e.mp4' && chmod 644 '/mnt/comfyui_videos/comfyui/h3_videos/7a50283e.mp4'
+cp: '/home/aski/hermes-official/home/h3-web/output/7a50283e/7a50283e.mp4' 상태 정보 확인 불가: 허가 거부
+[08:48:31] job 7a50283e done → /home/aski/hermes-official/home/h3-web/output/7a50283e/7a50283e.mp4 (1seg, 5.0s, 30fps, 3MB, nas=FAIL)
+[09:17:19]   job 10개 복원 (/home/aski/hermes-official/home/h3-web/jobs)
+[09:17:19] H3 웹 서버 v2.1 시작 http://0.0.0.0:8300 (comfy=http://127.0.0.1:8188, nas=/mnt/comfyui_videos/comfyui/h3_videos)
+[09:17:27] "GET /api/health HTTP/1.1" 200 -
+[09:17:38] new job 3fed706d [t2v]: A golden retriever running on a beach at sunset, c... 512x512 5.0s 1seg steps=10
+[09:17:38] "POST /api/generate HTTP/1.1" 200 -
+[09:17:38] job 3fed706d 실행 시작 (worker)
+[09:17:38] job 3fed706d: 5.0s 1개 세그먼트 (각 4s, 124프레임) 예상 90초
+[09:17:38]   seg 1/1 queued pid=57c658d3-a21c-45af-880c-46c5a169932a
+[09:21:22]   seg 1/1 완료 → /home/aski/hermes-official/home/h3-web/output/3fed706d/seg_00.mp4
+[09:21:23]   30fps 변환: 3fed706d.mp4
+[09:21:23]   NAS 저장: /mnt/comfyui_videos/comfyui/h3_videos/3fed706d.mp4
+[09:21:23] job 3fed706d done → /home/aski/hermes-official/home/h3-web/output/3fed706d/3fed706d.mp4 (1seg, 5.0s, 30fps, 0MB, nas=OK)
+[09:37:06] "GET /api/health HTTP/1.1" 200 -
+[09:37:06] new job 5f6c6e10 [t2v]: verify test... 512x512 5.0s 1seg steps=8
+[09:37:06] "POST /api/generate HTTP/1.1" 200 -
+[09:37:06] job 5f6c6e10 실행 시작 (worker)
+[09:37:06] job 5f6c6e10: 5.0s 1개 세그먼트 (각 4s, 124프레임) 예상 90초
+[09:37:06]   seg 1/1 queued pid=fe618c6f-81e7-474c-9a59-90a16d9dcf49
+[09:40:19]   seg 1/1 완료 → /home/aski/hermes-official/home/h3-web/output/5f6c6e10/seg_00.mp4
+[09:40:19]   30fps 변환: 5f6c6e10.mp4
+[09:40:19]   NAS 저장: /mnt/comfyui_videos/comfyui/h3_videos/5f6c6e10.mp4
+[09:40:19] job 5f6c6e10 done → /home/aski/hermes-official/home/h3-web/output/5f6c6e10/5f6c6e10.mp4 (1seg, 5.0s, 30fps, 0MB, nas=OK)
+[15:16:51] "GET /api/download/f2b05059 HTTP/1.1" 200 -
+[15:17:03] "GET / HTTP/1.1" 200 -
+[15:17:04] "GET /favicon.ico HTTP/1.1" 404 -
+[15:17:04] "GET /api/jobs HTTP/1.1" 200 -
+[15:17:04] "GET /api/jobs HTTP/1.1" 200 -
+[15:17:04] "GET /api/download/5f6c6e10 HTTP/1.1" 200 -
+[15:17:04] "GET /api/download/3fed706d HTTP/1.1" 200 -
+[15:17:04] "GET /api/download/3cd5b8c7 HTTP/1.1" 200 -
+[15:17:04] "GET /api/download/911f6103 HTTP/1.1" 200 -
+[15:17:04] "GET /api/download/77e924a6 HTTP/1.1" 200 -
+[15:17:04] "GET /api/download/2df54b5f HTTP/1.1" 200 -
+[15:17:04] "GET /api/download/f2b05059 HTTP/1.1" 200 -
+[15:17:04] "GET /api/download/2866628a HTTP/1.1" 200 -
+[15:17:04] "GET /api/download/7a50283e HTTP/1.1" 200 -
+[15:17:04] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[15:17:05] "GET / HTTP/1.1" 200 -
+[15:17:05] "GET /api/jobs HTTP/1.1" 200 -
+[15:17:05] "GET /api/jobs HTTP/1.1" 200 -
+[15:17:05] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[15:17:05] "GET /api/download/911f6103 HTTP/1.1" 200 -[15:17:05] "GET /api/download/2866628a HTTP/1.1" 200 -
+
+[15:17:05] "GET /api/download/2df54b5f HTTP/1.1" 200 -
+[15:17:05] "GET /api/download/5f6c6e10 HTTP/1.1" 200 -
+[15:17:05] "GET /api/download/3fed706d HTTP/1.1" 200 -
+[15:17:05] "GET /api/download/77e924a6 HTTP/1.1" 200 -
+[15:17:05] "GET /api/download/7a50283e HTTP/1.1" 200 -
+[15:17:05] "GET /api/download/f2b05059 HTTP/1.1" 200 -
+[15:17:05] "GET /api/download/3cd5b8c7 HTTP/1.1" 200 -
+[15:17:15] "GET /api/jobs HTTP/1.1" 200 -
+[15:17:20] "GET /api/jobs HTTP/1.1" 200 -
+[15:17:20] "GET /api/download/3cd5b8c7 HTTP/1.1" 200 -
+[15:17:20] "GET /api/download/911f6103 HTTP/1.1" 200 -
+[15:17:20] "GET /api/download/7a50283e HTTP/1.1" 200 -
+[15:17:20] "GET /api/download/77e924a6 HTTP/1.1" 200 -
+[15:17:20] "GET /api/download/3fed706d HTTP/1.1" 200 -
+[15:17:20] "GET /api/download/f2b05059 HTTP/1.1" 200 -
+[15:17:20] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[15:17:20] "GET /api/download/5f6c6e10 HTTP/1.1" 200 -
+[15:17:21] "GET /api/download/2df54b5f HTTP/1.1" 200 -[15:17:21] "GET /api/download/2866628a HTTP/1.1" 200 -
+
+[15:17:25] "GET /api/jobs HTTP/1.1" 200 -
+[15:17:29] "GET /api/download/f2b05059 HTTP/1.1" 200 -
+[16:20:20] "GET /api/jobs HTTP/1.1" 200 -
+[16:20:20] "GET /api/jobs HTTP/1.1" 200 -
+[16:20:20] "GET /api/download/5f6c6e10 HTTP/1.1" 200 -
+[16:20:20] "GET /api/download/3fed706d HTTP/1.1" 200 -
+[16:20:21] "GET /api/download/7a50283e HTTP/1.1" 200 -
+[16:20:21] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[16:20:21] "GET /api/download/2df54b5f HTTP/1.1" 200 -
+[16:20:21] "GET /api/download/77e924a6 HTTP/1.1" 200 -
+[16:20:21] "GET /api/download/911f6103 HTTP/1.1" 200 -
+[16:20:21] "GET /api/download/f2b05059 HTTP/1.1" 200 -
+[16:20:21] "GET /api/download/3cd5b8c7 HTTP/1.1" 200 -
+[16:20:21] "GET /api/download/2866628a HTTP/1.1" 200 -
+[16:20:22] "GET / HTTP/1.1" 200 -
+[16:20:22] "GET /api/jobs HTTP/1.1" 200 -
+[16:20:22] "GET /api/jobs HTTP/1.1" 200 -
+[16:20:22] "GET /api/download/5f6c6e10 HTTP/1.1" 200 -
+[16:20:22] "GET /api/download/7a50283e HTTP/1.1" 200 -
+[16:20:22] "GET /api/download/3fed706d HTTP/1.1" 200 -
+[16:20:22] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[16:20:22] "GET /api/download/2df54b5f HTTP/1.1" 200 -
+[16:20:22] "GET /api/download/3cd5b8c7 HTTP/1.1" 200 -
+[16:20:22] "GET /api/download/77e924a6 HTTP/1.1" 200 -[16:20:22] "GET /api/download/911f6103 HTTP/1.1" 200 -
+
+[16:20:22] "GET /api/download/f2b05059 HTTP/1.1" 200 -[16:20:22] "GET /api/download/2866628a HTTP/1.1" 200 -
+
+[16:20:22] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[16:20:29] "GET /api/download/f2b05059 HTTP/1.1" 200 -
+[16:20:29] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[16:29:03] "GET /api/jobs HTTP/1.1" 200 -
+[16:29:03] "GET /api/jobs HTTP/1.1" 200 -
+[16:29:04] "GET /api/download/5f6c6e10 HTTP/1.1" 200 -
+[16:29:04] "GET /api/download/77e924a6 HTTP/1.1" 200 -
+[16:29:04] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[16:29:04] "GET /api/download/2df54b5f HTTP/1.1" 200 -
+[16:29:04] "GET /api/download/7a50283e HTTP/1.1" 200 -
+[16:29:04] "GET /api/download/2866628a HTTP/1.1" 200 -[16:29:04] "GET /api/download/3cd5b8c7 HTTP/1.1" 200 -
+
+[16:29:04] "GET /api/download/3fed706d HTTP/1.1" 200 -
+[16:29:04] "GET /api/download/f2b05059 HTTP/1.1" 200 -
+[16:29:04] "GET /api/download/911f6103 HTTP/1.1" 200 -
+[16:29:05] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[16:29:13] "GET /api/jobs HTTP/1.1" 200 -
+[16:29:13] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[16:29:13] "GET /api/download/f2b05059 HTTP/1.1" 200 -
+[18:01:18] "GET / HTTP/1.1" 200 -
+[18:44:27] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[18:44:27] "GET /api/jobs HTTP/1.1" 200 -
+[18:44:27] "GET /api/jobs HTTP/1.1" 200 -
+[18:44:28] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[18:44:28] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[18:44:32] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[18:44:33] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[18:44:37] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[18:44:40] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[18:44:41] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[18:44:42] "GET /api/download/5429e867 HTTP/1.1" 200 -
+[18:44:48] "GET /api/jobs HTTP/1.1" 200 -
+[18:44:48] "GET /api/jobs HTTP/1.1" 200 -
+[18:44:48] "GET /api/download/f2b05059 HTTP/1.1" 200 -
+[19:38:42] "GET /api/jobs HTTP/1.1" 200 -
+[19:38:42] "GET /favicon.ico HTTP/1.1" 404 -
+[19:39:43] "GET /favicon.ico HTTP/1.1" 404 -
+[19:39:43] "GET / HTTP/1.1" 200 -
+[19:40:44] "GET /favicon.ico HTTP/1.1" 404 -
+[19:40:44] "GET / HTTP/1.1" 200 -
+[19:41:45] "GET /favicon.ico HTTP/1.1" 404 -
+[19:41:45] "GET / HTTP/1.1" 200 -
+[19:42:46] "GET /favicon.ico HTTP/1.1" 404 -
+[19:42:47] "GET / HTTP/1.1" 200 -
+[19:43:19] "GET /api/jobs HTTP/1.1" 200 -

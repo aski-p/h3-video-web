@@ -526,12 +526,13 @@ footer{
   <div class="card">
     <h2>화면 비율</h2>
     <div class="chips" id="ar">
-      <div class="chip on" data-w="608" data-h="352">16:9 · 608×352</div>
-      <div class="chip" data-w="448" data-h="512">5:4 · 448×512</div>
-      <div class="chip" data-w="352" data-h="608">9:16 · 352×608</div>
-      <div class="chip" data-w="512" data-h="512">1:1 · 512×512</div>
+      <div class="chip on" data-w="1344" data-h="768">16:9 · 1344×768</div>
+      <div class="chip" data-w="768" data-h="1344">9:16 · 768×1344</div>
+      <div class="chip" data-w="1024" data-h="1024">1:1 · 1024×1024</div>
+      <div class="chip" data-w="1152" data-h="864">4:3 · 1152×864</div>
+      <div class="chip" data-w="864" data-h="1152">3:4 · 864×1152</div>
     </div>
-    <div class="hint">Eros E3 학습 해상도 대역(약 352–608px)에서 가장 안정적입니다. 16:9 기본값을 권장합니다.</div>
+    <div class="hint">출력 해상도 16:9 기본 1344×768. 화면 비율을 선택하면 생성 해상도가 함께 정해집니다.</div>
   </div>
 
   <!-- 영상 길이 -->
@@ -541,6 +542,7 @@ footer{
       <div class="chip on" data-s="5">약 5초 · 권장</div>
       <div class="chip" data-s="10">약 10초</div>
       <div class="chip" data-s="12">약 12초</div>
+      <div class="chip" data-s="15">약 15초</div>
       <div class="chip" data-s="20">약 20초</div>
       <div class="chip" data-s="30">약 30초</div>
       <div class="chip" data-s="60">약 60초</div>
@@ -666,7 +668,7 @@ footer{
 
 <script>
 const $=s=>document.querySelector(s);
-let W=608,H=352,S=5,timer=null,currentJob=null;
+let W=1344,H=768,S=5,timer=null,currentJob=null;
 let STRATEGY='single', SEG_SECONDS=4, STEPS=6;
 
 // 모드 (t2v / i2v)
