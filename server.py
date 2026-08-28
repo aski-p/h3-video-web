@@ -48,7 +48,7 @@ SEG_CHOICES = (2, 4, 8)
 SEG_SECONDS = 4  # 기본값
 
 # 고정 참조 (고정 이미지): 한번 등록하면 서버가 영구 보관 — 삭제 전까지 자동 유지
-REF_DIR = os.path.join(os.path.expanduser("~"), "h3-web", "ref")
+REF_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".h3-web", "ref")
 REF_META = os.path.join(REF_DIR, "meta.json")
 
 # 생성 방식
