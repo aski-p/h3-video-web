@@ -405,8 +405,36 @@ pre.err{
 .modal .close-btn:hover{background:rgba(255,255,255,0.08);color:var(--tx)}
 .modal .section{margin-bottom:14px}
 .modal .section:last-child{margin-bottom:0}
+.plbl{
+  display:inline-flex;align-items:center;justify-content:space-between;gap:8px;
+  font-size:10px;font-weight:590;
+  letter-spacing:.5px;text-transform:uppercase;
+  color:var(--tx4);margin-bottom:5px;
+}
+.copybtn{
+  background:rgba(255,255,255,0.04);
+  border:1px solid var(--line);
+  border-radius:var(--r-sm);
+  color:var(--tx3);
+  font-size:10.5px;font-weight:510;
+  padding:3px 8px;cursor:pointer;
+  font-family:inherit;
+  transition:all .15s;
+  text-transform:none;letter-spacing:0;
+}
+.copybtn:hover{
+  color:var(--tx);
+  border-color:var(--line-hover);
+  background:rgba(255,255,255,0.08);
+}
+.copybtn.copied{
+  color:var(--ok);
+  border-color:rgba(39,166,68,0.3);
+  background:rgba(39,166,68,0.08);
+}
 .modal .plbl{
-  display:block;font-size:10px;font-weight:590;
+  display:inline-flex;align-items:center;justify-content:space-between;gap:8px;
+  font-size:10px;font-weight:590;
   letter-spacing:.5px;text-transform:uppercase;
   color:var(--tx4);margin-bottom:5px;
 }
@@ -416,6 +444,7 @@ pre.err{
   border-radius:var(--r-sm);padding:12px;
   font-size:13px;color:var(--tx2);
   line-height:1.6;white-space:pre-wrap;word-break:break-word;
+  max-height:240px;overflow-y:auto;
 }
 .modal .ptext.neg{color:var(--err)}
 .modal .ptext.cfg{font-size:12px;color:var(--tx3);font-family:var(--mono)}
@@ -967,15 +996,35 @@ function showPrompt(j){
   const c=j.cfg||{};
   const neg=c.negative||j.negative||'';
   let h='';
-  h+='<div class="section"><span class="plbl">스크립트 / 프롬프트</span><div class="ptext">'+esc(j.prompt)+'</div></div>';
-  if(neg) h+='<div class="section"><span class="plbl">배제 (Negative)</span><div class="ptext neg">'+esc(neg)+'</div></div>';
-  if(c.width) h+='<div class="section"><span class="plbl">설정</span><div class="ptext cfg">'+c.width+'×'+c.height+' · '+(j.mode||c.mode||'t2v')+' · '+(c.strategy==='single'?'단일생성':'세그먼트 분할')+' · seed '+(j.seed!=null&&j.seed>=0?j.seed:(c.seed!=null?c.seed:'-1'))+' · '+(j.steps||c.steps||6)+'스텝 · '+(j.segments||1)+'세그먼트 · 24fps<br>'
-    +(c.strategy!=='single'&&c.seg_seconds?' · '+c.seg_seconds+'초/개 · '
-      :'')
-    +'체크포인트: minimax_h3_fl2va_pruned_int8_convrot.safetensors<br>'
-    +'LoRA: minimax_h3_turbo_v4_step600_ema.safetensors (1.0)<br>'
-    +'인코더: Qwen3-VL 32B NVFP4 AWQ</div></div>';
+  h+='<div class="section"><span class="plbl">스크립트 / 프롬프트<button class="copybtn" data-copy="prompt">복사</button></span><div class="ptext" id="ptextP">'+esc(j.prompt)+'</div></div>';
+  if(neg) h+='<div class="section"><span class="plbl">배제 (Negative)<button class="copybtn" data-copy="neg">복사</button></span><div class="ptext neg" id="ptextN">'+esc(neg)+'</div></div>';
+  if(c.width){
+    const cfgLines=[
+      c.width+'×'+c.height+' · '+(j.mode||c.mode||'t2v')+' · '+(c.strategy==='single'?'단일생성':'세그먼트 분할')+' · seed '+(j.seed!=null&&j.seed>=0?j.seed:(c.seed!=null?c.seed:'-1'))+' · '+(j.steps||c.steps||6)+'스텝 · '+(j.segments||1)+'세그먼트 · 24fps'
+    ];
+    if(c.strategy!=='single'&&c.seg_seconds) cfgLines.push((c.seg_seconds)+'초/세그먼트');
+    cfgLines.push('체크포인트: minimax_h3_fl2va_pruned_int8_convrot.safetensors');
+    cfgLines.push('LoRA: minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors (strength 1.0)');
+    cfgLines.push('인코더: Qwen3-VL 32B (PGX 로컬)');
+    cfgLines.push('저장: NAS (aski_main/comfyui/h3_videos) + 로컬');
+    cfgLines.push(c.strategy==='single'?'분할: 단일 생성':'분할: 선택된 세그먼트 길이 → 자동 ffconcat 스티치');
+    h+='<div class="section"><span class="plbl">설정<button class="copybtn" data-copy="cfg">복사</button></span><div class="ptext cfg" id="ptextC">'+cfgLines.map(esc).join('<br>')+'</div></div>';
+  }
   $('#modalBody').innerHTML=h;
+  // 복사 버튼 이벤트 위임
+  $('#modalBody').querySelectorAll('.copybtn').forEach(btn=>{
+    btn.onclick=()=>{
+      const t=btn.dataset.copy;
+      const src=t==='prompt'?'#ptextP':t==='neg'?'#ptextN':'#ptextC';
+      const txt=(document.querySelector(src)||{}).textContent||'';
+      if(!txt) return;
+      navigator.clipboard.writeText(txt).then(()=>{
+        btn.classList.add('copied');
+        btn.textContent='복사됨';
+        setTimeout(()=>{btn.classList.remove('copied');btn.textContent='복사';},1500);
+      }).catch(()=>alert('복사 실패'));
+    };
+  });
   $('#scriptModal').classList.add('show');
 }
 function closePrompt(){
