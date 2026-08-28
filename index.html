@@ -548,7 +548,24 @@ footer{
     </div>
     <input type="file" id="imgfile" accept="image/png,image/jpeg,image/webp,image/bmp" style="display:none">
     <div id="imgbox" style="display:none;margin-top:12px"></div>
-    <div class="hint" id="imgnote">첫 프레임은 선택된 이미지가 됩니다. 화면 비율은 자동으로 맞춰집니다. (T2V일 경우 비활성화)</div>
+    <div class="hint" id="imgnote">첫 프레임은 선택된 이미지가 됩니다. 고정 참조가 등록되어 있으면 이미지 없이도 자동으로 동일 인물을 유지합니다. (T2V일 경우 비활성화)</div>
+  </div>
+
+  <!-- 고정 참조 (인물 고정) — I2V 모드에서만 표시 -->
+  <div class="card" id="refwrap" style="display:none">
+    <h2>고정 참조 (인물 유지)</h2>
+    <div class="hint" style="margin-bottom:10px">
+      참조 이미지를 한 번 등록하면 서버에 <b>영구 보관</b>됩니다. 삭제하지 않는 이상 다음 생성부터 자동으로 동일 인물이 유지되고 배경은 자유롭게 변경됩니다.
+    </div>
+    <div id="refbox" style="display:none;margin-top:8px"></div>
+    <div id="refzone" style="margin-top:8px">
+      <div class="imgzone" id="refzone_inner" style="cursor:pointer">
+        <div class="zicon">+</div>
+        <div class="ztxt">고정 참조 이미지 등록하기<br><small>인물 사진 — 15MB 이하</small></div>
+      </div>
+      <input type="file" id="reffile" accept="image/png,image/jpeg,image/webp,image/bmp" style="display:none">
+    </div>
+    <div class="hint" id="refhint" style="margin-top:8px">등록된 참조가 있으면 I2V 생성 시 자동으로 사용됩니다.</div>
   </div>
 
   <!-- 화면 비율 -->
@@ -761,9 +778,11 @@ document.querySelectorAll('.mtab').forEach(t=>t.onclick=()=>{
   if(MODE==='i2v'){
     document.getElementById('imgwrap').style.display='block';
     document.getElementById('imgnote').style.display='block';
+    document.getElementById('refwrap').style.display='block';
   } else {
     document.getElementById('imgwrap').style.display='none';
     document.getElementById('imgnote').style.display='none';
+    document.getElementById('refwrap').style.display='none';
   }
 });
 
@@ -816,6 +835,62 @@ document.getElementById('imgfile').onchange=e=>{
         `${imgName} · ${imgW||'?'}×${imgH||'?'}px · ${(f.size/1048576).toFixed(1)}MB`;
     })
     .catch(e=>setImgUI('err', String(e)));
+};
+
+// ── 고정 참조 (인물 고정) ──────────────────────────────
+let refActive = false;  // 고정 참조가 등록되어 있는지
+function refRender(){
+  const box = document.getElementById('refbox');
+  const zone = document.getElementById('refzone');
+  const hint = document.getElementById('refhint');
+  if(refActive){
+    box.style.display='block';
+    zone.style.display='none';
+    box.innerHTML=`<div class="imghost">
+      <img id="refprev" src="/api/ref" alt="고정 참조">
+      <div class="imgmeta" id="refmeta"></div>
+      <button class="btn-rmimg" id="refdel">✕ 삭제</button>
+    </div>`;
+    document.getElementById('refdel').onclick=refDelete;
+    fetch('/api/ref/status').then(r=>r.json()).then(d=>{
+      const r=d.ref;
+      if(r) document.getElementById('refmeta').textContent=
+        `${r.name||'인물'} · ${r.w||'?'}×${r.h||'?'}px · ${(r.size/1048576).toFixed(1)}MB`;
+    }).catch(()=>{});
+  } else {
+    box.style.display='none';
+    zone.style.display='';
+  }
+  if(hint) hint.textContent = refActive
+    ? '등록된 참조가 있으면 I2V 생성 시 자동으로 사용됩니다. (인물 유지 · 배경 자유 변경)'
+    : '등록된 참조가 있으면 I2V 생성 시 자동으로 사용됩니다.';
+}
+function refDelete(){
+  if(!confirm('고정 참조를 삭제할까요?')) return;
+  fetch('/api/ref/delete',{method:'POST'})
+    .then(r=>r.json())
+    .then(d=>{ if(d.ok){ refActive=false; refRender(); } });
+}
+document.getElementById('refzone_inner').onclick=()=>document.getElementById('reffile').click();
+document.getElementById('reffile').onchange=e=>{
+  const f=e.target.files[0];
+  if(!f) return;
+  if(f.size>15*1024*1024){ alert('이미지는 15MB 이하만 등록할 수 있습니다'); e.target.value=''; return; }
+  const fd=new FormData();
+  fd.append('file', f, f.name);
+  const box=document.getElementById('refbox');
+  box.style.display='block';
+  document.getElementById('refzone').style.display='none';
+  box.innerHTML='<span class="spin"></span> 고정 참조 등록 중…';
+  fetch('/api/ref/set',{method:'POST', body:fd})
+    .then(r=>r.json())
+    .then(d=>{
+      if(!d.ok){ box.innerHTML=`<span style="color:var(--err)">${d.error||'등록 실패'}</span>`; document.getElementById('refzone').style.display=''; box.style.display='none'; return; }
+      refActive=true;
+      refRender();
+      document.getElementById('reffile').value='';
+    })
+    .catch(err=>{ box.innerHTML=`<span style="color:var(--err)">${String(err)}</span>`; document.getElementById('refzone').style.display=''; box.style.display='none'; });
 };
 
 // ComfyUI 상세 상태
@@ -949,7 +1024,7 @@ function setJobUI(j){
 $('#go').onclick=async()=>{
   const prompt=$('#prompt').value.trim();
   if(prompt.length<3){ alert('프롬프트를 3자 이상 입력하세요'); return; }
-  if(MODE==='i2v' && !imgNonce){ alert('I2V 모드에서는 이미지를 먼저 업로드해 주세요'); return; }
+  if(MODE==='i2v' && !imgNonce && !refActive){ alert('I2V 모드: 이미지를 업로드하거나 고정 참조를 등록해 주세요'); return; }
   const negative=$('#negative').value.trim();
   const seed=parseInt($('#seed').value)||-1;
   const fname=$('#fname').value.trim()||'video';
@@ -960,7 +1035,16 @@ $('#go').onclick=async()=>{
   $('#bar').style.width='2%';
 
   const body={prompt, negative, width:W, height:H, seconds:S, steps:STEPS, strategy:STRATEGY, seg_seconds:SEG_SECONDS, seed, mode:MODE, filename:fname};
-  if(MODE==='i2v') body.image=imgNonce;
+  if(MODE==='i2v'){
+    if(imgNonce){
+      body.image=imgNonce;
+    } else if(refActive){
+      body.ref_mode='fixed';  // 고정 참조 자동 사용 (인물 유지)
+    } else {
+      alert('I2V 모드: 이미지를 업로드하거나 고정 참조를 등록해 주세요');
+      return;
+    }
+  }
   const r=await fetch('/api/generate',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
@@ -1126,6 +1210,11 @@ function loadRecent(){
   }).catch(()=>{});
 }
 loadRecent(); setInterval(loadRecent, 15000);
+
+// 고정 참조 상태 초기화 (페이지 로드 시)
+fetch('/api/ref/status').then(r=>r.json()).then(d=>{
+  if(d.ok && d.ref){ refActive=true; refRender(); }
+}).catch(()=>{});
 </script>
 </body>
 </html>

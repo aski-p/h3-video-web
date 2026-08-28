@@ -47,6 +47,10 @@ MAX_SECONDS = 60
 SEG_CHOICES = (2, 4, 8)
 SEG_SECONDS = 4  # 기본값
 
+# 고정 참조 (고정 이미지): 한번 등록하면 서버가 영구 보관 — 삭제 전까지 자동 유지
+REF_DIR = os.path.join(os.path.expanduser("~"), "h3-web", "ref")
+REF_META = os.path.join(REF_DIR, "meta.json")
+
 # 생성 방식
 STRATEGY_CHOICES = ("single", "split")
 STRATEGY_SINGLE = "single"  # 연속 단일 생성 (장면 연속성 우선)
@@ -596,6 +600,51 @@ def _gc_uploads(keep=None):
                 del UPLOADED[k]
 
 
+def _ref_path():
+    return os.path.join(REF_DIR, "ref.png")
+
+
+def _load_ref():
+    """고정 참조 이미지 존재 여부 + meta 반환. 없으면 None."""
+    meta_f = REF_META
+    if not os.path.isfile(meta_f) or not os.path.isfile(_ref_path()):
+        return None
+    try:
+        with open(meta_f) as f:
+            m = json.load(f)
+    except Exception:
+        return None
+    return {
+        "name": m.get("name", ""),
+        "w": m.get("w", 0), "h": m.get("h", 0),
+        "size": m.get("size", 0), "ts": m.get("ts", 0),
+    }
+
+
+def _save_ref(data: bytes, w: int, h: int, name: str):
+    """고정 참조 이미지 영구 저장 (삭제 전까지 유지)."""
+    os.makedirs(REF_DIR, exist_ok=True)
+    with open(_ref_path(), "wb") as f:
+        f.write(data)
+    meta = {"name": name, "w": w, "h": h, "size": len(data), "ts": time.time()}
+    with open(REF_META, "w") as f:
+        json.dump(meta, f, ensure_ascii=False)
+    return meta
+
+
+def _delete_ref():
+    try:
+        if os.path.isfile(_ref_path()):
+            os.remove(_ref_path())
+    except Exception:
+        pass
+    try:
+        if os.path.isfile(REF_META):
+            os.remove(REF_META)
+    except Exception:
+        pass
+
+
 def send_json(handler, obj, code=200):
     body = json.dumps(obj, ensure_ascii=False).encode()
     handler.send_response(code)
@@ -676,6 +725,25 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 j = dict(JOBS.get(jid)) if JOBS.get(jid) else None
             send_json(self, {"ok": True, "job": j}, code=200 if j else 404)
+        elif p.startswith("/api/ref/status"):
+            # GET /api/ref/status — 고정 참조 메타데이터만
+            ref = _load_ref()
+            send_json(self, {"ok": True, "ref": ref})
+        elif p.startswith("/api/ref"):
+            # GET /api/ref — 고정 참조 이미지 byte 반환 (없으면 404)
+            ref = _load_ref()
+            if not ref:
+                send_json(self, {"ok": False, "ref": None}, 404)
+                return
+            fsize = os.path.getsize(_ref_path())
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(fsize))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with open(_ref_path(), "rb") as f:
+                self.wfile.write(f.read())
         elif p.startswith("/api/download/"):
             jid = p.split("/")[3]
             # 1) JOBS에서 src 확인
@@ -789,6 +857,68 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         p = u.path
+        if p == "/api/ref/set":
+            # 고정 참조 등록 (multipart/form-data: file=이미지)
+            ctype = self.headers.get("Content-Type", "")
+            clen = int(self.headers.get("Content-Length", 0))
+            if clen > MAX_UPLOAD_BYTES:
+                self.rfile.read(clen)
+                send_json(self, {"ok": False, "error": f"파일 초과 (최대 {MAX_UPLOAD_BYTES//1048576}MB)"}, 400)
+                return
+            raw = self.rfile.read(clen) if clen else b""
+            if not raw:
+                send_json(self, {"ok": False, "error": "빈 요청"}, 400)
+                return
+            data = None
+            fname = "ref.png"
+            if ctype.startswith("multipart/form-data"):
+                m = re.search(r"boundary=(\"?)([^\";]+)\1", ctype)
+                if not m:
+                    send_json(self, {"ok": False, "error": "boundary 없음"}, 400)
+                    return
+                boundary = ("--" + m.group(2)).encode()
+                for part in raw.split(boundary):
+                    if b"Content-Disposition" not in part:
+                        continue
+                    head, _, body = part.partition(b"\r\n\r\n")
+                    body = body.rstrip(b"\r\n")
+                    hm = re.search(rb'name="([^"]*)"', head)
+                    fm = re.search(rb'filename="([^"]*)"', head)
+                    name = hm.group(1).decode() if hm else ""
+                    if name == "file" and body:
+                        fname = fm.group(1).decode() if fm else "ref.png"
+                        data = body
+                        break
+                if data is None:
+                    send_json(self, {"ok": False, "error": "file 필드 없음"}, 400)
+                    return
+            else:
+                data = raw
+                disp = self.headers.get("Content-Disposition", "")
+                fm = re.search(r'filename="?([^";]+)"?', disp)
+                if fm:
+                    fname = fm.group(1)
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+                send_json(self, {"ok": False, "error": "지원 형식: png/jpg/webp/bmp"}, 400)
+                return
+            w = h = 0
+            try:
+                import io
+                from PIL import Image
+                with Image.open(io.BytesIO(data)) as im:
+                    w, h = im.size
+            except Exception:
+                pass
+            meta = _save_ref(data, w, h, fname)
+            log(f"고정 참조 등록: {fname} ({w}x{h})")
+            send_json(self, {"ok": True, "ref": meta})
+            return
+        if p == "/api/ref/delete":
+            _delete_ref()
+            log("고정 참조 삭제")
+            send_json(self, {"ok": True})
+            return
         if p == "/api/upload":
             self._handle_upload()
             return
@@ -810,25 +940,41 @@ class Handler(BaseHTTPRequestHandler):
             # 이미지 업로드 nonce (I2V 전용)
             image_name = ""
             upload_nonce = (data.get("image") or "").strip()
+            ref_mode = str(data.get("ref_mode") or "").strip()
             if mode == "i2v":
-                if not upload_nonce:
-                    send_json(self, {"ok": False, "error": "이미지를 먼저 업로드해야 합니다 (I2V)"}, 400)
+                if not upload_nonce and ref_mode == "fixed":
+                    # 고정 참조 모드: 서버가 영구 보관한 참조 이미지를 자동 사용
+                    ref = _load_ref()
+                    if not ref:
+                        send_json(self, {"ok": False, "error": "고정 참조가 등록되지 않았습니다 — 참조 이미지를 먼저 등록해 주세요"}, 400)
+                        return
+                    try:
+                        with open(_ref_path(), "rb") as f:
+                            ref_bytes = f.read()
+                        image_name = comfy_upload_image(ref_bytes, f"h3web_ref_{uuid.uuid4().hex[:8]}.png")
+                        log(f"  고정 참조 자동 사용: {ref['name']} ({ref['w']}x{ref['h']}) → {image_name}")
+                    except Exception as e:
+                        send_json(self, {"ok": False, "error": f"고정 참조 전송 실패: {e}"}, 500)
+                        return
+                elif not upload_nonce:
+                    send_json(self, {"ok": False, "error": "이미지를 먼저 업로드하거나 고정 참조를 선택해 주세요 (I2V)"}, 400)
                     return
-                with UPLOAD_LOCK:
-                    up = UPLOADED.get(upload_nonce)
-                if not up:
-                    send_json(self, {"ok": False, "error": "이미지가 만료되었습니다 — 다시 업로드해 주세요"}, 400)
-                    return
-                # 즉시 ComfyUI 입력 디렉터리로 전송
-                try:
-                    with open(up["path"], "rb") as f:
-                        img_bytes = f.read()
-                    safe_fname = f"h3web_{upload_nonce}.png"
-                    image_name = comfy_upload_image(img_bytes, safe_fname)
-                    log(f"  I2V 이미지: {image_name} ({up['w']}x{up['h']})")
-                except Exception as e:
-                    send_json(self, {"ok": False, "error": f"이미지 전송 실패: {e}"}, 500)
-                    return
+                else:
+                    with UPLOAD_LOCK:
+                        up = UPLOADED.get(upload_nonce)
+                    if not up:
+                        send_json(self, {"ok": False, "error": "이미지가 만료되었습니다 — 다시 업로드해 주세요"}, 400)
+                        return
+                    # 즉시 ComfyUI 입력 디렉터리로 전송
+                    try:
+                        with open(up["path"], "rb") as f:
+                            img_bytes = f.read()
+                        safe_fname = f"h3web_{upload_nonce}.png"
+                        image_name = comfy_upload_image(img_bytes, safe_fname)
+                        log(f"  I2V 이미지: {image_name} ({up['w']}x{up['h']})")
+                    except Exception as e:
+                        send_json(self, {"ok": False, "error": f"이미지 전송 실패: {e}"}, 500)
+                        return
             seconds = min(float(data.get("seconds", 5)), MAX_SECONDS)
             strategy = (data.get("strategy") or STRATEGY_SPLIT).strip().lower()
             if strategy not in STRATEGY_CHOICES:
