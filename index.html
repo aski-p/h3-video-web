@@ -838,8 +838,8 @@ function refreshStatus(){
       $('#csub').innerHTML=sub;
     } else {
       $('#cstat').className='dot off';
-      $('#ctext').textContent='ComfyUI 꺼짐 — 생성 시 자동 기동';
-      $('#csub').textContent='H3 INT8 + Turbo LoRA v4 · '+(STEPS||6)+'-step · 24fps · 자동 기동 대기 중';
+      $('#ctext').textContent='ComfyUI 꺼짐 — 재기동 중…';
+      $('#csub').textContent='H3 INT8 + Turbo LoRA v4 · '+(STEPS||6)+'-step · 24fps · 상시 구동 대기';
     }
   }).catch(()=>{
     $('#cstat').className='dot off';
