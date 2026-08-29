@@ -350,7 +350,7 @@ pre.err{
 .imgzone .ztxt{font-size:12.5px;color:var(--tx3);line-height:1.6}
 .imgzone .ztxt small{color:var(--tx4);font-size:11px}
 .imghost{display:flex;align-items:center;gap:14px;background:rgba(255,255,255,0.02);border:1px solid var(--line);border-radius:var(--r-md);padding:12px}
-.imghost img{
+.imghost img,.imghost video{
   width:80px;height:80px;object-fit:cover;
   border-radius:var(--r-sm);
   border:1px solid var(--line);background:#000;flex-shrink:0;
@@ -487,6 +487,15 @@ pre.err{
   border-color:var(--line-hover);
   background:rgba(255,255,255,0.06);color:var(--tx);
 }
+.refthumb{width:80px;height:80px;border-radius:var(--r-sm);overflow:hidden;border:1px solid var(--line);background:#000;flex-shrink:0;position:relative}
+.refthumb img,.refthumb video{width:100%;height:100%;object-fit:cover;object-position:center;display:block}
+.refthumb.vid{background:#000}
+.refthumb.vid video::before{
+  content:'';position:absolute;inset:0;
+  background:rgba(0,0,0,0.25);
+  border-radius:inherit;pointer-events:none;
+}
+.rmeta .ok{color:var(--ok)}
 .rbtn.del{color:var(--err);border-color:rgba(255,107,107,0.1)}
 .rbtn.del:hover{border-color:rgba(255,107,107,0.25);background:rgba(255,107,107,0.06);color:var(--err)}
 .rbtn.open{color:var(--tx4)}
@@ -555,17 +564,23 @@ footer{
   <div class="card" id="refwrap" style="display:none">
     <h2>고정 참조 (인물 유지)</h2>
     <div class="hint" style="margin-bottom:10px">
-      참조 이미지를 한 번 등록하면 서버에 <b>영구 보관</b>됩니다. 삭제하지 않는 이상 다음 생성부터 자동으로 동일 인물이 유지되고 배경은 자유롭게 변경됩니다.
+      참조를 한 번 등록하면 서버에 <b>영구 보관</b>됩니다. 삭제하지 않는 이상 다음 생성부터 자동으로 동일 인물이 유지되고 배경은 자유롭게 변경됩니다.
+    </div>
+    <div class="chips" id="refkind" style="margin-bottom:10px">
+      <div class="chip on" data-kind="image">이미지 참조</div>
+      <div class="chip" data-kind="video">인물 동영상</div>
     </div>
     <div id="refbox" style="display:none;margin-top:8px"></div>
     <div id="refzone" style="margin-top:8px">
       <div class="imgzone" id="refzone_inner" style="cursor:pointer">
         <div class="zicon">+</div>
-        <div class="ztxt">고정 참조 이미지 등록하기<br><small>인물 사진 — 15MB 이하</small></div>
+        <div class="ztxt" id="refzone_txt">고정 참조 이미지 등록하기<br><small>인물 사진 — 15MB 이하</small></div>
       </div>
       <input type="file" id="reffile" accept="image/png,image/jpeg,image/webp,image/bmp" style="display:none">
+      <input type="file" id="refvfile" accept="video/mp4,video/webm,video/quicktime" style="display:none">
     </div>
     <div class="hint" id="refhint" style="margin-top:8px">등록된 참조가 있으면 I2V 생성 시 자동으로 사용됩니다.</div>
+    <div class="hint" id="refvhint" style="margin-top:6px;display:none">인물 동영상은 첫 프레임 기준으로 인물 외관이 유지됩니다. mp4 · webm — 100MB 이하</div>
   </div>
 
   <!-- 화면 비율 -->
@@ -719,6 +734,78 @@ let STRATEGY='single', SEG_SECONDS=4, STEPS=6;
 
 // 모드 (t2v / i2v)
 let MODE='t2v', imgNonce='', imgW=0, imgH=0, imgName='';
+let refKind='image', refvActive=false, refvMeta=null;
+
+// 고정 참조 종류 전환 (image / video)
+document.querySelectorAll('#refkind .chip').forEach(c=>c.onclick=()=>{
+  document.querySelectorAll('#refkind .chip').forEach(x=>x.classList.remove('on'));
+  c.classList.add('on');
+  refKind=c.dataset.kind;
+  refvActive=false;
+  refvMeta=null;
+  refClearUI();
+  refRender();
+  refvRender();
+});
+
+// 고정 참조 영상 업로드
+function refvUpload(file){
+  if(!file) return;
+  const box=document.getElementById('refbox');
+  const zone=document.getElementById('refzone');
+  box.style.display='block';
+  zone.style.display='none';
+  box.innerHTML='<span class="spin"></span> 고정 동영상 참조 등록 중…';
+  const fd=new FormData();
+  fd.append('file', file, file.name);
+  fetch('/api/refv/set',{method:'POST', body:fd})
+    .then(r=>r.json())
+    .then(d=>{
+      if(!d.ok){ box.innerHTML=`<span style="color:var(--err)">${d.error||'등록 실패'}</span>`; zone.style.display=''; box.style.display='none'; return; }
+      refvActive=true;
+      refvMeta=d.ref||null;
+      refvRender();
+    })
+    .catch(err=>{ box.innerHTML=`<span style="color:var(--err)">${String(err)}</span>`; zone.style.display=''; box.style.display='none'; });
+}
+function refvRender(){
+  const box=document.getElementById('refbox');
+  const zone=document.getElementById('refzone');
+  const hint=document.getElementById('refhint');
+  const vhint=document.getElementById('refvhint');
+  if(refvActive){
+    box.style.display='block';
+    zone.style.display='none';
+    const url=`/api/refv?t=${Date.now()}`;
+    const dur=refvMeta && refvMeta.duration_s ? `${refvMeta.duration_s}s` : '';
+    box.innerHTML=`<div class="imghost"><video src="${url}" controls style="width:160px;max-width:100%;height:auto;border-radius:var(--r-sm);background:#000"></video><div class="imgmeta">고정 동영상 참조<br><small id="refvmeta">${(refvMeta && refvMeta.size ? (refvMeta.size/1048576).toFixed(1)+'MB' : '?')}${dur ? ' · '+dur : ''} · 첫 프레임 기준 인물 유지</small></div><button class="btn-rmimg" id="rmrefv">삭제</button></div>`;
+    if(vhint) vhint.style.display='';
+    box.querySelector('#rmrefv').onclick=refvDelete;
+    fetch('/api/refv/status').then(r=>r.json()).then(d=>{
+      const r=d.ref;
+      if(r){
+        const mm=document.getElementById('refvmeta');
+        if(mm) mm.textContent=`${r.name||'동영상'} · ${(r.size/1048576).toFixed(1)}MB${r.duration_s ? ' · '+r.duration_s+'s' : ''} · 첫 프레임 기준 인물 유지`;
+      }
+    }).catch(()=>{});
+  } else {
+    box.style.display='none';
+    zone.style.display='';
+    if(vhint) vhint.style.display='none';
+  }
+}
+function refvDelete(){
+  if(!confirm('고정 동영상 참조를 삭제할까요?')) return;
+  fetch('/api/refv/delete',{method:'POST'})
+    .then(r=>r.json())
+    .then(d=>{ if(d.ok){ refvActive=false; refvMeta=null; refvRender(); } });
+}
+document.getElementById('refvfile').onchange=e=>{
+  const f=e.target.files[0];
+  if(!f) return;
+  if(f.size>100*1024*1024){ alert('동영상은 100MB 이하만 등록할 수 있습니다'); e.target.value=''; return; }
+  refvUpload(f);
+};
 
 function updateStrategyHint(){
   const hint=document.getElementById('strategyHint');
@@ -839,10 +926,22 @@ document.getElementById('imgfile').onchange=e=>{
 
 // ── 고정 참조 (인물 고정) ──────────────────────────────
 let refActive = false;  // 고정 참조가 등록되어 있는지
+function refClearUI(){
+  const box=document.getElementById('refbox');
+  const zone=document.getElementById('refzone');
+  if(box) box.style.display='none';
+  if(zone) zone.style.display='';
+}
 function refRender(){
   const box = document.getElementById('refbox');
   const zone = document.getElementById('refzone');
   const hint = document.getElementById('refhint');
+  if(refvActive) {
+    box.style.display='none';
+    zone.style.display='none';
+    if(hint) hint.textContent = '동영상 참조가 등록되어 있어 I2V 생성 시 자동으로 사용됩니다.';
+    return;
+  }
   if(refActive){
     box.style.display='block';
     zone.style.display='none';
@@ -871,7 +970,9 @@ function refDelete(){
     .then(r=>r.json())
     .then(d=>{ if(d.ok){ refActive=false; refRender(); } });
 }
-document.getElementById('refzone_inner').onclick=()=>document.getElementById('reffile').click();
+document.getElementById('refzone_inner').onclick=()=>{
+  document.getElementById('reffile').click();
+};
 document.getElementById('reffile').onchange=e=>{
   const f=e.target.files[0];
   if(!f) return;
@@ -892,6 +993,16 @@ document.getElementById('reffile').onchange=e=>{
     })
     .catch(err=>{ box.innerHTML=`<span style="color:var(--err)">${String(err)}</span>`; document.getElementById('refzone').style.display=''; box.style.display='none'; });
 };
+// 동영상 고정 참조 클릭
+(function(){
+  const zv=document.getElementById('refzone');
+  if(!zv) return;
+  zv.addEventListener('click',e=>{
+    if(e.target.closest('.refthumb')) return;
+    if(e.target.closest('#rmrefv')) return;
+    document.getElementById('refvfile').click();
+  });
+})();
 
 // ComfyUI 상세 상태
 function refreshStatus(){
@@ -1157,12 +1268,52 @@ function fmtSize(b){
   return (b/1048576).toFixed(1)+'MB';
 }
 function loadRecent(){
-  fetch('/api/jobs').then(r=>r.json()).then(d=>{
+  Promise.all([
+    fetch('/api/jobs').then(r=>r.json()),
+    fetch('/api/ref/status').then(r=>r.json()).catch(()=>({ok:false,ref:null})),
+    fetch('/api/refv/status').then(r=>r.json()).catch(()=>({ok:false,ref:null}))
+  ]).then(([d,refD,refvD])=>{
     const jobs=(d.jobs||[]).slice(0,10);
-    if(!jobs.length) return;
+    const ref=refD.ref||null;
+    const refv=refvD.ref||null;
     $('#recentcard').style.display='block';
     const list=$('#recentlist');
     list.innerHTML='';
+    // 고정 참조(이미지) 섹션
+    if(ref){
+      const r=document.createElement('div');
+      r.className='ritem';
+      r.innerHTML=`
+        <div class="refthumb img"><img src="/api/ref" alt="고정 참조"></div>
+        <div class="rmeta">
+          <div class="rprompt">고정 참조 (인물 고정)</div>
+          <div class="rsub">
+            <span class="ok">등록됨</span> · ${ref.name||'인물'} · ${(ref.size/1048576).toFixed(1)}MB
+          </div>
+        </div>
+        <button class="rbtn del" data-refdel="img">삭제</button>
+      `;
+      r.querySelector('[data-refdel]').onclick=refDelete;
+      list.appendChild(r);
+    }
+    // 고정 동영상 참조 섹션
+    if(refv){
+      const rv=document.createElement('div');
+      rv.className='ritem';
+      rv.innerHTML=`
+        <div class="refthumb vid"><video src="/api/refv" preload="metadata" muted></video></div>
+        <div class="rmeta">
+          <div class="rprompt">고정 동영상 참조 (인물 동영상)</div>
+          <div class="rsub">
+            <span class="ok">등록됨</span> · ${refv.name||'동영상'} · ${(refv.size/1048576).toFixed(1)}MB · ${refv.duration_s?refv.duration_s+'s':''}
+          </div>
+        </div>
+        <button class="rbtn del" data-refvdel="vid">삭제</button>
+      `;
+      rv.querySelector('[data-refvdel]').onclick=refvDelete;
+      list.appendChild(rv);
+    }
+    if(!jobs.length) return;
     jobs.forEach(j=>{
       const dl='/api/download/'+j.id;
       const st=j.status;

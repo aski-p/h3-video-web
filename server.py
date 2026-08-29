@@ -51,6 +51,10 @@ SEG_SECONDS = 4  # 기본값
 REF_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".h3-web", "ref")
 REF_META = os.path.join(REF_DIR, "meta.json")
 
+# 고정 동영상 참조 (인물 동영상): 추출된 프레임 + 원본 mp4를 영구 보관
+REFV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".h3-web", "refv")
+REFV_META = os.path.join(REFV_DIR, "meta.json")
+
 # 생성 방식
 STRATEGY_CHOICES = ("single", "split")
 STRATEGY_SINGLE = "single"  # 연속 단일 생성 (장면 연속성 우선)
@@ -269,6 +273,84 @@ def comfy_upload_image(data: bytes, filename: str, subfolder: str = "", overwrit
     return out["name"]
 
 
+def comfy_upload_video(data: bytes, filename: str):
+    """바이너리를 ComfyUI 입력 디렉터리에 저장 후 LoadVideo/LoadAnimatedPNG용 이름 반환.
+    comfy_upload_image와 동일하게 직접 쓰기 → /upload/image 폴백 구조."""
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(filename))
+    try:
+        base = os.environ.get("COMFY_INPUT_DIR")
+        target_dir = base
+        if not target_dir:
+            for cand in ("/home/aski/ComfyUI/input", "/home/aski/minimax-h3/ComfyUI/input"):
+                if os.path.isdir(cand):
+                    target_dir = cand
+                    break
+            if target_dir is None:
+                raise RuntimeError("input dir not found")
+        dst = os.path.join(target_dir, safe_name)
+        with open(dst, "wb") as f:
+            f.write(data)
+        log(f"  동영상 업로드(직접): {dst}")
+        return safe_name
+    except Exception as e:
+        log(f"  직접 쓰기 실패 ({e}) -> /upload 폴백")
+    boundary = "----h3web" + uuid.uuid4().hex
+    parts = [
+        f"--{boundary}\r\n".encode(),
+        f'Content-Disposition: form-data; name="image"; filename="{safe_name}"\r\n'.encode(),
+        b"Content-Type: application/octet-stream\r\n\r\n",
+        data,
+        b"\r\n",
+        f"--{boundary}\r\n".encode(),
+        b'Content-Disposition: form-data; name="subfolder"\r\n\r\n',
+        b"\r\n",
+        f"--{boundary}\r\n".encode(),
+        b'Content-Disposition: form-data; name="overwrite"\r\n\r\n',
+        b"true\r\n",
+        f"--{boundary}--\r\n".encode(),
+    ]
+    payload = b"".join(parts)
+    req = urllib.request.Request(COMFY + "/upload/image", data=payload,
+                                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        out = json.load(r)
+    if not out.get("name"):
+        raise RuntimeError(f"ComfyUI 업로드 실패: {out}")
+    log(f"  동영상 업로드(/upload): {out.get('name')}")
+    return out["name"]
+
+
+def extract_ref_video_frame(video_bytes: bytes, ts_offset: float = 0.5) -> bytes:
+    """동영상 mp4에서 ts_offset 초 지점의 인물 프레임을 추출.
+    ffmpeg -ss → PNG 바이트 반환. 실패 시 RuntimeError."""
+    tmp_dir = os.path.join(OUT_DIR, "refs")
+    os.makedirs(tmp_dir, exist_ok=True)
+    src = os.path.join(tmp_dir, f"refv_in_{uuid.uuid4().hex[:8]}.mp4")
+    out_png = os.path.join(tmp_dir, f"refv_frame_{uuid.uuid4().hex[:8]}.png")
+    ts = max(0.0, min(float(ts_offset), 4.0))
+    try:
+        with open(src, "wb") as f:
+            f.write(video_bytes)
+        cmd = ["ffmpeg", "-y", "-ss", str(ts), "-i", src,
+               "-frames:v", "1", "-q:v", "2", out_png]
+        p = subprocess.run(cmd, capture_output=True, timeout=90)
+        if p.returncode != 0 or not os.path.isfile(out_png):
+            raise RuntimeError(f"프레임 추출 실패: {p.stderr.decode(errors='replace')[:300]}")
+        with open(out_png, "rb") as f:
+            data = f.read()
+        if not data:
+            raise RuntimeError("추출된 프레임이 비어 있음")
+        log(f"  고정 동영상 참조: {ts:.1f}s 지점 프레임 추출 ({len(data)}B)")
+        return data
+    finally:
+        for pth in (src, out_png):
+            try:
+                if os.path.isfile(pth):
+                    os.remove(pth)
+            except Exception:
+                pass
+
+
 def comfy_up():
     try:
         comfy_get("/system_stats", timeout=8)
@@ -321,8 +403,9 @@ def ensure_comfyui():
     raise RuntimeError("ComfyUI 기동 실패 (300초 대기 초과)")
 
 
-def build_workflow(text, negative, width, height, length, steps, seed, image_name=None, prefix="h3"):
-    """T2V/I2V 워크플로우 — H3 전용. Wan 폴백 제거 (사용자 지정)."""
+def build_workflow(text, negative, width, height, length, steps, seed, image_name=None, prefix="h3", video_name=None):
+    """T2V/I2V 워크플로우 — H3 전용. Wan 폴백 제거 (사용자 지정).
+    video_name: LoadVideo 노드를 통한 참조 동영상 (인물 동영상 모드)"""
     base_negative = "text, subtitles, captions, watermark, logo, script overlay, on-screen text, UI elements"
     if negative:
         full_prompt = f"{text} (do NOT include: {base_negative}, {negative})"
@@ -358,6 +441,10 @@ def build_workflow(text, negative, width, height, length, steps, seed, image_nam
     if image_name:
         wf["15"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
         wf["5"]["inputs"]["first_frame"] = ["15", 0]
+    if video_name:
+        # LoadVideo → first_frame 입력 (인물 동영상 참조: 첫 프레임 기준)
+        wf["16"] = {"class_type": "LoadVideo", "inputs": {"video": video_name, "force_rate": 24}}
+        wf["5"]["inputs"]["first_frame"] = ["16", 0]
     return wf
 
 
@@ -490,7 +577,8 @@ def run_job(job_id, cfg):
             prefix = f"h3web/{job_id}_s{i:02d}"
             workflow = build_workflow(cfg["prompt"], cfg.get("negative", ""), cfg["width"], cfg["height"],
                                    seg_frames, cfg["steps"], seed,
-                                   image_name=cfg.get("image_name", ""), prefix=prefix)
+                                   image_name=cfg.get("image_name", ""),
+                                   video_name=cfg.get("video_name", ""), prefix=prefix)
             cid = str(uuid.uuid4())
             queued = comfy_post("/prompt", {"prompt": workflow, "client_id": cid})
             if "error" in queued:
@@ -645,6 +733,59 @@ def _delete_ref():
         pass
 
 
+def _refv_path():
+    return os.path.join(REFV_DIR, "ref_frame.png")
+
+
+def _refv_video_path():
+    return os.path.join(REFV_DIR, "ref_video.mp4")
+
+
+def _load_refv():
+    """고정 동영상 참조 meta 반환. 없으면 None."""
+    meta_f = REFV_META
+    if not os.path.isfile(meta_f) or not os.path.isfile(_refv_path()):
+        return None
+    try:
+        with open(meta_f) as f:
+            m = json.load(f)
+    except Exception:
+        return None
+    return {
+        "name": m.get("name", ""),
+        "w": m.get("w", 0), "h": m.get("h", 0),
+        "size": m.get("size", 0), "ts": m.get("ts", 0),
+        "duration_s": m.get("duration_s", 0),
+        "ts_offset": m.get("ts_offset", 0),
+    }
+
+
+def _save_refv(video_bytes: bytes, frame_bytes: bytes, w: int, h: int,
+               name: str, duration_s: float, ts_offset: float):
+    """고정 동영상 참조: 원본 mp4 + 추출 프레임을 영구 저장."""
+    os.makedirs(REFV_DIR, exist_ok=True)
+    with open(_refv_path(), "wb") as f:
+        f.write(frame_bytes)
+    with open(_refv_video_path(), "wb") as f:
+        f.write(video_bytes)
+    meta = {"name": name, "w": w, "h": h, "size": len(video_bytes),
+            "ts": time.time(), "duration_s": duration_s, "ts_offset": ts_offset,
+            "frame_size": len(frame_bytes)}
+    with open(REFV_META, "w") as f:
+        json.dump(meta, f, ensure_ascii=False)
+    log(f"고정 동영상 참조 저장: {name} ({w}x{h}, {duration_s:.1f}s, {ts_offset:.1f}s 지점)")
+    return meta
+
+
+def _delete_refv():
+    for pth in (_refv_path(), _refv_video_path(), REFV_META):
+        try:
+            if os.path.isfile(pth):
+                os.remove(pth)
+        except Exception:
+            pass
+
+
 def send_json(handler, obj, code=200):
     body = json.dumps(obj, ensure_ascii=False).encode()
     handler.send_response(code)
@@ -744,6 +885,37 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             with open(_ref_path(), "rb") as f:
                 self.wfile.write(f.read())
+        elif p.startswith("/api/refv/frame"):
+            # GET /api/refv/frame — 고정 동영상 참조에서 추출된 프레임 PNG (없으면 404)
+            if not _load_refv():
+                send_json(self, {"ok": False, "refv": None}, 404)
+                return
+            fsize = os.path.getsize(_refv_path())
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(fsize))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with open(_refv_path(), "rb") as f:
+                self.wfile.write(f.read())
+        elif p.startswith("/api/refv/status"):
+            # GET /api/refv/status — 고정 동영상 참조 메타데이터
+            send_json(self, {"ok": True, "refv": _load_refv()})
+        elif p.startswith("/api/refv"):
+            # GET /api/refv — 고정 동영상 원본 mp4 (없으면 404)
+            if not os.path.isfile(_refv_video_path()):
+                send_json(self, {"ok": False, "refv": None}, 404)
+                return
+            fsize = os.path.getsize(_refv_video_path())
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(fsize))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with open(_refv_video_path(), "rb") as f:
+                shutil.copyfileobj(f, self.wfile, length=1024 * 256)
         elif p.startswith("/api/download/"):
             jid = p.split("/")[3]
             # 1) JOBS에서 src 확인
@@ -919,6 +1091,103 @@ class Handler(BaseHTTPRequestHandler):
             log("고정 참조 삭제")
             send_json(self, {"ok": True})
             return
+        if p == "/api/refv/status":
+            send_json(self, {"ok": True, "refv": _load_refv()})
+            return
+        if p == "/api/refv/delete":
+            _delete_refv()
+            log("고정 동영상 참조 삭제")
+            send_json(self, {"ok": True})
+            return
+        if p == "/api/refv/set":
+            ctype = self.headers.get("Content-Type", "")
+            clen = int(self.headers.get("Content-Length", 0))
+            if clen > MAX_UPLOAD_BYTES:
+                self.rfile.read(clen)
+                send_json(self, {"ok": False, "error": f"파일 초과 (최대 {MAX_UPLOAD_BYTES//1048576}MB)"}, 400)
+                return
+            raw = self.rfile.read(clen) if clen else b""
+            if not raw:
+                send_json(self, {"ok": False, "error": "빈 요청"}, 400)
+                return
+            fname = "refv.mp4"
+            data = None
+            if "multipart/form-data" in ctype:
+                m = re.search(r"boundary=(\"?)([^\\s;\"']+)\\1", ctype)
+                boundary = m.group(2).encode() if m else b"----h3web"
+                parts = raw.split(b"--" + boundary)
+                for seg in parts:
+                    seg = seg.lstrip(b"\r\n")
+                    if not seg:
+                        continue
+                    fm = re.search(rb'name="file";\s*filename="([^"]+)"', seg)
+                    hm = re.search(rb'name="name";\s*content="([^"]*)"', seg)
+                    if fm:
+                        name = hm.group(1).decode() if hm else ""
+                        if name == "file" and b"\r\n\r\n" in seg:
+                            fname = fm.group(1).decode() or "refv.mp4"
+                            data = seg.split(b"\r\n\r\n", 1)[1]
+                            break
+                if data is None:
+                    send_json(self, {"ok": False, "error": "file 필드 없음"}, 400)
+                    return
+            else:
+                data = raw
+                disp = self.headers.get("Content-Disposition", "")
+                fm2 = re.search(r'filename="?([^";]+)"?', disp)
+                if fm2:
+                    fname = fm2.group(1)
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in (".mp4", ".mov", ".webm", ".mkv", ".avi"):
+                send_json(self, {"ok": False, "error": "동영상 형식: mp4/mov/webm/mkv/avi"}, 400)
+                return
+            # 동영상 메타: ffmpeg로 길이/해상도 확인
+            probe = {"w": 0, "h": 0, "duration_s": 0.0}
+            tmp_probe = os.path.join(OUT_DIR, f"probe_{uuid.uuid4().hex[:8]}.mp4")
+            try:
+                import json as _json
+                os.makedirs(OUT_DIR, exist_ok=True)
+                with open(tmp_probe, "wb") as f:
+                    f.write(data)
+                out = subprocess.run(
+                    ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                     "-show_entries", "stream=width,height",
+                     "-show_entries", "format=duration",
+                     "-of", "json", tmp_probe],
+                    capture_output=True, timeout=15)
+                if out.returncode == 0:
+                    pj = _json.loads(out.stdout.decode())
+                    st = (pj.get("streams") or [{}])[0]
+                    probe["w"] = int(st.get("width") or 0)
+                    probe["h"] = int(st.get("height") or 0)
+                    probe["duration_s"] = round(float(pj.get("format", {}).get("duration") or 0), 2)
+            except Exception as e:
+                log(f"  ffprobe 실패 ({e}) — 메타 없는 상태로 저장")
+            finally:
+                try:
+                    if os.path.isfile(tmp_probe):
+                        os.remove(tmp_probe)
+                except Exception:
+                    pass
+            if probe["duration_s"] == 0.0:
+                send_json(self, {"ok": False, "error": "동영상 길이를 읽을 수 없습니다"}, 400)
+                return
+            if probe["w"] == 0 or probe["h"] == 0:
+                send_json(self, {"ok": False, "error": "해상도를 읽을 수 없습니다"}, 400)
+                return
+            # 프레임 추출 (0.5s 지점 — 인물 샷 기준, 4s 이내로 클램프)
+            ts_offset = 0.5
+            try:
+                frame_data = extract_ref_video_frame(data, ts_offset)
+            except RuntimeError as e:
+                log(f"  프레임 추출 실패: {e}")
+                send_json(self, {"ok": False, "error": f"프레임 추출 실패: {str(e)[:100]}"}, 400)
+                return
+            meta = _save_refv(data, frame_data, probe["w"], probe["h"],
+                              os.path.basename(fname), probe["duration_s"], ts_offset)
+            log(f"고정 동영상 참조 등록: {fname} ({probe['w']}x{probe['h']}, {probe['duration_s']:.1f}s)")
+            send_json(self, {"ok": True, "refv": meta})
+            return
         if p == "/api/upload":
             self._handle_upload()
             return
@@ -939,6 +1208,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # 이미지 업로드 nonce (I2V 전용)
             image_name = ""
+            video_name = ""
             upload_nonce = (data.get("image") or "").strip()
             ref_mode = str(data.get("ref_mode") or "").strip()
             if mode == "i2v":
@@ -957,8 +1227,19 @@ class Handler(BaseHTTPRequestHandler):
                         send_json(self, {"ok": False, "error": f"고정 참조 전송 실패: {e}"}, 500)
                         return
                 elif not upload_nonce:
-                    send_json(self, {"ok": False, "error": "이미지를 먼저 업로드하거나 고정 참조를 선택해 주세요 (I2V)"}, 400)
-                    return
+                    # 고정 동영상 참조 (인물 동영상) — ref_mode=video 또는 자동
+                    refv = _load_refv()
+                    if not refv or not os.path.isfile(_refv_path()):
+                        send_json(self, {"ok": False, "error": "이미지를 먼저 업로드하거나 고정 참조(이미지/동영상)를 선택해 주세요 (I2V)"}, 400)
+                        return
+                    try:
+                        with open(_refv_path(), "rb") as f:
+                            refv_bytes = f.read()
+                        video_name = comfy_upload_video(refv_bytes, f"h3web_refv_{uuid.uuid4().hex[:8]}.mp4")
+                        log(f"  고정 동영상 참조 자동 사용: {refv.get('name')} ({refv.get('w')}x{refv.get('h')}, {refv.get('duration_s')}s) → {video_name}")
+                    except Exception as e:
+                        send_json(self, {"ok": False, "error": f"고정 동영상 참조 전송 실패: {e}"}, 500)
+                        return
                 else:
                     with UPLOAD_LOCK:
                         up = UPLOADED.get(upload_nonce)
@@ -1009,6 +1290,7 @@ class Handler(BaseHTTPRequestHandler):
                 "seed": int(data.get("seed", -1)),
                 "filename": fname,
                 "image_name": image_name,
+                "video_name": video_name,
             }
             jid = str(uuid.uuid4())[:8]
             with LOCK:
@@ -1024,7 +1306,8 @@ class Handler(BaseHTTPRequestHandler):
                 QUEUE.append(jid)
             log(f"new job {jid} [{mode}]: {prompt[:50]}... {cfg['width']}x{cfg['height']} "
                 f"{seconds}s [{strategy}] {segments}seg steps={cfg['steps']}"
-                + (f" img={image_name}" if image_name else ""))
+                + (f" img={image_name}" if image_name else "")
+                + (f" vid={video_name}" if video_name else ""))
             send_json(self, {
                 "ok": True, "job": jid,
                 "segments": segments, "total_seconds": seconds,
