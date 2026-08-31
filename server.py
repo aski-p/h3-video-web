@@ -21,6 +21,11 @@ import urllib.request
 import urllib.error
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+
+try:
+    import websocket  # websocket-client; ComfyUI의 실제 sampler progress 수신용
+except ImportError:
+    websocket = None
 from urllib.parse import urlparse
 
 HOST = os.environ.get("H3_HOST", "0.0.0.0")
@@ -35,7 +40,7 @@ OUT_DIR = os.environ.get("H3_OUT_DIR", os.path.expanduser("~/h3-web/output"))
 # MiniMax H3 Eros E3 production profile. Override filenames with env vars when
 # the PGX model directory uses a different revision.
 H3_UNET = os.environ.get("H3_UNET", "minimax_h3_fl2va_pruned_int8_convrot.safetensors")
-H3_CLIP = os.environ.get("H3_CLIP", "qwen3vl_32b_minimax_h3_bf16.safetensors")
+H3_CLIP = os.environ.get("H3_CLIP", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors")
 H3_VIDEO_VAE = os.environ.get("H3_VIDEO_VAE", "minimax_h3_video_vae_fp16.safetensors")
 H3_AUDIO_VAE = os.environ.get("H3_AUDIO_VAE", "minimax_h3_audio_vae_fp32.safetensors")
 H3_LORA = os.environ.get("H3_LORA", "minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors")
@@ -71,6 +76,8 @@ JOBS = {}
 LOCK = threading.Lock()
 JOBS_DIR = os.path.join(os.path.expanduser("~"), "h3-web", "jobs")
 QUEUE = []            # FIFO: 대기 중인 job_id
+MAX_PENDING_JOBS = 5  # 실행 중 작업은 제외하고, 대기열만 최대 5개
+QUEUE_RESERVATIONS = 0  # 요청 처리 중인 admission slot; 동시 요청 우회 방지
 QUEUE_LOCK = threading.Lock()
 ACTIVE = [None]       # 실행 중인 job_id (동시 1개)
 
@@ -170,16 +177,34 @@ def log(msg):
 
 
 def _prog(job_id, phase, **extra):
-    """progress 객체: phase + elapsed + pct + eta + (추가 필드)."""
+    """진행률: ComfyUI queue/history 실상태 + 샘플러 이벤트(있으면) + 경과시간 보정.
+
+    sampler_pct는 ComfyUI websocket progress 이벤트의 실제 step 비율이다. 해당
+    이벤트를 못 받는 구버전에서도 2초마다 경과시간 보정값을 다시 저장하므로 UI가
+    한 숫자에 멈춰 보이지 않는다.
+    """
     j = JOBS.get(job_id) or {}
-    est = j.get("estimated_seconds") or 75
+    est = max(1, j.get("estimated_seconds") or 75)
     now = time.time()
     elapsed = round(now - j.get("started", now), 1)
-    total = (j.get("segments") or 1) + 3  # 생성 + 스티치 + 24fps + NAS
-    done = extra.get("seg_done", 0) + extra.get("done_phase", 0)
-    pct = min(95.0, round(5 + 85 * done / total, 1))
+    segments = max(1, j.get("segments") or 1)
+    seg_done = min(segments, int(extra.get("seg_done", 0)))
+    done_phase = int(extra.get("done_phase", 0))
+    # 생성 구간은 5~85%, 후처리/NAS는 남은 10%를 사용한다.
+    generation_base = 5 + 80 * seg_done / segments
+    sampler_pct = extra.get("sampler_pct")
+    if sampler_pct is not None:
+        generation = generation_base + (80 / segments) * max(0, min(1, float(sampler_pct)))
+    elif seg_done < segments and done_phase == 0:
+        seg_started = j.get("segment_started", j.get("started", now))
+        seg_est = max(15, (est * 0.88) / segments)
+        generation = generation_base + (80 / segments) * min(0.96, max(0, now - seg_started) / seg_est)
+    else:
+        generation = 85
+    pct = min(99.0, round(max(generation, 85 + done_phase * 3), 1))
     remain = round(est - elapsed, 0)
-    out = {"phase": phase, "elapsed": elapsed, "pct": pct, "eta": max(0, int(remain))}
+    out = {"phase": phase, "elapsed": elapsed, "pct": pct, "eta": max(0, int(remain)),
+           "updated_at": now}
     out.update(extra)
     return out
 
@@ -192,7 +217,9 @@ def snap_len(seconds):
 
 def estimate_seconds(total_seconds, seg_seconds, strategy, steps):
     """생성 시간 추정 (초). 6스텝 기준 75초/4초세그먼트."""
-    step_factor = 1.0 + EST_STEP_COEF * (steps - STEPS_DEFAULT) / max(STEPS_DEFAULT, 1)
+    # step당 시간 증감은 완만하게 반영한다. 기존 수식은 2-step에서 음수 예상시간을
+    # 만들 수 있었으므로 최소 35%로 하한을 둔다.
+    step_factor = max(0.35, 1.0 + 0.12 * (steps - STEPS_DEFAULT))
     if strategy == STRATEGY_SINGLE:
         # 단일 세그먼트 (길이 그대로, 1회 생성)
         n = max(1, total_seconds / 4.0)
@@ -585,9 +612,13 @@ def run_job(job_id, cfg):
                 err_msg = json.dumps(queued, ensure_ascii=False)
                 raise RuntimeError(err_msg[:600])
             pid = queued["prompt_id"]
+            update_job(job_id, status="running", comfy_prompt_id=pid, segment_started=time.time(),
+                       progress=_prog(job_id, f"세그먼트 {i+1}/{segments} ComfyUI 대기 중" if segments > 1 else "ComfyUI 대기 중",
+                                      seg_done=i, queue_pending=1))
             log(f"  seg {i+1}/{segments} queued pid={pid} (H3)")
 
-            # 폴링
+            # ComfyUI history/queue를 2초마다 실제 조회한다. history에 완료가 기록될
+            # 때까지 prompt_id 기준으로만 추적하므로 다른 사용자 작업과 섞이지 않는다.
             while True:
                 h = comfy_get(f"/history/{pid}", timeout=30)
                 if pid in h:
@@ -621,11 +652,13 @@ def run_job(job_id, cfg):
                     log(f"  seg {i+1}/{segments} 완료 → {dst}")
                     break
                 q = comfy_get("/queue", timeout=30)
-                update_job(job_id, progress=_prog(job_id,
-                    f"세그먼트 {i+1}/{segments} 대기", seg_done=i,
+                running_ids = {str(row[1]) for row in q.get("queue_running", []) if len(row) > 1}
+                actual_phase = (f"세그먼트 {i+1}/{segments} 생성 중" if pid in running_ids
+                                else f"세그먼트 {i+1}/{segments} ComfyUI 대기 중")
+                update_job(job_id, status="running", progress=_prog(job_id, actual_phase, seg_done=i,
                     queue_running=len(q.get("queue_running", [])),
                     queue_pending=len(q.get("queue_pending", []))))
-                time.sleep(8)
+                time.sleep(2)
 
         # 최종 파일 경로
         dst_dir = os.path.join(OUT_DIR, job_id)
@@ -650,6 +683,7 @@ def run_job(job_id, cfg):
         fsize = os.path.getsize(final_local)
         update_job(job_id,
             status="done", file=os.path.basename(final_local), src=final_local,
+            progress=_prog(job_id, "생성 완료", pct=100, eta=0, seg_done=segments),
             elapsed=round(time.time() - JOBS[job_id].get("started", time.time()), 1),
             segments=segments, total_seconds=total_seconds,
             size=fsize,
@@ -1292,6 +1326,16 @@ class Handler(BaseHTTPRequestHandler):
                 "image_name": image_name,
                 "video_name": video_name,
             }
+            # admission slot을 먼저 예약한다. 따라서 동시에 여러 HTTP 요청이 와도
+            # 대기열(예약 포함) 6번째는 이 시점에서 원자적으로 거절된다.
+            global QUEUE_RESERVATIONS
+            with QUEUE_LOCK:
+                pending_total = len(QUEUE) + QUEUE_RESERVATIONS
+                if pending_total >= MAX_PENDING_JOBS:
+                    send_json(self, {"ok": False, "error": "대기열이 가득 찼습니다 (최대 5개). 실행 중인 작업이 끝난 뒤 다시 시도해 주세요.",
+                                     "code": "QUEUE_FULL", "queue_pending": pending_total, "queue_limit": MAX_PENDING_JOBS}, 429)
+                    return
+                QUEUE_RESERVATIONS += 1
             jid = str(uuid.uuid4())[:8]
             with LOCK:
                 JOBS[jid] = {
@@ -1302,7 +1346,10 @@ class Handler(BaseHTTPRequestHandler):
                     "estimated_seconds": est,
                 }
             _save_job(jid)
+            # 서버에서 원자적으로 제한한다. 프런트엔드 체크를 우회해도 6번째
+            # 대기 요청은 절대 enqueue되지 않는다.
             with QUEUE_LOCK:
+                QUEUE_RESERVATIONS -= 1
                 QUEUE.append(jid)
             log(f"new job {jid} [{mode}]: {prompt[:50]}... {cfg['width']}x{cfg['height']} "
                 f"{seconds}s [{strategy}] {segments}seg steps={cfg['steps']}"
@@ -1330,47 +1377,72 @@ class Handler(BaseHTTPRequestHandler):
                     send_json(self, {"ok": True})
                 else:
                     send_json(self, {"ok": False, "error": "이미 실행 중이라 취소 불가"}, 400)
-        elif p.startswith("/api/delete/"):
+        elif p.startswith("/api/delete-error/"):
+            # 정상 완료 영상은 어떤 경우에도 이 API로 지우지 않는다. 오류/중단/취소
+            # 작업의 job 전용 임시 디렉터리 안에서만, 실제로 깨진 mp4만 정리한다.
             jid = p.split("/")[3]
             with LOCK:
                 j = JOBS.get(jid)
                 if not j:
                     send_json(self, {"ok": False, "error": "job 없음"}, 404)
                     return
-                if j["status"] in ("queued", "starting", "running"):
-                    send_json(self, {"ok": False, "error": "실행 중이라 삭제 불가"}, 400)
+                if j.get("status") not in ("error", "interrupted", "cancelled"):
+                    send_json(self, {"ok": False, "error": "오류/중단 작업만 정리할 수 있습니다. 정상 완료 영상은 보호됩니다."}, 400)
                     return
-                # 파일 삭제
-                src = j.get("src", "")
+                job_dir = os.path.realpath(os.path.join(OUT_DIR, jid))
+                root = os.path.realpath(OUT_DIR) + os.sep
+                if not job_dir.startswith(root):
+                    send_json(self, {"ok": False, "error": "안전하지 않은 출력 경로"}, 400)
+                    return
+            deleted, preserved = [], []
+            if os.path.isdir(job_dir):
+                for base, _, names in os.walk(job_dir):
+                    for name in names:
+                        path = os.path.realpath(os.path.join(base, name))
+                        if not path.startswith(job_dir + os.sep):
+                            continue
+                        if not name.lower().endswith(".mp4"):
+                            try:
+                                os.remove(path)
+                                deleted.append(os.path.basename(path))
+                            except OSError:
+                                pass
+                            continue
+                        # 최소 크기, 컨테이너 검사, 전체 디코드 중 하나라도 실패해야 삭제한다.
+                        bad = not os.path.isfile(path) or os.path.getsize(path) < 1024 * 1024
+                        if not bad:
+                            probe = subprocess.run(["ffprobe", "-v", "error", "-show_format", "-show_streams", path],
+                                                   capture_output=True, text=True, timeout=20)
+                            bad = probe.returncode != 0
+                        if not bad:
+                            decode = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-f", "null", "-"],
+                                                    capture_output=True, text=True, timeout=180)
+                            bad = decode.returncode != 0
+                        if bad:
+                            try:
+                                os.remove(path)
+                                deleted.append(os.path.basename(path))
+                            except OSError as e:
+                                preserved.append(f"{os.path.basename(path)} (삭제 실패: {e})")
+                        else:
+                            preserved.append(os.path.basename(path))
+                # 빈 디렉터리만 제거. 유효 mp4는 보존한다.
                 try:
-                    if src and os.path.isfile(src):
-                        os.remove(src)
-                    dst_dir = os.path.join(OUT_DIR, jid)
-                    if os.path.isdir(dst_dir):
-                        shutil.rmtree(dst_dir)
-                except OSError as e:
-                    log(f"  delete 파일 실패: {e}")
-                # NAS에서도 삭제 (run_asu로, CIFS uid 제한 우회)
-                try:
-                    base = os.path.basename(src) if src else f"{jid}.mp4"
-                    nas_f = os.path.join(NAS_DIR, base)
-                    if os.path.isfile(nas_f):
-                        p = run_asu(f"rm -f '{nas_f}'", timeout=10)
-                        if p.returncode == 0:
-                            log(f"  NAS 삭제: {base}")
-                    elif os.path.isfile(os.path.join(NAS_DIR, f"{jid}.mp4")):
-                        p = run_asu(f"rm -f '{os.path.join(NAS_DIR, f'{jid}.mp4')}'", timeout=10)
-                        if p.returncode == 0:
-                            log(f"  NAS 삭제: {jid}.mp4")
-                except Exception as e:
-                    log(f"  NAS 삭제 실패: {e}")
-                # job 제거
-                del JOBS[jid]
-                jf = os.path.join(JOBS_DIR, f"{jid}.json")
+                    if not any(os.scandir(job_dir)):
+                        os.rmdir(job_dir)
+                except OSError:
+                    pass
+            if not preserved:
+                with LOCK:
+                    JOBS.pop(jid, None)
+                jf = _job_file(jid)
                 if os.path.isfile(jf):
                     os.remove(jf)
-                log(f"  삭제: {jid}")
-                send_json(self, {"ok": True})
+            log(f"  오류 출력 정리: {jid}, 삭제 {len(deleted)}, 보존 {len(preserved)}")
+            send_json(self, {"ok": True, "deleted": deleted, "preserved": preserved,
+                             "message": "깨진 출력만 정리했습니다" if not preserved else "유효 MP4는 보호되어 삭제하지 않았습니다"})
+        elif p.startswith("/api/delete/"):
+            send_json(self, {"ok": False, "error": "정상 영상 보호 정책: /api/delete-error/{job}만 사용할 수 있습니다"}, 400)
         else:
             send_json(self, {"ok": False, "error": "not found"}, 404)
 

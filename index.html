@@ -722,6 +722,8 @@ footer{
       <span class="js">예상 완료 <b id="eta">—</b></span>
     </div>
     <div class="meta" id="metatext"></div>
+    <pre class="err" id="errmsg" style="display:none"></pre>
+    <button class="dl dldel" id="cleanError" style="display:none">오류 영상 정리</button>
     <div class="result" id="result" style="display:none">
       <div class="i2v-stage" id="i2vstage">
         <video id="player" controls playsinline></video>
@@ -730,7 +732,6 @@ footer{
       <div class="dlrow">
         <a class="dl" id="dl1" download>⬇ MP4 다운로드</a>
         <a class="dl" id="dl2" target="_blank" rel="noopener">새 탭에서 열기</a>
-        <button class="dl dldel" id="del1">삭제</button>
         <button class="dl" id="viewScript">스크립트</button>
       </div>
     </div>
@@ -744,7 +745,7 @@ footer{
   <!-- 최근 작업 -->
   <div class="card" id="recentcard" style="display:none">
     <h2>최근 작업</h2>
-    <div style="font-size:11px;color:var(--tx4);margin-bottom:10px">서버 저장 · 재접속 복원 · 완료 파일 삭제</div>
+    <div style="font-size:11px;color:var(--tx4);margin-bottom:10px">서버 저장 · 재접속 복원 · 오류 작업 정리</div>
     <div class="recent" id="recentlist"></div>
   </div>
 
@@ -1176,6 +1177,8 @@ function setJobUI(j){
   $('#jobbox').style.display='block';
   $('#result').style.display='none';
   const i2v=$('#i2vframe'); if(i2v){i2v.style.display='none';i2v.style.opacity='0';i2v.style.backgroundImage='';}
+  $('#errmsg').style.display='none';
+  $('#cleanError').style.display='none';
   const m=$('#metatext');
   const p=j.progress||{};
   if(j.status==='queued'){
@@ -1244,16 +1247,20 @@ function setJobUI(j){
     }
     $('#dl1').href=dl; $('#dl1').download=j.id+'.mp4';
     $('#dl2').href=dl;
-    $('#del1').onclick=()=>delJob(j.id);
     $('#viewScript').onclick=()=>showPrompt(j);
     $('#stop').disabled=true;
     clearInterval(timer); timer=null; currentJob=null;
   } else if(j.status==='error'){
     $('#stline').innerHTML='<span class="st" style="color:var(--err)">✕ 오류</span>';
     $('#bar').style.width='100%';
+    $('#errmsg').textContent=j.error||'알 수 없는 오류'; $('#errmsg').style.display='block';
+    $('#cleanError').style.display='inline-flex';
+    $('#cleanError').onclick=()=>cleanupError(j.id);
     $('#stop').disabled=true; clearInterval(timer); timer=null; currentJob=null;
   } else if(j.status==='cancelled'){
     $('#stline').innerHTML='<span class="st" style="color:var(--warn)">■ 중단됨</span>';
+    $('#cleanError').style.display='inline-flex';
+    $('#cleanError').onclick=()=>cleanupError(j.id);
     $('#stop').disabled=true; clearInterval(timer); timer=null; currentJob=null;
   }
 }
@@ -1361,29 +1368,20 @@ document.addEventListener('keydown',e=>{
   }
 });
 
-// 삭제
-function delJob(jid){
-  if(!confirm('이 영상을 삭제할까요?\n(로컬 + NAS 저장본이 함께 삭제됩니다)')) return;
-  fetch('/api/delete/'+jid,{method:'POST'})
+// 오류/중단 작업의 깨진 출력만 정리 (정상 완료/NAS MP4는 서버에서 보호)
+function cleanupError(jid){
+  if(!confirm('오류 작업의 깨진 임시 영상만 정리할까요?\n정상 완료 MP4와 NAS 저장본은 삭제하지 않습니다.')) return;
+  fetch('/api/delete-error/'+jid,{method:'POST'})
     .then(r=>r.json())
     .then(d=>{
-      if(!d.ok){ alert(d.error||'삭제 실패'); return; }
-      try{$('#player').pause();}catch(e){}
-      $('#player').removeAttribute('src');
-      const i2v=$('#i2vframe'); if(i2v){i2v.style.display='none';i2v.style.opacity='0';i2v.style.backgroundImage='';}
-      $('#result').style.display='none';
+      if(!d.ok){ alert(d.error||'정리 실패'); return; }
+      alert(d.message||'오류 출력 정리 완료');
+      $('#cleanError').style.display='none';
       $('#jobbox').style.display='none';
-      $('#stline').innerHTML='';
-      $('#bar').style.width='0%';
-      $('#metatext').textContent='';
-      const d1=$('#del1');
-      if(d1) d1.onclick=null;
       if(currentJob===jid) currentJob=null;
-      if(timer){ clearInterval(timer); timer=null; }
-      $('#stop').disabled=true;
       loadRecent();
     })
-    .catch(e=>alert('삭제 실패: '+e));
+    .catch(e=>alert('정리 실패: '+e));
 }
 
 // 최근 작업 목록
@@ -1479,15 +1477,16 @@ function loadRecent(){
         </div>
         ${st==='done'
           ?`<button class="rbtn pview" title="스크립트 보기">S</button>
-            <a class="rbtn open" href="${dl}" target="_blank">열기</a>
-            <button class="rbtn del">삭제</button>`
-          :''
+            <a class="rbtn open" href="${dl}" target="_blank">열기</a>`
+          :(st==='error'||st==='cancelled'||st==='interrupted'
+            ?`<button class="rbtn del">오류 정리</button>`
+            :'')
         }
       `;
       const pv=item.querySelector('.pview');
       if(pv) pv.onclick=()=>showPrompt(j);
       const delB=item.querySelector('.del');
-      if(delB) delB.onclick=()=>delJob(j.id);
+      if(delB) delB.onclick=()=>cleanupError(j.id);
       list.appendChild(item);
     });
   }).catch(()=>{});
