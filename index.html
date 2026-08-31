@@ -55,8 +55,10 @@ body{
   -webkit-font-smoothing:antialiased;
   text-rendering:optimizeLegibility;
   line-height:1.5;
+  overflow-y:auto;
+  min-height:100%;
 }
-.wrap{max-width:720px;margin:0 auto;padding:24px 16px 80px}
+.wrap{max-width:720px;margin:0 auto;padding:24px 16px 40px}
 
 /* ── Header ── */
 header{
@@ -120,7 +122,7 @@ textarea,input[type=text],input[type=number]{
   font-family:inherit;font-feature-settings:'cv01','ss03';
   outline:none;transition:border-color .15s;
 }
-textarea{min-height:88px;resize:vertical;line-height:1.6}
+textarea{min-height:52px;max-height:200px;resize:vertical;line-height:1.6}
 textarea:focus,input:focus{
   border-color:var(--acc);
   background:rgba(255,255,255,0.04);
@@ -235,13 +237,6 @@ button:disabled{opacity:.35;cursor:not-allowed}
 }
 .meta{font-size:12px;color:var(--tx3);line-height:1.7;margin-top:8px}
 .meta b{color:var(--tx2);font-weight:510}
-pre.err{
-  background:rgba(255,107,107,0.06);
-  border:1px solid rgba(255,107,107,0.15);
-  color:var(--err);border-radius:var(--r-sm);
-  padding:12px;font-size:12px;font-family:var(--mono);
-  white-space:pre-wrap;word-break:break-all;margin-top:10px;
-}
 
 /* ── Result ── */
 .result{border-top:1px solid var(--line-subtle);margin-top:16px;padding-top:16px}
@@ -382,7 +377,7 @@ pre.err{
   background:var(--surface);
   border:1px solid var(--line);
   border-radius:var(--r-lg);
-  max-width:560px;width:100%;max-height:80vh;
+  max-width:560px;width:100%;max-height:60vh;
   overflow-y:auto;padding:24px;position:relative;
   box-shadow:0 8px 2px rgba(0,0,0,0),0 5px 2px rgba(0,0,0,0.01),
     0 3px 2px rgba(0,0,0,0.04),0 1px 1px rgba(0,0,0,0.07),
@@ -411,6 +406,19 @@ pre.err{
   letter-spacing:.5px;text-transform:uppercase;
   color:var(--tx4);margin-bottom:5px;
 }
+.pbtnrow{display:flex;gap:8px}
+.pbtn{
+  display:inline-flex;align-items:center;padding:7px 14px;border-radius:8px;
+  background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);
+  font-size:12px;font-weight:600;cursor:pointer;user-select:none;transition:.15s
+}
+.pbtn:hover{background:rgba(255,255,255,0.12)}
+.pbtn.neg{background:rgba(255,120,120,0.10);border-color:rgba(255,120,120,0.25)}
+.phint{font-size:11px;color:var(--tx4);line-height:1.5;min-width:0;word-break:break-word}
+.phint b{color:var(--tx);font-weight:600}
+.modal .mhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.modal .mbody{max-height:50vh;overflow-y:auto;margin-bottom:14px}
+.modal .copybtn{margin-left:auto}
 .copybtn{
   background:rgba(255,255,255,0.04);
   border:1px solid var(--line);
@@ -444,15 +452,17 @@ pre.err{
   border-radius:var(--r-sm);padding:12px;
   font-size:13px;color:var(--tx2);
   line-height:1.6;white-space:pre-wrap;word-break:break-word;
-  max-height:240px;overflow-y:auto;
+  max-height:120px;overflow-y:auto;
 }
 .modal .ptext.neg{color:var(--err)}
 .modal .ptext.cfg{font-size:12px;color:var(--tx3);font-family:var(--mono)}
 
 /* ── Recent jobs ── */
-.recent{display:grid;gap:8px}
+#recentlist{min-width:0}
+.recent{display:grid;gap:8px;max-height:400px;overflow-y:auto;padding-right:4px}
 .ritem{
   display:flex;align-items:center;gap:12px;
+  min-width:0;max-width:100%;
   background:rgba(255,255,255,0.02);
   border:1px solid var(--line-subtle);
   border-radius:var(--r-md);padding:10px;
@@ -470,7 +480,7 @@ pre.err{
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   letter-spacing:-0.1px;
 }
-.rsub{font-size:11px;color:var(--tx4);margin-top:3px;line-height:1.5}
+.rsub{font-size:11px;color:var(--tx4);margin-top:3px;line-height:1.5;min-width:0}
 .rsub .ok{color:var(--ok)}
 .rsub .err{color:var(--err)}
 .rsub .run{color:var(--warn)}
@@ -511,7 +521,8 @@ footer{
 
 /* ── Responsive ── */
 @media(max-width:480px){
-  .wrap{padding:16px 12px 60px}
+  .wrap{padding:16px 12px 30px}
+  .recent{max-height:300px}
   .mtabs{flex-direction:column;gap:6px}
   .mtab{padding:12px 0}
   .btns{flex-direction:column}
@@ -537,19 +548,43 @@ footer{
     <div class="mtab" data-mode="i2v">이미지 → 영상<span class="msub">I2V · 첫 프레임 지정</span></div>
   </div>
 
-  <!-- 프롬프트 -->
+  <!-- 프롬프트 (입력값이 채워져 있으면 본문만 버튼+팝업으로 노출) -->
   <div class="card">
     <h2>프롬프트</h2>
-    <label class="fld">본문 (영문 권장)</label>
-    <textarea id="prompt" placeholder="A golden retriever puppy running through a sunlit meadow, cinematic shot, soft bokeh..."></textarea>
-    <label class="fld" style="margin-top:12px">배제 (negative, 선택)</label>
-    <textarea id="negative" placeholder="blurry, low quality, deformed, text overlay" style="min-height:52px"></textarea>
-    <div class="hint">프롬프트와 negative가 한 방에 합쳐져 H3에 전달됩니다. 별도 입력 불필요.</div>
+    <div class="row" style="gap:8px;align-items:center">
+      <div class="pbtnrow" id="pbtnrow" style="display:none">
+        <span class="pbtn" id="pbtn" title="프롬프트 보기">스크립트</span>
+        <span class="pbtn" id="pbtnneg" title="배제 프롬프트 보기">배제</span>
+      </div>
+      <div class="phint" id="phint" style="display:none"></div>
+    </div>
+    <div id="promptwrap">
+      <label class="fld">본문 (영문 권장)</label>
+      <textarea id="prompt" placeholder="A golden retriever puppy running through a sunlit meadow, cinematic shot, soft bokeh..."></textarea>
+    </div>
+    <div id="negwrap" style="margin-top:12px">
+      <label class="fld">배제 (negative, 선택)</label>
+      <textarea id="negative" placeholder="blurry, low quality, deformed, text overlay" style="min-height:52px"></textarea>
+    </div>
+    <div class="hint" id="prompthint">프롬프트와 negative가 한 방에 합쳐져 H3에 전달됩니다. 별도 입력 불필요.</div>
+  </div>
+
+  <!-- 프롬프트 팝업 -->
+  <div class="modal-overlay" id="promptModal">
+    <div class="modal">
+      <div class="mhead"><h3 id="promptModalTitle">스크립트 / 프롬프트</h3><button class="close-btn" id="promptModalClose">✕</button></div>
+      <div class="mbody">
+        <pre id="promptModalText" style="white-space:pre-wrap;word-break:break-word;margin:0;font-family:inherit;font-size:13px;line-height:1.6;color:var(--tx)"></pre>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="copybtn" id="promptModalCopy">복사</button>
+      </div>
+    </div>
   </div>
 
   <!-- I2V 이미지 -->
   <div class="card" id="imgwrap" style="display:none">
-    <h2>첫 프레임 이미지 (I2V)</h2>
+    <h2>참조 이미지 (I2V · 첫 프레임)</h2>
     <div class="imgzone" id="imgzone">
       <div class="zicon">+</div>
       <div class="ztxt">클릭해서 이미지 선택<br>
@@ -557,12 +592,12 @@ footer{
     </div>
     <input type="file" id="imgfile" accept="image/png,image/jpeg,image/webp,image/bmp" style="display:none">
     <div id="imgbox" style="display:none;margin-top:12px"></div>
-    <div class="hint" id="imgnote">첫 프레임은 선택된 이미지가 됩니다. 고정 참조가 등록되어 있으면 이미지 없이도 자동으로 동일 인물을 유지합니다. (T2V일 경우 비활성화)</div>
+    <div class="hint" id="imgnote">I2V 모드: 첫 프레임으로 사용 · T2V 모드: 인물 참조만 적용 (배경은 프롬프트 기반)</div>
   </div>
 
   <!-- 고정 참조 (인물 고정) — I2V 모드에서만 표시 -->
   <div class="card" id="refwrap" style="display:none">
-    <h2>고정 참조 (인물 유지)</h2>
+    <h2>고정 참조 (인물 · 사진/동영상)</h2>
     <div class="hint" style="margin-bottom:10px">
       참조를 한 번 등록하면 서버에 <b>영구 보관</b>됩니다. 삭제하지 않는 이상 다음 생성부터 자동으로 동일 인물이 유지되고 배경은 자유롭게 변경됩니다.
     </div>
@@ -593,7 +628,7 @@ footer{
       <div class="chip" data-w="1152" data-h="864">4:3 · 1152×864</div>
       <div class="chip" data-w="864" data-h="1152">3:4 · 864×1152</div>
     </div>
-    <div class="hint">출력 해상도 16:9 기본 1344×768. 화면 비율을 선택하면 생성 해상도가 함께 정해집니다.</div>
+    <div class="hint" id="arHint">출력 해상도 16:9 기본 1344×768. 화면 비율을 선택하면 생성 해상도가 함께 정해집니다.</div>
   </div>
 
   <!-- 영상 길이 -->
@@ -660,9 +695,10 @@ footer{
     </div>
   </div>
 
-  <!-- 고정 설정 -->
-  <div class="card">
-    <h2>설정</h2>
+  <!-- 고정 설정 (접기 카드 — 접힌 상태에서는 카드 내부 스크립트가 화면에 표시되지 않음) -->
+  <div class="card collapsible" id="cfgcard">
+    <h2 class="cfgtoggle" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between">설정<span id="cfgchev" style="font-size:10px;opacity:.6">▸</span></h2>
+    <div id="cfgbody" style="display:none">
     <div class="hint" style="margin-top:0">
       - 프레임: <b>24fps</b> (출력) · H.264<br>
       - 체크포인트: minimax_h3_fl2va_pruned_int8_convrot.safetensors<br>
@@ -671,6 +707,7 @@ footer{
       - 인코더: Qwen3-VL 32B (PGX 로컬)<br>
       - 저장: NAS (aski_main/comfyui/h3_videos) + 로컬<br>
       - 분할: 선택된 세그먼트 길이 → 자동 ffconcat 스티치
+    </div>
     </div>
   </div>
 
@@ -685,7 +722,6 @@ footer{
       <span class="js">예상 완료 <b id="eta">—</b></span>
     </div>
     <div class="meta" id="metatext"></div>
-    <pre class="err" id="errmsg" style="display:none"></pre>
     <div class="result" id="result" style="display:none">
       <div class="i2v-stage" id="i2vstage">
         <video id="player" controls playsinline></video>
@@ -743,6 +779,15 @@ document.querySelectorAll('#refkind .chip').forEach(c=>c.onclick=()=>{
   refKind=c.dataset.kind;
   refvActive=false;
   refvMeta=null;
+  // zone 텍스트 업데이트
+  const ztxt=document.getElementById('refzone_txt');
+  if(ztxt){
+    if(refKind==='video'){
+      ztxt.innerHTML='고정 참조 동영상 등록하기<br><small>인물 동영상 — 100MB 이하';
+    } else {
+      ztxt.innerHTML='고정 참조 이미지 등록하기<br><small>인물 사진 — 15MB 이하';
+    }
+  }
   refClearUI();
   refRender();
   refvRender();
@@ -858,18 +903,75 @@ document.querySelectorAll('#segsel .chip').forEach(c=>c.onclick=()=>{
 })();
 updateStrategyHint();
 
+// 프롬프트 카드: 입력값이 있으면 본문/배제는 숨기고 버튼+팝업으로만 노출
+function updatePromptCardUI(){
+  const pv=($('#prompt').value||'').trim();
+  const nv=($('#negative').value||'').trim();
+  const has=pv.length>0||nv.length>0;
+  $('#pbtnrow').style.display=has?'flex':'none';
+  $('#promptwrap').style.display=has?'none':'';
+  $('#negwrap').style.display=has?'none':'';
+  $('#prompthint').style.display=has?'none':'';
+  const negbtn=$('#pbtnneg');
+  negbtn.style.display=nv?'':'none';
+  negbtn.classList.toggle('neg', !!nv);
+  const h=$('#phint');
+  if(has){
+    h.style.display='block';
+    let html='';
+    if(pv) html+='<div><b>본문</b> · '+pv.length+'자</div>';
+    if(nv) html+='<div><b>배제</b> · '+nv.length+'자</div>';
+    h.innerHTML=html;
+  } else {
+    h.style.display='none';
+  }
+}
+['prompt','negative'].forEach(id=>{
+  const el=$('#'+id);
+  el.addEventListener('input',()=>{ if(!el.value.trim()) updatePromptCardUI(); });
+});
+
+// 프롬프트 팝업 (스크립트 버튼 → 팝업 + 복사)
+function showPromptPopup(which){
+  const isNeg=which==='neg';
+  const text=isNeg?($('#negative').value||'').trim():($('#prompt').value||'').trim();
+  if(!text) return;
+  $('#promptModalTitle').textContent=isNeg?'배제 (Negative)':'스크립트 / 프롬프트';
+  $('#promptModalText').textContent=text;
+  $('#promptModal').classList.add('show');
+  const cb=$('#promptModalCopy');
+  cb.textContent='복사'; cb.classList.remove('copied');
+  cb.onclick=()=>{
+    navigator.clipboard.writeText(text).then(()=>{
+      cb.classList.add('copied'); cb.textContent='복사됨';
+      setTimeout(()=>{cb.classList.remove('copied');cb.textContent='복사';},1500);
+    }).catch(()=>{
+      const ta=document.createElement('textarea'); ta.value=text; document.body.appendChild(ta);
+      ta.select(); document.execCommand('copy'); ta.remove();
+      cb.classList.add('copied'); cb.textContent='복사됨';
+      setTimeout(()=>{cb.classList.remove('copied');cb.textContent='복사';},1500);
+    });
+  };
+}
+$('#pbtn').onclick=()=>showPromptPopup('prompt');
+$('#pbtnneg').onclick=()=>showPromptPopup('neg');
+$('#promptModalClose').onclick=()=>$('#promptModal').classList.remove('show');
+$('#promptModal').addEventListener('click',e=>{ if(e.target===e.currentTarget) e.currentTarget.classList.remove('show'); });
+updatePromptCardUI();
+
 document.querySelectorAll('.mtab').forEach(t=>t.onclick=()=>{
   MODE=t.dataset.mode;
   document.querySelectorAll('.mtab').forEach(x=>x.classList.remove('on'));
   t.classList.add('on');
+  // I2V 카드: i2v 모드일 때만 표시, t2v면 숨김
+  const imgwrap=document.getElementById('imgwrap');
+  const refwrap=document.getElementById('refwrap');
   if(MODE==='i2v'){
-    document.getElementById('imgwrap').style.display='block';
-    document.getElementById('imgnote').style.display='block';
-    document.getElementById('refwrap').style.display='block';
+    imgwrap.style.display='';
+    refwrap.style.display='';
   } else {
-    document.getElementById('imgwrap').style.display='none';
-    document.getElementById('imgnote').style.display='none';
-    document.getElementById('refwrap').style.display='none';
+    imgwrap.style.display='none';
+    refwrap.style.display='none';
   }
 });
 
@@ -889,8 +991,8 @@ function setImgUI(state, msg){
   } else if(state==='err'){
     if(zone) zone.style.display='';
     box.innerHTML=`<span style="color:var(--err)">${msg||'업로드 실패'}</span>
-      <button class="btn-rmimg" id="rmimg">✕</button>`;
-    document.getElementById('rmimg').onclick=clearImg;
+      <button class="btn-rmimg" id="rmimgref">✕</button>`;
+    document.getElementById('rmimgref').onclick=clearImg;
   } else if(state==='busy'){
     box.innerHTML='<span class="spin"></span> 업로드 중…';
   }
@@ -917,9 +1019,13 @@ document.getElementById('imgfile').onchange=e=>{
     .then(d=>{
       if(!d.ok){ setImgUI('err', d.error||'업로드 실패'); return; }
       imgNonce=d.nonce; imgW=d.width||0; imgH=d.height||0; imgName=d.name||f.name;
+      if(imgW&&imgH){ W=imgW; H=imgH; }
+      document.querySelectorAll('#ar .chip').forEach(x=>x.classList.remove('on'));
+      const arHint=document.getElementById('arHint');
+      if(arHint&&imgW&&imgH){ arHint.textContent=`이미지 비율 자동 반영: ${imgW}×${imgH}`; }
       setImgUI('ok');
       document.getElementById('imgmeta').textContent=
-        `${imgName} · ${imgW||'?'}×${imgH||'?'}px · ${(f.size/1048576).toFixed(1)}MB`;
+        `${imgName} · ${imgW||'?'}×${imgH||'?'}px · ${(f.size/1048576).toFixed(1)}MB` + (W===imgW&&H===imgH?' · 비율 자동 맞춰짐':'');
     })
     .catch(e=>setImgUI('err', String(e)));
 };
@@ -940,6 +1046,12 @@ function refRender(){
     box.style.display='none';
     zone.style.display='none';
     if(hint) hint.textContent = '동영상 참조가 등록되어 있어 I2V 생성 시 자동으로 사용됩니다.';
+    return;
+  }
+  // 이미지 모드일 때만 이미지 UI 표시
+  if(refKind !== 'image') {
+    box.style.display='none';
+    zone.style.display='none';
     return;
   }
   if(refActive){
@@ -971,7 +1083,11 @@ function refDelete(){
     .then(d=>{ if(d.ok){ refActive=false; refRender(); } });
 }
 document.getElementById('refzone_inner').onclick=()=>{
-  document.getElementById('reffile').click();
+  if(refKind==='video'){
+    document.getElementById('refvfile').click();
+  } else {
+    document.getElementById('reffile').click();
+  }
 };
 document.getElementById('reffile').onchange=e=>{
   const f=e.target.files[0];
@@ -1002,6 +1118,19 @@ document.getElementById('reffile').onchange=e=>{
     if(e.target.closest('#rmrefv')) return;
     document.getElementById('refvfile').click();
   });
+})();
+
+// 설정 카드 접기/펼치기 (접힌 상태에서는 카드 스크립트가 화면에 표시되지 않음)
+(function(){
+  const card=document.getElementById('cfgcard');
+  const body=document.getElementById('cfgbody');
+  const chev=document.getElementById('cfgchev');
+  if(!card||!body||!chev) return;
+  card.querySelector('.cfgtoggle').onclick=()=>{
+    const open=body.style.display!=='none';
+    body.style.display=open?'none':'';
+    chev.textContent=open?'▸':'▾';
+  };
 })();
 
 // ComfyUI 상세 상태
@@ -1047,7 +1176,6 @@ function setJobUI(j){
   $('#jobbox').style.display='block';
   $('#result').style.display='none';
   const i2v=$('#i2vframe'); if(i2v){i2v.style.display='none';i2v.style.opacity='0';i2v.style.backgroundImage='';}
-  $('#errmsg').style.display='none';
   const m=$('#metatext');
   const p=j.progress||{};
   if(j.status==='queued'){
@@ -1123,7 +1251,6 @@ function setJobUI(j){
   } else if(j.status==='error'){
     $('#stline').innerHTML='<span class="st" style="color:var(--err)">✕ 오류</span>';
     $('#bar').style.width='100%';
-    $('#errmsg').textContent=j.error||'알 수 없는 오류'; $('#errmsg').style.display='block';
     $('#stop').disabled=true; clearInterval(timer); timer=null; currentJob=null;
   } else if(j.status==='cancelled'){
     $('#stline').innerHTML='<span class="st" style="color:var(--warn)">■ 중단됨</span>';
@@ -1227,7 +1354,12 @@ function closePrompt(){
 }
 $('#modalClose').onclick=closePrompt;
 $('#scriptModal').onclick=e=>{ if(e.target===e.currentTarget) closePrompt(); };
-document.addEventListener('keydown',e=>{ if(e.key==='Escape') closePrompt(); });
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){
+    closePrompt();
+    $('#promptModal').classList.remove('show');
+  }
+});
 
 // 삭제
 function delJob(jid){
