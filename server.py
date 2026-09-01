@@ -35,6 +35,11 @@ ASUI = os.environ.get("ASUI", "aski")
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
 COMFY_OUT = "/home/aski/minimax-h3/output"
 NAS_DIR = "/mnt/comfyui_videos/comfyui/h3_videos"
+# CIFS automount 장애 때도 NAS로 직접 보관하는 SSH fallback. 키는 PGX의
+# aski 계정 전용 비밀 파일이며 저장소에는 포함하지 않는다.
+NAS_SSH_HOST = os.environ.get("H3_NAS_SSH_HOST", "admin@192.168.50.202")
+NAS_SSH_KEY = os.environ.get("H3_NAS_SSH_KEY", os.path.expanduser("~/.ssh/id_ed25519_qnas"))
+NAS_SSH_DIR = os.environ.get("H3_NAS_SSH_DIR", "/share/aski_main/comfyui/h3_videos")
 OUT_DIR = os.environ.get("H3_OUT_DIR", os.path.expanduser("~/h3-web/output"))
 
 # MiniMax H3 Eros E3 production profile. Override filenames with env vars when
@@ -556,8 +561,7 @@ def nas_ok():
 
 
 def _copy_to_nas(src_path):
-    """원본 파일을 NAS에 저장. 실패해도 로컬은 유지.
-    CIFS uid 제한 → run_asu(aski)로 우회."""
+    """NAS에 완전 검증 저장 후 경로를 반환한다. 실패 시 None이고 로컬은 유지된다."""
     dst = os.path.join(NAS_DIR, os.path.basename(src_path))
     try:
         if not os.path.isdir(NAS_DIR):
@@ -569,15 +573,18 @@ def _copy_to_nas(src_path):
             with os.fdopen(fd, 'wb') as f:
                 with open(src_path, 'rb') as s:
                     f.write(s.read())
+            if os.path.getsize(dst) != os.path.getsize(src_path):
+                raise RuntimeError("NAS 복사 크기 불일치")
             log(f"  NAS 저장: {dst}")
-            return True
+            return dst
         except Exception as e:
             log(f"  직접 NAS 쓰기 실패 ({e}) -> run_asu 폴백")
         # 직접 쓰기 실패 (CIFS seccomp 등) → run_asu 폴백
         p = run_asu(f"cp '{src_path}' '{dst}' && chmod 644 '{dst}'", timeout=60)
         if p.returncode == 0 and os.path.isfile(dst):
-            log(f"  NAS 저장(run_asu): {dst}")
-            return True
+            if os.path.getsize(dst) == os.path.getsize(src_path):
+                log(f"  NAS 저장(run_asu): {dst}")
+                return dst
         # run_asu도 실패 (CIFS에서 로컬 파일 stat 불가) → 로컬에서 읽고 NAS에 쓰기
         try:
             with open(src_path, 'rb') as s:
@@ -585,13 +592,30 @@ def _copy_to_nas(src_path):
             fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
             with os.fdopen(fd, 'wb') as f:
                 f.write(data)
+            if os.path.getsize(dst) != os.path.getsize(src_path):
+                raise RuntimeError("NAS 복사 크기 불일치")
             log(f"  NAS 저장(로컬읽기→직접쓰기): {dst}")
-            return True
+            return dst
         except Exception as e2:
-            raise RuntimeError(f"NAS 저장 전 경로 실패: {e}")
+            log(f"  CIFS NAS 저장 실패: {e2}")
+        # CIFS가 실패한 경우 NAS SSH archive를 쓰고 SHA256을 대조한다.
+        if os.path.isfile(NAS_SSH_KEY):
+            remote = f"{NAS_SSH_DIR.rstrip('/')}/{os.path.basename(src_path)}"
+            ssh = ["ssh", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", NAS_SSH_HOST]
+            quoted_dir = NAS_SSH_DIR.replace("'", "'\\''")
+            quoted_remote = remote.replace("'", "'\\''")
+            mkdir = subprocess.run(ssh + [f"/bin/sh -c 'mkdir -p \\\"{quoted_dir}\\\"'"], capture_output=True, text=True, timeout=30)
+            if mkdir.returncode == 0:
+                put = subprocess.run(["scp", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", src_path, f"{NAS_SSH_HOST}:{remote}"], capture_output=True, text=True, timeout=300)
+                local_hash = subprocess.check_output(["sha256sum", src_path], text=True).split()[0]
+                verify = subprocess.run(ssh + [f"/bin/sh -c 'sha256sum \\\"{quoted_remote}\\\"'"], capture_output=True, text=True, timeout=45)
+                if put.returncode == 0 and verify.returncode == 0 and verify.stdout.split() and verify.stdout.split()[0] == local_hash:
+                    log(f"  NAS 저장(SSH+SHA256): {remote}")
+                    return remote
+                log(f"  NAS SSH 저장/검증 실패: {put.stderr.strip()[:160] or verify.stderr.strip()[:160]}")
     except Exception as e:
         log(f"  NAS 저장 실패 (로컬 유지): {e}")
-        return False
+    return None
 
 
 def _remux_24fps(src_path, dst_path):
@@ -791,18 +815,25 @@ def run_job(job_id, cfg):
 
         # NAS에 저장
         update_job(job_id, progress=_prog(job_id, "NAS 저장 중", seg_done=segments, done_phase=3))
-        nas_success = _copy_to_nas(final_local)
-
+        nas_path = _copy_to_nas(final_local)
         fsize = os.path.getsize(final_local)
+        # NAS archive가 크기 또는 SHA256으로 검증됐을 때에만 PGX 원본/세그먼트를
+        # 제거한다. archive 실패 시에는 복구를 위해 로컬을 유지한다.
+        if nas_path:
+            shutil.rmtree(dst_dir)
+            final_src = nas_path
+        else:
+            final_src = final_local
         update_job(job_id,
-            status="done", file=os.path.basename(final_local), src=final_local,
+            status="done", file=os.path.basename(final_local), src=final_src,
             progress=_prog(job_id, "생성 완료", completed=True, eta=0, seg_done=segments),
             elapsed=round(time.time() - JOBS[job_id].get("started", time.time()), 1),
             segments=segments, total_seconds=total_seconds,
             size=fsize,
-            nas_saved=nas_success,
+            nas_saved=bool(nas_path),
+            storage="nas" if nas_path else "pgx-local-recovery",
         )
-        log(f"job {job_id} done → {final_local} ({segments}seg, {total_seconds}s, 24fps, {fsize//1048576}MB, nas={'OK' if nas_success else 'FAIL'})")
+        log(f"job {job_id} done → {final_src} ({segments}seg, {total_seconds}s, 24fps, {fsize//1048576}MB, nas={'OK' if nas_path else 'FAIL'})")
         return
     except Exception as e:
         update_job(job_id, status="error", error=str(e)[:800])
@@ -1015,7 +1046,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve_video(self, src, jid, disposition):
         """Stream video with byte-range support for playback, seeking and resume."""
-        size = os.path.getsize(src)
+        remote = src.startswith(NAS_SSH_DIR.rstrip("/") + "/")
+        if remote:
+            if not os.path.isfile(NAS_SSH_KEY):
+                send_json(self, {"ok": False, "error": "NAS archive 키가 없습니다"}, 503)
+                return
+            meta = subprocess.run(["ssh", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", NAS_SSH_HOST,
+                                   "stat", "-c", "%s", "--", src], capture_output=True, text=True, timeout=30)
+            if meta.returncode != 0 or not meta.stdout.strip().isdigit():
+                send_json(self, {"ok": False, "error": "NAS archive 영상을 찾을 수 없습니다"}, 404)
+                return
+            size = int(meta.stdout.strip())
+        else:
+            size = os.path.getsize(src)
         try:
             byte_range = parse_byte_range(self.headers.get("Range"), size)
         except ValueError:
@@ -1041,15 +1084,33 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command == "HEAD":
             return
-        with open(src, "rb") as f:
-            f.seek(start)
-            remaining = length
-            while remaining:
-                chunk = f.read(min(1024 * 256, remaining))
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                remaining -= len(chunk)
+        if remote:
+            # NAS에 복사본을 만들지 않고 dd로 필요한 Byte Range만 SSH stream한다.
+            proc = subprocess.Popen(["ssh", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", NAS_SSH_HOST,
+                                     "dd", f"if={src}", "iflag=skip_bytes", f"skip={start}", f"count={length}", "status=none"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            assert proc.stdout is not None and proc.stderr is not None
+            try:
+                while True:
+                    chunk = proc.stdout.read(1024 * 256)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                if proc.wait(timeout=60) != 0:
+                    log(f"NAS SSH video stream 실패: {proc.stderr.read().decode(errors='replace')[:160]}")
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+        else:
+            with open(src, "rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining:
+                    chunk = f.read(min(1024 * 256, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
 
     def do_GET(self):
         u = urlparse(self.path)
@@ -1141,10 +1202,12 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 j = JOBS.get(jid)
             src = j.get("src") if j and j.get("status") == "done" else None
+            is_remote_archive = bool(src and src.startswith(NAS_SSH_DIR.rstrip("/") + "/"))
             # 2) 폴백: JOBS에 없어도 파일 기반 탐색
-            if not src or not os.path.exists(src):
+            if not src or (not is_remote_archive and not os.path.exists(src)):
                 src = os.path.join(OUT_DIR, jid, f"{jid}.mp4")
-            if not os.path.exists(src):
+                is_remote_archive = False
+            if not is_remote_archive and not os.path.exists(src):
                 send_json(self, {"ok": False, "error": f"다운로드 가능 영상 없음 ({jid})"}, 404)
                 return
             self._serve_video(src, jid, "attachment" if p.startswith("/api/download/") else "inline")
@@ -1623,7 +1686,43 @@ class Handler(BaseHTTPRequestHandler):
             send_json(self, {"ok": True, "deleted": deleted, "preserved": preserved,
                              "message": "깨진 출력만 정리했습니다" if not preserved else "유효 MP4는 보호되어 삭제하지 않았습니다"})
         elif p.startswith("/api/delete/"):
-            send_json(self, {"ok": False, "error": "정상 영상 보호 정책: /api/delete-error/{job}만 사용할 수 있습니다"}, 400)
+            jid = p.split("/")[3]
+            if not valid_job_id(jid):
+                send_json(self, {"ok": False, "error": "invalid job id"}, 400)
+                return
+            with LOCK:
+                j = JOBS.get(jid)
+                if not j:
+                    send_json(self, {"ok": False, "error": "job 없음"}, 404)
+                    return
+                if j.get("status") != "done" or not j.get("nas_saved"):
+                    send_json(self, {"ok": False, "error": "NAS에 검증 저장된 완료 영상만 삭제할 수 있습니다"}, 400)
+                    return
+                name = os.path.basename(str(j.get("file", "")))
+            try:
+                archive = os.path.realpath(os.path.join(NAS_DIR, name))
+                root = os.path.realpath(NAS_DIR) + os.sep
+                if not name or not archive.startswith(root):
+                    raise RuntimeError("안전하지 않은 NAS archive 경로")
+                if os.path.isfile(archive):
+                    os.remove(archive)
+                else:
+                    remote = f"{NAS_SSH_DIR.rstrip('/')}/{name}"
+                    if not os.path.isfile(NAS_SSH_KEY):
+                        raise RuntimeError("NAS archive 키가 없습니다")
+                    quoted = remote.replace("'", "'\\''")
+                    pdel = subprocess.run(["ssh", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", NAS_SSH_HOST,
+                                           f"/bin/sh -c 'rm -f \\\"{quoted}\\\"'"], capture_output=True, text=True, timeout=45)
+                    if pdel.returncode != 0:
+                        raise RuntimeError(pdel.stderr.strip()[:200] or "NAS SSH 삭제 실패")
+                with LOCK:
+                    JOBS.pop(jid, None)
+                jf = _job_file(jid)
+                if os.path.isfile(jf):
+                    os.remove(jf)
+                send_json(self, {"ok": True, "message": "NAS archive 영상과 작업 기록을 삭제했습니다"})
+            except Exception as e:
+                send_json(self, {"ok": False, "error": f"NAS 삭제 실패: {e}"}, 500)
         else:
             send_json(self, {"ok": False, "error": "not found"}, 404)
 

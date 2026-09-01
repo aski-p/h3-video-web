@@ -1411,6 +1411,14 @@ function cleanupError(jid){
     })
     .catch(e=>alert('정리 실패: '+e));
 }
+function deleteCompleted(jid){
+  if(!confirm('NAS에 보관된 완료 영상을 영구 삭제할까요?\n이 작업은 되돌릴 수 없습니다.')) return;
+  fetch('/api/delete/'+jid,{method:'POST'})
+    .then(r=>r.json()).then(d=>{
+      if(!d.ok){ alert(d.error||'삭제 실패'); return; }
+      alert(d.message||'삭제 완료'); loadRecent();
+    }).catch(e=>alert('삭제 실패: '+e));
+}
 
 // 최근 작업 목록
 function fmtAgo(ts){
@@ -1506,7 +1514,9 @@ function loadRecent(){
         </div>
         ${st==='done'
           ?`<button class="rbtn pview" title="스크립트 보기">S</button>
-            <a class="rbtn open" href="${view}" target="_blank" rel="noopener">열기</a>`
+            <a class="rbtn open" href="${view}" target="_blank" rel="noopener">열기</a>
+            <a class="rbtn" href="/api/download/${j.id}" download="${j.id}.mp4">저장</a>
+            ${j.nas_saved?'<button class="rbtn del" title="NAS archive 영구 삭제">삭제</button>':''}`
           :(st==='error'||st==='cancelled'||st==='interrupted'
             ?`<button class="rbtn del">오류 정리</button>`
             :'')
@@ -1515,7 +1525,7 @@ function loadRecent(){
       const pv=item.querySelector('.pview');
       if(pv) pv.onclick=()=>showPrompt(j);
       const delB=item.querySelector('.del');
-      if(delB) delB.onclick=()=>cleanupError(j.id);
+      if(delB) delB.onclick=()=>st==='done'?deleteCompleted(j.id):cleanupError(j.id);
       list.appendChild(item);
     });
   }).catch(()=>{});
