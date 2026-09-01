@@ -8,18 +8,16 @@ import urllib.error
 # Tailscale MagicDNS: PGX 머신의 Tailscale IP (영구적, 터널 불필요)
 BACKEND = os.environ.get("H3_BACKEND", "https://thinkstationpgx-11d3.tailccac79.ts.net:8300")
 
-def _proxy_response(r, start_response, is_download=False):
+def _proxy_response(r, start_response, is_video=False):
     """HTTP response를 stream으로 반환 (다운로드 시 헤더 보존, 메모리 절감)."""
     headers = [("Content-Type", r.headers.get("Content-Type", "application/json")),
                ("Access-Control-Allow-Origin", "*"),
                ("Cache-Control", "no-store, no-cache, must-revalidate")]
-    if is_download:
-        cd = r.headers.get("Content-Disposition")
-        if cd:
-            headers.append(("Content-Disposition", cd))
-        cl = r.headers.get("Content-Length")
-        if cl:
-            headers.append(("Content-Length", cl))
+    if is_video:
+        for name in ("Content-Disposition", "Content-Length", "Content-Range", "Accept-Ranges"):
+            value = r.headers.get(name)
+            if value:
+                headers.append((name, value))
     start_response(f"{r.status}", headers)
     chunks = []
     while True:
@@ -38,24 +36,27 @@ def proxy(environ, start_response):
         n = int(environ["CONTENT_LENGTH"])
         body = environ.get("wsgi.input", b"").read(n)
 
-    # download 경로인지 확인 (대용량 파일 스트리밍 + 헤더 보존)
-    is_download = path.startswith("/api/download/")
+    # Playback and download must retain range semantics through Vercel.
+    is_video = path.startswith("/api/download/") or path.startswith("/api/view/")
 
     url = BACKEND + path
+    headers = {"Content-Type": environ.get("CONTENT_TYPE", "application/json")}
+    if environ.get("HTTP_RANGE"):
+        headers["Range"] = environ["HTTP_RANGE"]
     req = urllib.request.Request(url, data=body if method == "POST" else None,
-                                  method=method,
-                                  headers={"Content-Type": "application/json"})
+                                  method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=300) as r:
-            return _proxy_response(r, start_response, is_download)
+            return _proxy_response(r, start_response, is_video)
     except urllib.error.HTTPError as e:
         data = e.read()
         headers = [("Content-Type", "application/json"),
                    ("Access-Control-Allow-Origin", "*")]
-        if is_download:
-            cd = e.headers.get("Content-Disposition")
-            if cd:
-                headers.append(("Content-Disposition", cd))
+        if is_video:
+            for name in ("Content-Disposition", "Content-Length", "Content-Range", "Accept-Ranges"):
+                value = e.headers.get(name)
+                if value:
+                    headers.append((name, value))
         start_response(f"{e.code}", headers)
         return [data]
     except Exception as e:

@@ -1218,15 +1218,16 @@ function setJobUI(j){
   } else if(j.status==='running'||j.status==='queued'&&p.phase){
     $('#stline').innerHTML='<span class="spin"></span><span class="st">'+(p.phase||'영상 생성 중…')+'</span>';
     const est=j.estimated_seconds||75;
-    const pct=p.pct!=null?p.pct:Math.min(95, 5+((p.elapsed||0)/est)*90);
-    $('#bar').style.width=pct+'%';
-    $('#pct').textContent=Math.round(pct)+'%';
-    const eta=p.eta!=null?Math.max(0,p.eta):Math.max(0,Math.round(est-(p.elapsed||0)));
-    $('#eta').textContent=fmtEta(eta);
+    // A percentage is shown only when ComfyUI has reported measured progress.
+    // Never derive it from elapsed time: that looks precise but is misleading.
+    const hasMeasuredProgress=p.pct!=null;
+    $('#bar').style.width=hasMeasuredProgress?p.pct+'%':'0%';
+    $('#pct').textContent=hasMeasuredProgress?Math.round(p.pct)+'%':'—';
+    $('#eta').textContent=p.eta!=null?fmtEta(Math.max(0,p.eta)):'진행 정보 수신 대기';
     $('#jobid').textContent=j.id;
     $('#seedv').textContent=(j.seed!=null&&j.seed>=0)?j.seed:'랜덤';
     const stratLine=(j.strategy&&j.strategy!=='single')?('세그먼트 '+(j.segments||1)+'개 · '):(j.strategy==='single'?'단일생성 · ':'');
-    m.innerHTML='<b>'+(p.elapsed||0)+'초</b> 경과 · 예상 총 '+est+'초<br>'+
+    m.innerHTML='<b>'+(p.elapsed||0)+'초</b> 경과 · 예상 총 '+est+'초'+(hasMeasuredProgress?'':' · 진행률 이벤트 대기')+'<br>'+
       stratLine+
       (j.total_seconds?j.total_seconds+'초 · ':'')+
       '24fps 출력';
@@ -1240,11 +1241,12 @@ function setJobUI(j){
     $('#jobid').textContent=j.id;
     $('#seedv').textContent=(j.seed!=null&&j.seed>=0)?j.seed:(j.cfg&&j.cfg.seed!=null?j.cfg.seed:'랜덤');
     const dl='/api/download/'+j.id;
+    const view='/api/view/'+j.id;
     const nasWarn=(j.nas_saved===false)?'<br><span style="color:var(--warn)">NAS 저장 실패 — 로컬에만 저장됨</span>':'';
     const stratLine=(j.strategy==='single')?'단일생성 · ':'세그먼트 '+(j.segments||1)+'개 ('+(j.cfg&&j.cfg.seg_seconds?j.cfg.seg_seconds:SEG_SECONDS)+'초/개) · ';
     m.innerHTML='소요 '+(j.elapsed||'?')+'초 · '+stratLine+(j.total_seconds||S)+'초 · 24fps<br>'+
       (j.nas_saved===false?'NAS 저장 실패 · ':'NAS 저장 완료 · ')+'파일: '+(j.file||'')+nasWarn;
-    $('#player').src=dl; $('#result').style.display='block';
+    $('#player').src=view; $('#result').style.display='block';
     // I2V 모드: 원본 이미지를 2.5초간 보여준 후 자동으로 비디오로 전환
     if(j.mode==='i2v' && window.__imgBlob){
       const frame=$('#i2vframe');
@@ -1471,6 +1473,7 @@ function loadRecent(){
     if(!jobs.length) return;
     jobs.forEach(j=>{
       const dl='/api/download/'+j.id;
+      const view='/api/view/'+j.id;
       const st=j.status;
       let stTxt,stCls;
       if(st==='done'){ stTxt='완료'; stCls='ok'; }
@@ -1484,7 +1487,7 @@ function loadRecent(){
       const item=document.createElement('div');
       item.className='ritem';
       item.innerHTML=`
-        <video class="rthumb" src="${dl}" preload="metadata" muted></video>
+        <video class="rthumb" src="${view}" preload="metadata" muted></video>
         <div class="rmeta">
           <div class="rprompt" title="${(j.prompt||'').replace(/"/g,'&quot;')}">${j.prompt||j.id}</div>
           <div class="rsub">
@@ -1502,7 +1505,7 @@ function loadRecent(){
         </div>
         ${st==='done'
           ?`<button class="rbtn pview" title="스크립트 보기">S</button>
-            <a class="rbtn open" href="${dl}" target="_blank">열기</a>`
+            <a class="rbtn open" href="${view}" target="_blank" rel="noopener">열기</a>`
           :(st==='error'||st==='cancelled'||st==='interrupted'
             ?`<button class="rbtn del">오류 정리</button>`
             :'')

@@ -1,2 +1,7 @@
 .vercel
 .h3-web/
+__pycache__/
+*.py[cod]
+output/
+jobs/
+server.log

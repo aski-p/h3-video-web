@@ -179,34 +179,26 @@ def log(msg):
 
 
 def _prog(job_id, phase, **extra):
-    """진행률: ComfyUI queue/history 실상태 + 샘플러 이벤트(있으면) + 경과시간 보정.
+    """Build an honest progress payload; never estimate percentage from time/queue.
 
-    sampler_pct는 ComfyUI websocket progress 이벤트의 실제 step 비율이다. 해당
-    이벤트를 못 받는 구버전에서도 2초마다 경과시간 보정값을 다시 저장하므로 UI가
-    한 숫자에 멈춰 보이지 않는다.
+    ``sampler_pct`` is accepted only when it originated in the matching
+    ComfyUI WebSocket event.  Queue data remains informational and missing
+    sampler data is intentionally represented as ``pct: null``.
     """
     j = JOBS.get(job_id) or {}
-    est = max(1, j.get("estimated_seconds") or 75)
     now = time.time()
     elapsed = round(now - j.get("started", now), 1)
     segments = max(1, j.get("segments") or 1)
     seg_done = min(segments, int(extra.get("seg_done", 0)))
-    done_phase = int(extra.get("done_phase", 0))
-    # 생성 구간은 5~85%, 후처리/NAS는 남은 10%를 사용한다.
-    generation_base = 5 + 80 * seg_done / segments
     sampler_pct = extra.get("sampler_pct")
+    pct = None
     if sampler_pct is not None:
-        generation = generation_base + (80 / segments) * max(0, min(1, float(sampler_pct)))
-    elif seg_done < segments and done_phase == 0:
-        seg_started = j.get("segment_started", j.get("started", now))
-        seg_est = max(15, (est * 0.88) / segments)
-        generation = generation_base + (80 / segments) * min(0.96, max(0, now - seg_started) / seg_est)
-    else:
-        generation = 85
-    pct = min(99.0, round(max(generation, 85 + done_phase * 3), 1))
-    remain = round(est - elapsed, 0)
-    out = {"phase": phase, "elapsed": elapsed, "pct": pct, "eta": max(0, int(remain)),
-           "updated_at": now}
+        # Completed segments plus the exact current sampler ratio.
+        pct = round(100 * (seg_done + max(0, min(1, float(sampler_pct)))) / segments)
+    if extra.get("completed"):
+        pct = 100
+    out = {"phase": phase, "elapsed": elapsed, "pct": pct,
+           "eta": None, "updated_at": now}
     out.update(extra)
     return out
 
@@ -693,7 +685,7 @@ def run_job(job_id, cfg):
         fsize = os.path.getsize(final_local)
         update_job(job_id,
             status="done", file=os.path.basename(final_local), src=final_local,
-            progress=_prog(job_id, "생성 완료", pct=100, eta=0, seg_done=segments),
+            progress=_prog(job_id, "생성 완료", completed=True, eta=0, seg_done=segments),
             elapsed=round(time.time() - JOBS[job_id].get("started", time.time()), 1),
             segments=segments, total_seconds=total_seconds,
             size=fsize,
@@ -843,6 +835,34 @@ def send_json(handler, obj, code=200):
     handler.wfile.write(body)
 
 
+def parse_byte_range(header, size):
+    """Return an inclusive single HTTP byte range or None for a full response."""
+    if not header:
+        return None
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", header.strip())
+    if not match or size <= 0:
+        raise ValueError("invalid range")
+    first, last = match.groups()
+    if not first and not last:
+        raise ValueError("invalid range")
+    if first:
+        start = int(first)
+        end = int(last) if last else size - 1
+    else:
+        suffix = int(last)
+        if suffix <= 0:
+            raise ValueError("invalid range")
+        start, end = max(0, size - suffix), size - 1
+    if start >= size or end < start:
+        raise ValueError("unsatisfiable range")
+    return start, min(end, size - 1)
+
+
+def valid_job_id(jid):
+    """Reject path-like identifiers before using them in an output path."""
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{1,64}", jid or ""))
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log(fmt % args)
@@ -856,6 +876,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         self._cors()
+
+    def do_HEAD(self):
+        self.do_GET()
 
     def _static(self, path):
         if path in ("/", "/index.html"):
@@ -878,6 +901,44 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _serve_video(self, src, jid, disposition):
+        """Stream video with byte-range support for playback, seeking and resume."""
+        size = os.path.getsize(src)
+        try:
+            byte_range = parse_byte_range(self.headers.get("Range"), size)
+        except ValueError:
+            self.send_response(416)
+            self.send_header("Content-Range", f"bytes */{size}")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            return
+        if byte_range:
+            start, end = byte_range
+            length, code = end - start + 1, 206
+        else:
+            start, length, code = 0, size, 200
+        self.send_response(code)
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Content-Length", str(length))
+        self.send_header("Content-Disposition", f'{disposition}; filename="{jid}.mp4"')
+        self.send_header("Accept-Ranges", "bytes")
+        if byte_range:
+            self.send_header("Content-Range", f"bytes {start}-{start + length - 1}/{size}")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        with open(src, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining:
+                chunk = f.read(min(1024 * 256, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
 
     def do_GET(self):
         u = urlparse(self.path)
@@ -960,8 +1021,11 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             with open(_refv_video_path(), "rb") as f:
                 shutil.copyfileobj(f, self.wfile, length=1024 * 256)
-        elif p.startswith("/api/download/"):
+        elif p.startswith("/api/download/") or p.startswith("/api/view/"):
             jid = p.split("/")[3]
+            if not valid_job_id(jid):
+                send_json(self, {"ok": False, "error": "invalid job id"}, 400)
+                return
             # 1) JOBS에서 src 확인
             with LOCK:
                 j = JOBS.get(jid)
@@ -972,15 +1036,7 @@ class Handler(BaseHTTPRequestHandler):
             if not os.path.exists(src):
                 send_json(self, {"ok": False, "error": f"다운로드 가능 영상 없음 ({jid})"}, 404)
                 return
-            fsize = os.path.getsize(src)
-            self.send_response(200)
-            self.send_header("Content-Type", "video/mp4")
-            self.send_header("Content-Length", str(fsize))
-            self.send_header("Content-Disposition", f'attachment; filename="{jid}.mp4"')
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            with open(src, "rb") as f:
-                shutil.copyfileobj(f, self.wfile, length=1024 * 256)
+            self._serve_video(src, jid, "attachment" if p.startswith("/api/download/") else "inline")
         elif p == "/api/health":
             with QUEUE_LOCK:
                 q_len = len(QUEUE)
