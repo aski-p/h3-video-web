@@ -245,6 +245,43 @@ def apply_comfy_event(job_id, prompt_id, event, seg_done=0, segments=1):
     return False
 
 
+def reconcile_comfy_prompt(job_id, prompt_id, history, queue, seg_done=0,
+                           segments=1, final=False):
+    """Reconcile one prompt's queue/history snapshot without inventing progress.
+
+    Queue membership is lifecycle information only.  It never provides an
+    execution percentage, and entries for other prompts are ignored.
+    """
+    history = history if isinstance(history, dict) else {}
+    queue = queue if isinstance(queue, dict) else {}
+    record = history.get(prompt_id)
+    if isinstance(record, dict):
+        status = record.get("status") or {}
+        if status.get("status_str") == "error" or not status.get("completed", False):
+            return "error"
+        if final:
+            update_job(job_id, status="done", comfy_status="completed",
+                       progress=_prog(job_id, "생성 완료", completed=True,
+                                      seg_done=segments))
+        return "completed"
+
+    running = {str(row[1]) for row in queue.get("queue_running", [])
+               if isinstance(row, (list, tuple)) and len(row) > 1}
+    pending = {str(row[1]) for row in queue.get("queue_pending", [])
+               if isinstance(row, (list, tuple)) and len(row) > 1}
+    if str(prompt_id) in running:
+        comfy_status, phase, result = "running", "영상 생성 중", "running"
+    elif str(prompt_id) in pending:
+        comfy_status, phase, result = "pending", "ComfyUI 대기 중", "pending"
+    else:
+        return "unknown"
+    update_job(job_id, status="running", comfy_status=comfy_status,
+               progress=_prog(job_id, phase, seg_done=seg_done,
+                              queue_running=len(queue.get("queue_running", [])),
+                              queue_pending=len(queue.get("queue_pending", []))))
+    return result
+
+
 def _comfy_ws(client_id):
     """Open a short-lived ComfyUI event socket, or return None if unavailable."""
     if websocket is None:
@@ -584,8 +621,12 @@ def _copy_to_nas(src_path):
         except Exception as e:
             log(f"  직접 NAS 쓰기 실패 ({e}) -> run_asu 폴백")
         # 직접 쓰기 실패 (CIFS seccomp 등) → run_asu 폴백
-        p = run_asu(f"cp '{src_path}' '{dst}' && chmod 644 '{dst}'", timeout=60)
-        if p.returncode == 0 and os.path.isfile(dst):
+        try:
+            p = run_asu(f"cp '{src_path}' '{dst}' && chmod 644 '{dst}'", timeout=60)
+        except Exception as e:
+            p = None
+            log(f"  run_asu NAS 저장 실패 ({e}) -> SSH archive 폴백")
+        if p and p.returncode == 0 and os.path.isfile(dst):
             if os.path.getsize(dst) == os.path.getsize(src_path):
                 log(f"  NAS 저장(run_asu): {dst}")
                 return dst
@@ -786,13 +827,7 @@ def run_job(job_id, cfg):
                                                   unavailable=True))
                         time.sleep(2)
                         continue
-                    running_ids = {str(row[1]) for row in q.get("queue_running", []) if len(row) > 1}
-                    actual_phase = (f"세그먼트 {i+1}/{segments} 생성 중" if pid in running_ids
-                                    else f"세그먼트 {i+1}/{segments} ComfyUI 대기 중")
-                    update_job(job_id, status="running", comfy_status="running" if pid in running_ids else "pending",
-                               progress=_prog(job_id, actual_phase, seg_done=i,
-                                              queue_running=len(q.get("queue_running", [])),
-                                              queue_pending=len(q.get("queue_pending", []))))
+                    reconcile_comfy_prompt(job_id, pid, {}, q, i, segments)
                     time.sleep(2)
             finally:
                 if ws:
