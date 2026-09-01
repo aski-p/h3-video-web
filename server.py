@@ -91,6 +91,30 @@ QUEUE_LOCK = threading.Lock()
 ACTIVE = [None]       # 실행 중인 job_id (동시 1개)
 
 
+def host_memory_stats(meminfo_text=None):
+    """Return kernel-measured host RAM, using MemAvailable when available."""
+    if meminfo_text is None:
+        try:
+            with open("/proc/meminfo", encoding="utf-8") as f:
+                meminfo_text = f.read()
+        except OSError:
+            return None
+    values = {}
+    for line in meminfo_text.splitlines():
+        match = re.match(r"^(MemTotal|MemAvailable):\s+(\d+)\s+kB$", line)
+        if match:
+            values[match.group(1)] = int(match.group(2)) * 1024
+    total = values.get("MemTotal")
+    available = values.get("MemAvailable")
+    if not total or available is None:
+        return None
+    return {
+        "total_gb": round(total / 1e9, 1),
+        "used_gb": round((total - available) / 1e9, 1),
+        "available_gb": round(available / 1e9, 1),
+    }
+
+
 def _job_file(jid):
     return os.path.join(JOBS_DIR, f"{jid}.json")
 
@@ -142,9 +166,13 @@ def _restore_jobs():
         j.setdefault("status", "unknown")
         # started가 없으면 created로 fallback (타임라인 계산용)
         j.setdefault("started", j.get("created", now))
-        if j["status"] in ("queued", "starting", "running"):
+        # A transient ComfyUI lookup failure cannot survive a backend restart:
+        # no worker remains attached to that prompt.  Make the recovery action
+        # explicit instead of displaying an endlessly-empty progress bar.
+        if j["status"] in ("queued", "starting", "running", "unavailable"):
             j["status"] = "interrupted"
             j["error"] = j.get("error") or "서버 재시작으로 중단됨 — 다시 생성해 주세요"
+            j["progress"] = _prog(jid, "생성 중단됨 — 다시 생성해 주세요", unavailable=True)
         with LOCK:
             JOBS[jid] = j
     log(f"  job {len(JOBS)}개 복원 ({JOBS_DIR})")
@@ -1180,15 +1208,20 @@ class Handler(BaseHTTPRequestHandler):
                 active_id = ACTIVE[0]
             # 상세 상태: ComfyUI 버전/GPU, NAS, 활성 job
             cstats = comfy_get("/system_stats", timeout=3) if comfy_up() else {}
+            device = (cstats.get("devices") or [{}])[0]
+            vram_free = device.get("vram_free", 0)
+            vram_total = device.get("vram_total", 0)
             send_json(self, {
                 "ok": True, "jobs": items,
                 "comfy_up": comfy_up(),
                 "comfy_info": {
                     "version": cstats.get("system", {}).get("comfyui_version", ""),
-                    "gpu": (cstats.get("devices") or [{}])[0].get("name", ""),
-                    "gpu_vram_free_gb": round((cstats.get("devices") or [{}])[0].get("vram_free", 0) / 1e9, 1),
-                    "gpu_vram_total_gb": round((cstats.get("devices") or [{}])[0].get("vram_total", 0) / 1e9, 1),
+                    "gpu": device.get("name", ""),
+                    "gpu_vram_free_gb": round(vram_free / 1e9, 1),
+                    "gpu_vram_used_gb": round(max(vram_total - vram_free, 0) / 1e9, 1),
+                    "gpu_vram_total_gb": round(vram_total / 1e9, 1),
                 } if cstats else None,
+                "host_memory": host_memory_stats(),
                 "nas_ok": nas_ok(),
                 "queue_len": q_len,
                 "active_job": active_id,

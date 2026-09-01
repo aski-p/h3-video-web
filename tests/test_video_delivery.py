@@ -1,4 +1,5 @@
 import http.client
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -25,6 +26,25 @@ class VideoDeliveryTests(unittest.TestCase):
             progress = server._prog("job", "generating")
         self.assertIsNone(progress["pct"])
         self.assertIsNone(progress["eta"])
+
+    def test_host_memory_stats_reports_kernel_measured_used_total_and_available(self):
+        """Host RAM values must come from /proc/meminfo, never browser estimates."""
+        measured = server.host_memory_stats("""MemTotal:       131072000 kB
+MemAvailable:    20971520 kB
+MemFree:          1048576 kB
+Buffers:           524288 kB
+Cached:          18874368 kB
+""")
+        self.assertEqual(measured, {
+            "total_gb": 134.2,
+            "used_gb": 112.7,
+            "available_gb": 21.5,
+        })
+
+    def test_jobs_status_includes_measured_host_and_gpu_memory(self):
+        source = (Path(__file__).resolve().parents[1] / "server.py").read_text()
+        self.assertIn('"host_memory": host_memory_stats()', source)
+        self.assertIn('"gpu_vram_used_gb":', source)
 
     def test_comfy_events_require_matching_prompt_and_keep_raw_measurement(self):
         job = {"id": "job", "started": 1, "segments": 1, "status": "queued"}
@@ -67,6 +87,16 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertIsNone(job["progress"]["pct"])
         self.assertEqual(job["progress"]["value"], 4)
         self.assertEqual(job["progress"]["max"], 20)
+
+    def test_restore_turns_unavailable_job_into_recoverable_interrupted_state(self):
+        """A server restart must not leave an old lost ComfyUI prompt indefinitely unavailable."""
+        with tempfile.TemporaryDirectory() as root, patch.object(server, "JOBS_DIR", root), patch.dict(server.JOBS, {}, clear=True):
+            with open(os.path.join(root, "lost.json"), "w") as f:
+                json.dump({"id": "lost", "status": "unavailable", "created": 1,
+                           "progress": {"unavailable": True}}, f)
+            server._restore_jobs()
+            self.assertEqual(server.JOBS["lost"]["status"], "interrupted")
+            self.assertIn("다시 생성", server.JOBS["lost"]["error"])
 
     def test_queue_lifecycle_is_prompt_scoped_and_never_invents_percent(self):
         job = {"id": "job", "started": 1, "segments": 1, "status": "queued"}
@@ -199,6 +229,16 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertIn('id="trackingModalClose"', html)
         self.assertIn('function showJobTracking(j)', html)
         self.assertIn('data-track-job="${j.id}"', html)
+
+    def test_recent_jobs_are_managed_in_a_full_screen_modal(self):
+        """Recent work must not be trapped in the small inline dashboard card."""
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        self.assertIn('id="recentModal"', html)
+        self.assertIn('id="recentModalOpen"', html)
+        self.assertIn('id="recentModalClose"', html)
+        self.assertIn('id="recentModalList"', html)
+        self.assertIn('function showRecentModal()', html)
+        self.assertIn('function closeRecentModal()', html)
         self.assertIn("fetch('/api/job/'+jid)", html)
         self.assertIn('ComfyUI 원본 측정값', html)
         self.assertIn('리얼리즘 LoRA', html)
