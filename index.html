@@ -1220,10 +1220,11 @@ function setJobUI(j){
     const est=j.estimated_seconds||75;
     // A percentage is shown only when ComfyUI has reported measured progress.
     // Never derive it from elapsed time: that looks precise but is misleading.
-    const hasMeasuredProgress=p.pct!=null;
+    const hasMeasuredProgress=p.pct!=null && !p.unavailable;
+    const unavailable=p.unavailable===true || j.comfy_status==='unavailable';
     $('#bar').style.width=hasMeasuredProgress?p.pct+'%':'0%';
     $('#pct').textContent=hasMeasuredProgress?Math.round(p.pct)+'%':'—';
-    $('#eta').textContent=p.eta!=null?fmtEta(Math.max(0,p.eta)):'진행 정보 수신 대기';
+    $('#eta').textContent=unavailable?'ComfyUI 상태 확인 불가':(p.eta!=null?fmtEta(Math.max(0,p.eta)):'진행 정보 수신 대기');
     $('#jobid').textContent=j.id;
     $('#seedv').textContent=(j.seed!=null&&j.seed>=0)?j.seed:'랜덤';
     const stratLine=(j.strategy&&j.strategy!=='single')?('세그먼트 '+(j.segments||1)+'개 · '):(j.strategy==='single'?'단일생성 · ':'');

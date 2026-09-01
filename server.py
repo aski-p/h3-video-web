@@ -193,14 +193,64 @@ def _prog(job_id, phase, **extra):
     sampler_pct = extra.get("sampler_pct")
     pct = None
     if sampler_pct is not None:
-        # Completed segments plus the exact current sampler ratio.
-        pct = round(100 * (seg_done + max(0, min(1, float(sampler_pct)))) / segments)
+        # This is *only* the raw matching sampler event: 4/20 -> 20.
+        # Do not blend segment count, elapsed time, or queue position into it.
+        pct = round(100 * max(0, min(1, float(sampler_pct))))
     if extra.get("completed"):
         pct = 100
     out = {"phase": phase, "elapsed": elapsed, "pct": pct,
            "eta": None, "updated_at": now}
     out.update(extra)
     return out
+
+
+def apply_comfy_event(job_id, prompt_id, event, seg_done=0, segments=1):
+    """Apply one ComfyUI WebSocket event only when it belongs to ``prompt_id``.
+
+    ComfyUI broadcasts events for all clients. Prompt-id equality is the sole
+    correlation key, so unrelated work cannot affect an H3 job.
+    """
+    if not isinstance(event, dict):
+        return False
+    data = event.get("data") or {}
+    if str(data.get("prompt_id") or "") != str(prompt_id):
+        return False
+    typ = event.get("type")
+    if typ == "progress":
+        value, maximum = data.get("value"), data.get("max")
+        if (not isinstance(value, (int, float)) or not isinstance(maximum, (int, float))
+                or maximum <= 0):
+            return False
+        ratio = max(0.0, min(1.0, value / maximum))
+        update_job(job_id, status="running", comfy_status="running",
+                   progress=_prog(job_id, "영상 생성 중", seg_done=seg_done,
+                                  sampler_pct=ratio, node=data.get("node"),
+                                  value=value, max=maximum,
+                                  last_progress_at=time.time()))
+        return True
+    if typ == "executing":
+        # node=None signals completion, but history is still authoritative for
+        # output discovery.
+        update_job(job_id, status="running", comfy_status="running",
+                   progress=_prog(job_id, "영상 생성 중", seg_done=seg_done,
+                                  node=data.get("node")))
+        return True
+    if typ == "execution_error":
+        raise RuntimeError("ComfyUI 실행 오류: " + json.dumps(data, ensure_ascii=False)[:700])
+    return False
+
+
+def _comfy_ws(client_id):
+    """Open a short-lived ComfyUI event socket, or return None if unavailable."""
+    if websocket is None:
+        return None
+    ws_url = re.sub(r"^http", "ws", COMFY, count=1).rstrip("/") + "/ws?clientId=" + client_id
+    try:
+        ws = websocket.create_connection(ws_url, timeout=2)
+        ws.settimeout(1)
+        return ws
+    except Exception:
+        return None
 
 
 def snap_len(seconds):
@@ -609,58 +659,119 @@ def run_job(job_id, cfg):
                                    video_name=cfg.get("video_name", ""), prefix=prefix,
                                    realism_lora=cfg.get("realism_lora", False))
             cid = str(uuid.uuid4())
+            # Subscribe before queueing so an immediately-started prompt cannot
+            # emit its first real progress event before this client is listening.
+            ws = _comfy_ws(cid)
             queued = comfy_post("/prompt", {"prompt": workflow, "client_id": cid})
             if "error" in queued:
+                if ws:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
                 err_msg = json.dumps(queued, ensure_ascii=False)
                 raise RuntimeError(err_msg[:600])
             pid = queued["prompt_id"]
             update_job(job_id, status="running", comfy_prompt_id=pid, segment_started=time.time(),
+                       comfy_status="pending",
                        progress=_prog(job_id, f"세그먼트 {i+1}/{segments} ComfyUI 대기 중" if segments > 1 else "ComfyUI 대기 중",
                                       seg_done=i, queue_pending=1))
             log(f"  seg {i+1}/{segments} queued pid={pid} (H3)")
 
-            # ComfyUI history/queue를 2초마다 실제 조회한다. history에 완료가 기록될
-            # 때까지 prompt_id 기준으로만 추적하므로 다른 사용자 작업과 섞이지 않는다.
-            while True:
-                h = comfy_get(f"/history/{pid}", timeout=30)
-                if pid in h:
-                    result = h[pid]
-                    status = result.get("status", {})
-                    if status.get("status_str") == "error" or not status.get("completed", False):
-                        raise RuntimeError(f"seg {i+1} 실패: " + json.dumps(result, ensure_ascii=False)[:800])
-                    files = []
-                    for out in result.get("outputs", {}).values():
-                        for key in ("videos", "gifs", "images"):
-                            for f in out.get(key, []):
-                                if isinstance(f, dict):
-                                    fn = f.get("filename", "")
-                                    sub = f.get("subfolder", "")
-                                    files.append(os.path.join(sub, fn) if sub else fn)
-                                else:
-                                    files.append(str(f))
-                    mp4 = [f for f in files if str(f).lower().endswith(".mp4")] or files
-                    if not mp4:
-                        raise RuntimeError(f"seg {i+1} 완료되었으나 mp4 없음: {str(files)[:300]}")
-                    fname = str(mp4[0])
-                    src = _resolve_output(fname)
-                    dst_dir = os.path.join(OUT_DIR, job_id)
-                    os.makedirs(dst_dir, exist_ok=True)
-                    dst = os.path.join(dst_dir, f"seg_{i:02d}.mp4")
-                    if os.access(src, os.R_OK):
-                        shutil.copy2(src, dst)
-                    else:
-                        run_asu(f"cp '{src}' '{dst}' && chmod 644 '{dst}'", timeout=60)
-                    seg_files.append(dst)
-                    log(f"  seg {i+1}/{segments} 완료 → {dst}")
-                    break
-                q = comfy_get("/queue", timeout=30)
-                running_ids = {str(row[1]) for row in q.get("queue_running", []) if len(row) > 1}
-                actual_phase = (f"세그먼트 {i+1}/{segments} 생성 중" if pid in running_ids
-                                else f"세그먼트 {i+1}/{segments} ComfyUI 대기 중")
-                update_job(job_id, status="running", progress=_prog(job_id, actual_phase, seg_done=i,
-                    queue_running=len(q.get("queue_running", [])),
-                    queue_pending=len(q.get("queue_pending", []))))
-                time.sleep(2)
+            # A websocket supplies sampler measurements. Queue/history only
+            # establish this prompt's lifecycle; neither can manufacture a pct.
+            try:
+                while True:
+                    if ws:
+                        try:
+                            raw = ws.recv()
+                            if isinstance(raw, str):
+                                apply_comfy_event(job_id, pid, json.loads(raw), i, segments)
+                        except Exception as e:
+                            # A read timeout just means no event arrived yet;
+                            # it is not a connection failure.
+                            if websocket and isinstance(e, websocket.WebSocketTimeoutException):
+                                pass
+                            else:
+                                # Socket loss is fail-closed, not a fabricated
+                                # continuation. History polling below may recover.
+                                try:
+                                    ws.close()
+                                except Exception:
+                                    pass
+                                ws = None
+                                update_job(job_id, comfy_status="unavailable",
+                                           progress=_prog(job_id, "ComfyUI 진행 정보 수신 대기", seg_done=i,
+                                                          unavailable=True))
+                    try:
+                        h = comfy_get(f"/history/{pid}", timeout=30)
+                    except Exception:
+                        update_job(job_id, comfy_status="unavailable",
+                                   progress=_prog(job_id, "ComfyUI 상태 확인 불가", seg_done=i,
+                                                  unavailable=True))
+                        time.sleep(2)
+                        continue
+                    if pid in h:
+                        result = h[pid]
+                        status = result.get("status", {})
+                        if status.get("status_str") == "error" or not status.get("completed", False):
+                            raise RuntimeError(f"seg {i+1} 실패: " + json.dumps(result, ensure_ascii=False)[:800])
+                        files = []
+                        for out in result.get("outputs", {}).values():
+                            for key in ("videos", "gifs", "images"):
+                                for f in out.get(key, []):
+                                    if isinstance(f, dict):
+                                        fn = f.get("filename", "")
+                                        sub = f.get("subfolder", "")
+                                        files.append(os.path.join(sub, fn) if sub else fn)
+                                    else:
+                                        files.append(str(f))
+                        mp4 = [f for f in files if str(f).lower().endswith(".mp4")] or files
+                        if not mp4:
+                            raise RuntimeError(f"seg {i+1} 완료되었으나 mp4 없음: {str(files)[:300]}")
+                        fname = str(mp4[0])
+                        src = _resolve_output(fname)
+                        dst_dir = os.path.join(OUT_DIR, job_id)
+                        os.makedirs(dst_dir, exist_ok=True)
+                        dst = os.path.join(dst_dir, f"seg_{i:02d}.mp4")
+                        if os.access(src, os.R_OK):
+                            shutil.copy2(src, dst)
+                        else:
+                            run_asu(f"cp '{src}' '{dst}' && chmod 644 '{dst}'", timeout=60)
+                        seg_files.append(dst)
+                        log(f"  seg {i+1}/{segments} 완료 → {dst}")
+                        break
+                    # Without the event stream a queue position cannot be
+                    # represented as generation progress. Remain fail-closed
+                    # even if the prompt is visible in /queue.
+                    if ws is None:
+                        update_job(job_id, comfy_status="unavailable",
+                                   progress=_prog(job_id, "ComfyUI 진행 정보 수신 대기", seg_done=i,
+                                                  unavailable=True))
+                        time.sleep(2)
+                        continue
+                    try:
+                        q = comfy_get("/queue", timeout=30)
+                    except Exception:
+                        update_job(job_id, comfy_status="unavailable",
+                                   progress=_prog(job_id, "ComfyUI 상태 확인 불가", seg_done=i,
+                                                  unavailable=True))
+                        time.sleep(2)
+                        continue
+                    running_ids = {str(row[1]) for row in q.get("queue_running", []) if len(row) > 1}
+                    actual_phase = (f"세그먼트 {i+1}/{segments} 생성 중" if pid in running_ids
+                                    else f"세그먼트 {i+1}/{segments} ComfyUI 대기 중")
+                    update_job(job_id, status="running", comfy_status="running" if pid in running_ids else "pending",
+                               progress=_prog(job_id, actual_phase, seg_done=i,
+                                              queue_running=len(q.get("queue_running", [])),
+                                              queue_pending=len(q.get("queue_pending", []))))
+                    time.sleep(2)
+            finally:
+                if ws:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
 
         # 최종 파일 경로
         dst_dir = os.path.join(OUT_DIR, job_id)

@@ -25,6 +25,34 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertIsNone(progress["pct"])
         self.assertIsNone(progress["eta"])
 
+    def test_comfy_events_require_matching_prompt_and_keep_raw_measurement(self):
+        job = {"id": "job", "started": 1, "segments": 1, "status": "queued"}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), patch.object(server, "_save_job"):
+            ignored = server.apply_comfy_event("job", "ours", {
+                "type": "progress", "data": {"prompt_id": "someone-else", "value": 19, "max": 20, "node": "9"}
+            })
+            self.assertFalse(ignored)
+            self.assertEqual(job["status"], "queued")
+            accepted = server.apply_comfy_event("job", "ours", {
+                "type": "progress", "data": {"prompt_id": "ours", "value": 4, "max": 20, "node": "9"}
+            })
+        self.assertTrue(accepted)
+        self.assertEqual(job["status"], "running")
+        self.assertEqual(job["progress"]["pct"], 20)
+        self.assertEqual(job["progress"]["value"], 4)
+        self.assertEqual(job["progress"]["max"], 20)
+        self.assertEqual(job["progress"]["node"], "9")
+        self.assertIsNotNone(job["progress"]["last_progress_at"])
+
+    def test_invalid_comfy_progress_remains_unknown(self):
+        job = {"id": "job", "started": 1, "segments": 1, "status": "running"}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), patch.object(server, "_save_job"):
+            accepted = server.apply_comfy_event("job", "ours", {
+                "type": "progress", "data": {"prompt_id": "ours", "value": 4, "max": 0}
+            })
+        self.assertFalse(accepted)
+        self.assertNotIn("progress", job)
+
     def test_download_attachment_and_view_inline_support_ranges(self):
         with tempfile.TemporaryDirectory() as root, patch.object(server, "OUT_DIR", root), patch.dict(server.JOBS, {}, clear=True):
             jid = "testjob"
