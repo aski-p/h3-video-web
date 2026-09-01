@@ -647,13 +647,11 @@ def _copy_to_nas(src_path):
         if os.path.isfile(NAS_SSH_KEY):
             remote = f"{NAS_SSH_DIR.rstrip('/')}/{os.path.basename(src_path)}"
             ssh = ["ssh", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", NAS_SSH_HOST]
-            quoted_dir = NAS_SSH_DIR.replace("'", "'\\''")
-            quoted_remote = remote.replace("'", "'\\''")
-            mkdir = subprocess.run(ssh + [f"/bin/sh -c 'mkdir -p \\\"{quoted_dir}\\\"'"], capture_output=True, text=True, timeout=30)
+            mkdir = subprocess.run(ssh + [f"mkdir -p -- {NAS_SSH_DIR}"], capture_output=True, text=True, timeout=30)
             if mkdir.returncode == 0:
                 put = subprocess.run(["scp", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", src_path, f"{NAS_SSH_HOST}:{remote}"], capture_output=True, text=True, timeout=300)
                 local_hash = subprocess.check_output(["sha256sum", src_path], text=True).split()[0]
-                verify = subprocess.run(ssh + [f"/bin/sh -c 'sha256sum \\\"{quoted_remote}\\\"'"], capture_output=True, text=True, timeout=45)
+                verify = subprocess.run(ssh + [f"sha256sum -- {remote}"], capture_output=True, text=True, timeout=45)
                 if put.returncode == 0 and verify.returncode == 0 and verify.stdout.split() and verify.stdout.split()[0] == local_hash:
                     log(f"  NAS 저장(SSH+SHA256): {remote}")
                     return remote
