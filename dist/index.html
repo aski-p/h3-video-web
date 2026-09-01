@@ -398,6 +398,8 @@ button:disabled{opacity:.35;cursor:not-allowed}
   transition:all .15s;
 }
 .modal .close-btn:hover{background:rgba(255,255,255,0.08);color:var(--tx)}
+.video-modal{max-width:min(960px,100%);max-height:calc(100vh - 40px)}
+.video-modal #modalPlayer{display:block;width:100%;max-height:calc(100vh - 150px);background:#000;border-radius:var(--r-sm)}
 .modal .section{margin-bottom:14px}
 .modal .section:last-child{margin-bottom:0}
 .plbl{
@@ -740,7 +742,7 @@ footer{
       </div>
       <div class="dlrow">
         <a class="dl" id="dl1" download>⬇ MP4 다운로드</a>
-        <a class="dl" id="dl2" target="_blank" rel="noopener">새 탭에서 열기</a>
+        <button class="dl" id="dl2" type="button">팝업으로 열기</button>
         <button class="dl" id="viewScript">스크립트</button>
       </div>
     </div>
@@ -770,6 +772,15 @@ footer{
     <button class="close-btn" id="modalClose">✕</button>
     <h3>스크립트 / 프롬프트</h3>
     <div id="modalBody"></div>
+  </div>
+</div>
+
+<!-- 영상 미리보기 팝업: 새 탭 대신 앱 안에서 재생해 명시적으로 닫을 수 있다. -->
+<div class="modal-overlay" id="videoModal" aria-hidden="true">
+  <div class="modal video-modal" role="dialog" aria-modal="true" aria-labelledby="videoModalTitle">
+    <button class="close-btn" id="videoModalClose" aria-label="영상 닫기">✕</button>
+    <h3 id="videoModalTitle">영상 미리보기</h3>
+    <video id="modalPlayer" controls playsinline preload="metadata"></video>
   </div>
 </div>
 
@@ -1207,12 +1218,12 @@ function setJobUI(j){
   const p=j.progress||{};
   if(j.status==='queued'){
     $('#stline').innerHTML='<span class="spin"></span><span class="st">작업 대기 중…</span>';
-    $('#bar').style.width='5%';
+    $('#bar').style.width='0%'; $('#pct').textContent='—'; $('#eta').textContent='진행 정보 수신 대기';
     m.textContent='큐에 추가됨. ComfyUI 준비 중…';
     $('#stop').disabled=false;
   } else if(j.status==='starting'){
     $('#stline').innerHTML='<span class="spin"></span><span class="st">ComfyUI 기동 중…</span>';
-    $('#bar').style.width='15%';
+    $('#bar').style.width='0%'; $('#pct').textContent='—'; $('#eta').textContent='진행 정보 수신 대기';
     m.textContent='ComfyUI 서비스 시작 대기 중…';
     $('#stop').disabled=false;
   } else if(j.status==='running'||j.status==='queued'&&p.phase){
@@ -1273,7 +1284,7 @@ function setJobUI(j){
       $('#i2vframe').style.display='none';
     }
     $('#dl1').href=dl; $('#dl1').download=j.id+'.mp4';
-    $('#dl2').href=dl;
+    $('#dl2').onclick=()=>showVideo(view, j.file||j.id+'.mp4');
     $('#viewScript').onclick=()=>showPrompt(j);
     $('#stop').disabled=true;
     clearInterval(timer); timer=null; currentJob=null;
@@ -1304,7 +1315,7 @@ $('#go').onclick=async()=>{
   $('#go').disabled=true;
   $('#jobbox').style.display='block';
   $('#stline').innerHTML='<span class="spin"></span><span class="st">요청 중…</span>';
-  $('#bar').style.width='2%';
+  $('#bar').style.width='0%'; $('#pct').textContent='—'; $('#eta').textContent='진행 정보 수신 대기';
 
   const body={prompt, negative, width:W, height:H, seconds:S, steps:STEPS, strategy:STRATEGY, seg_seconds:SEG_SECONDS, seed, mode:MODE, filename:fname, realism_lora:REALISM_LORA};
   if(MODE==='i2v'){
@@ -1387,10 +1398,31 @@ function showPrompt(j){
 function closePrompt(){
   $('#scriptModal').classList.remove('show');
 }
+function showVideo(url, title='영상 미리보기'){
+  const modal=$('#videoModal');
+  $('#videoModalTitle').textContent=title;
+  const player=$('#modalPlayer');
+  player.src=url;
+  modal.classList.add('show');
+  modal.setAttribute('aria-hidden','false');
+  $('#videoModalClose').focus();
+}
+function closeVideo(){
+  const modal=$('#videoModal');
+  const player=$('#modalPlayer');
+  player.pause();
+  player.removeAttribute('src');
+  player.load();
+  modal.classList.remove('show');
+  modal.setAttribute('aria-hidden','true');
+}
 $('#modalClose').onclick=closePrompt;
+$('#videoModalClose').onclick=closeVideo;
 $('#scriptModal').onclick=e=>{ if(e.target===e.currentTarget) closePrompt(); };
+$('#videoModal').onclick=e=>{ if(e.target===e.currentTarget) closeVideo(); };
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){
+    closeVideo();
     closePrompt();
     $('#promptModal').classList.remove('show');
   }
@@ -1410,6 +1442,14 @@ function cleanupError(jid){
       loadRecent();
     })
     .catch(e=>alert('정리 실패: '+e));
+}
+function deleteCompleted(jid){
+  if(!confirm('NAS에 보관된 완료 영상을 영구 삭제할까요?\n이 작업은 되돌릴 수 없습니다.')) return;
+  fetch('/api/delete/'+jid,{method:'POST'})
+    .then(r=>r.json()).then(d=>{
+      if(!d.ok){ alert(d.error||'삭제 실패'); return; }
+      alert(d.message||'삭제 완료'); loadRecent();
+    }).catch(e=>alert('삭제 실패: '+e));
 }
 
 // 최근 작업 목록
@@ -1479,7 +1519,9 @@ function loadRecent(){
       let stTxt,stCls;
       if(st==='done'){ stTxt='완료'; stCls='ok'; }
       else if(st==='error'){ stTxt='오류'; stCls='err'; }
-      else if(st==='running'||st==='starting'||st==='queued'){ stTxt='진행 중'; stCls='run'; }
+      else if(st==='queued'){ stTxt='대기열'; stCls='run'; }
+      else if(st==='starting'){ stTxt='준비 중'; stCls='run'; }
+      else if(st==='running'){ stTxt='생성 중'; stCls='run'; }
       else { stTxt=st; stCls=''; }
       const size=j.size?fmtSize(j.size):'';
       const c=j.cfg||{};
@@ -1494,7 +1536,7 @@ function loadRecent(){
           <div class="rsub">
             <span class="${stCls}">${stTxt}</span> · ${fmtAgo(j.created||0)}
             ${j.status==='running'||j.status==='starting'||j.status==='queued'
-              ?` · <b>${(j.progress&&j.progress.pct!=null?Math.round(j.progress.pct)+'%':'…')}</b>`
+              ?` · <b>${(j.progress&&j.progress.pct!=null&&!j.progress.unavailable?Math.round(j.progress.pct)+'%':'—')}</b>`
               :''}
             ${res?' · '+res:''}
             ${j.total_seconds?' · '+j.total_seconds+'초':''}
@@ -1506,7 +1548,9 @@ function loadRecent(){
         </div>
         ${st==='done'
           ?`<button class="rbtn pview" title="스크립트 보기">S</button>
-            <a class="rbtn open" href="${view}" target="_blank" rel="noopener">열기</a>`
+            <button class="rbtn open" type="button">열기</button>
+            <a class="rbtn" href="/api/download/${j.id}" download="${j.id}.mp4">저장</a>
+            ${j.nas_saved?'<button class="rbtn del" title="NAS archive 영구 삭제">삭제</button>':''}`
           :(st==='error'||st==='cancelled'||st==='interrupted'
             ?`<button class="rbtn del">오류 정리</button>`
             :'')
@@ -1514,8 +1558,10 @@ function loadRecent(){
       `;
       const pv=item.querySelector('.pview');
       if(pv) pv.onclick=()=>showPrompt(j);
+      const openB=item.querySelector('.open');
+      if(openB) openB.onclick=()=>showVideo(view, j.file||j.id+'.mp4');
       const delB=item.querySelector('.del');
-      if(delB) delB.onclick=()=>cleanupError(j.id);
+      if(delB) delB.onclick=()=>st==='done'?deleteCompleted(j.id):cleanupError(j.id);
       list.appendChild(item);
     });
   }).catch(()=>{});

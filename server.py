@@ -15,7 +15,9 @@ import os
 import re
 import time
 import shutil
+import shlex
 import threading
+import socket
 import subprocess
 import urllib.request
 import urllib.error
@@ -206,6 +208,15 @@ def _prog(job_id, phase, **extra):
     out = {"phase": phase, "elapsed": elapsed, "pct": pct,
            "eta": None, "updated_at": now}
     out.update(extra)
+    # A connectivity failure invalidates the displayed percentage, but must not
+    # discard the last raw measurement received from the matching prompt.
+    # Keeping it makes the unavailable state auditable without turning old data
+    # into a current progress estimate.
+    if extra.get("unavailable"):
+        previous = j.get("progress") if isinstance(j.get("progress"), dict) else {}
+        for key in ("value", "max", "node", "last_progress_at"):
+            if key not in out and key in previous:
+                out[key] = previous[key]
     return out
 
 
@@ -270,12 +281,14 @@ def reconcile_comfy_prompt(job_id, prompt_id, history, queue, seg_done=0,
     pending = {str(row[1]) for row in queue.get("queue_pending", [])
                if isinstance(row, (list, tuple)) and len(row) > 1}
     if str(prompt_id) in running:
-        comfy_status, phase, result = "running", "영상 생성 중", "running"
+        comfy_status, phase, result, job_status = "running", "영상 생성 중", "running", "running"
     elif str(prompt_id) in pending:
-        comfy_status, phase, result = "pending", "ComfyUI 대기 중", "pending"
+        # ComfyUI exposes queued and executing prompts separately.  Do not
+        # label a waiting prompt as generating merely because H3 accepted it.
+        comfy_status, phase, result, job_status = "pending", "ComfyUI 대기 중", "pending", "queued"
     else:
         return "unknown"
-    update_job(job_id, status="running", comfy_status=comfy_status,
+    update_job(job_id, status=job_status, comfy_status=comfy_status,
                progress=_prog(job_id, phase, seg_done=seg_done,
                               queue_running=len(queue.get("queue_running", [])),
                               queue_pending=len(queue.get("queue_pending", []))))
@@ -647,11 +660,13 @@ def _copy_to_nas(src_path):
         if os.path.isfile(NAS_SSH_KEY):
             remote = f"{NAS_SSH_DIR.rstrip('/')}/{os.path.basename(src_path)}"
             ssh = ["ssh", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", NAS_SSH_HOST]
-            mkdir = subprocess.run(ssh + [f"mkdir -p -- {NAS_SSH_DIR}"], capture_output=True, text=True, timeout=30)
+            mkdir_cmd = "/bin/sh -c " + shlex.quote(f"mkdir -p -- {NAS_SSH_DIR}")
+            mkdir = subprocess.run(ssh + [mkdir_cmd], capture_output=True, text=True, timeout=30)
             if mkdir.returncode == 0:
                 put = subprocess.run(["scp", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", src_path, f"{NAS_SSH_HOST}:{remote}"], capture_output=True, text=True, timeout=300)
                 local_hash = subprocess.check_output(["sha256sum", src_path], text=True).split()[0]
-                verify = subprocess.run(ssh + [f"sha256sum -- {remote}"], capture_output=True, text=True, timeout=45)
+                verify_cmd = "/bin/sh -c " + shlex.quote(f"sha256sum -- {remote}")
+                verify = subprocess.run(ssh + [verify_cmd], capture_output=True, text=True, timeout=45)
                 if put.returncode == 0 and verify.returncode == 0 and verify.stdout.split() and verify.stdout.split()[0] == local_hash:
                     log(f"  NAS 저장(SSH+SHA256): {remote}")
                     return remote
@@ -739,7 +754,7 @@ def run_job(job_id, cfg):
                 err_msg = json.dumps(queued, ensure_ascii=False)
                 raise RuntimeError(err_msg[:600])
             pid = queued["prompt_id"]
-            update_job(job_id, status="running", comfy_prompt_id=pid, segment_started=time.time(),
+            update_job(job_id, status="queued", comfy_prompt_id=pid, segment_started=time.time(),
                        comfy_status="pending",
                        progress=_prog(job_id, f"세그먼트 {i+1}/{segments} ComfyUI 대기 중" if segments > 1 else "ComfyUI 대기 중",
                                       seg_done=i, queue_pending=1))

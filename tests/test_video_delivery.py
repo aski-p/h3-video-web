@@ -1,5 +1,6 @@
 import http.client
 import os
+from pathlib import Path
 import tempfile
 import threading
 import unittest
@@ -53,6 +54,49 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertNotIn("progress", job)
 
+    def test_comfy_unavailable_clears_measured_percent(self):
+        job = {"id": "job", "started": 1, "segments": 1, "status": "running"}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), patch.object(server, "_save_job"):
+            server.apply_comfy_event("job", "ours", {
+                "type": "progress", "data": {"prompt_id": "ours", "value": 4, "max": 20}
+            })
+            server.update_job("job", comfy_status="unavailable",
+                              progress=server._prog("job", "ComfyUI 상태 확인 불가",
+                                                    unavailable=True))
+        self.assertTrue(job["progress"]["unavailable"])
+        self.assertIsNone(job["progress"]["pct"])
+        self.assertEqual(job["progress"]["value"], 4)
+        self.assertEqual(job["progress"]["max"], 20)
+
+    def test_queue_lifecycle_is_prompt_scoped_and_never_invents_percent(self):
+        job = {"id": "job", "started": 1, "segments": 1, "status": "queued"}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), patch.object(server, "_save_job"):
+            self.assertEqual(server.reconcile_comfy_prompt("job", "ours", {}, {
+                "queue_running": [[0, "someone-else"]], "queue_pending": []
+            }), "unknown")
+            self.assertEqual(job["status"], "queued")
+            self.assertEqual(server.reconcile_comfy_prompt("job", "ours", {}, {
+                "queue_running": [], "queue_pending": [[0, "ours"]]
+            }), "pending")
+            self.assertIsNone(job["progress"]["pct"])
+            self.assertEqual(job["progress"]["phase"], "ComfyUI 대기 중")
+            # A ComfyUI queue entry is waiting, not generating.  Keep the
+            # public lifecycle separate so the UI cannot label it "in progress".
+            self.assertEqual(job["status"], "queued")
+            self.assertEqual(server.reconcile_comfy_prompt("job", "ours", {}, {
+                "queue_running": [[0, "ours"]], "queue_pending": []
+            }), "running")
+            self.assertIsNone(job["progress"]["pct"])
+            self.assertEqual(job["progress"]["phase"], "영상 생성 중")
+
+    def test_completed_history_marks_final_job_complete(self):
+        job = {"id": "job", "started": 1, "segments": 1, "status": "running"}
+        history = {"ours": {"status": {"completed": True, "status_str": "success"}}}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), patch.object(server, "_save_job"):
+            self.assertEqual(server.reconcile_comfy_prompt("job", "ours", history, {}, final=True), "completed")
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["progress"]["pct"], 100)
+
     def test_download_attachment_and_view_inline_support_ranges(self):
         with tempfile.TemporaryDirectory() as root, patch.object(server, "OUT_DIR", root), patch.dict(server.JOBS, {}, clear=True):
             jid = "testjob"
@@ -92,10 +136,13 @@ class VideoDeliveryTests(unittest.TestCase):
             status = 206
             headers = {"Content-Type": "video/mp4", "Content-Length": "4", "Content-Range": "bytes 2-5/10", "Accept-Ranges": "bytes", "Content-Disposition": "inline; filename=job.mp4"}
             def read(self, _size):
+                seen["reads"] = seen.get("reads", 0) + 1
                 if getattr(self, "done", False):
                     return b""
                 self.done = True
                 return b"2345"
+            def close(self):
+                seen["closed"] = True
             def __enter__(self): return self
             def __exit__(self, *_): return False
 
@@ -110,7 +157,19 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertEqual(seen["range"], "bytes=2-5")
         self.assertEqual(started[0], "206")
         self.assertEqual(started[1]["Content-Range"], "bytes 2-5/10")
+        # The endpoint must return before consuming the video body; Vercel can
+        # then pass chunks through instead of buffering an entire MP4.
+        self.assertNotIn("reads", seen)
         self.assertEqual(b"".join(result), b"2345")
+        self.assertEqual(seen["reads"], 2)
+        self.assertTrue(seen["closed"])
+    def test_video_ui_has_closeable_in_page_player_and_distinguishes_queue(self):
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        self.assertIn('id="videoModal"', html)
+        self.assertIn('function showVideo(', html)
+        self.assertIn('aria-label="영상 닫기"', html)
+        self.assertIn("st==='queued'){ stTxt='대기열'", html)
+        self.assertNotIn('class="rbtn open" href="${view}" target="_blank"', html)
 
 
 if __name__ == "__main__":
