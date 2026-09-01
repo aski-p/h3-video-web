@@ -53,6 +53,32 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertNotIn("progress", job)
 
+    def test_queue_lifecycle_is_prompt_scoped_and_never_invents_percent(self):
+        job = {"id": "job", "started": 1, "segments": 1, "status": "queued"}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), patch.object(server, "_save_job"):
+            self.assertEqual(server.reconcile_comfy_prompt("job", "ours", {}, {
+                "queue_running": [[0, "someone-else"]], "queue_pending": []
+            }), "unknown")
+            self.assertEqual(job["status"], "queued")
+            self.assertEqual(server.reconcile_comfy_prompt("job", "ours", {}, {
+                "queue_running": [], "queue_pending": [[0, "ours"]]
+            }), "pending")
+            self.assertIsNone(job["progress"]["pct"])
+            self.assertEqual(job["progress"]["phase"], "ComfyUI 대기 중")
+            self.assertEqual(server.reconcile_comfy_prompt("job", "ours", {}, {
+                "queue_running": [[0, "ours"]], "queue_pending": []
+            }), "running")
+            self.assertIsNone(job["progress"]["pct"])
+            self.assertEqual(job["progress"]["phase"], "영상 생성 중")
+
+    def test_completed_history_marks_final_job_complete(self):
+        job = {"id": "job", "started": 1, "segments": 1, "status": "running"}
+        history = {"ours": {"status": {"completed": True, "status_str": "success"}}}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), patch.object(server, "_save_job"):
+            self.assertEqual(server.reconcile_comfy_prompt("job", "ours", history, {}, final=True), "completed")
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["progress"]["pct"], 100)
+
     def test_download_attachment_and_view_inline_support_ranges(self):
         with tempfile.TemporaryDirectory() as root, patch.object(server, "OUT_DIR", root), patch.dict(server.JOBS, {}, clear=True):
             jid = "testjob"

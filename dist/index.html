@@ -1207,12 +1207,12 @@ function setJobUI(j){
   const p=j.progress||{};
   if(j.status==='queued'){
     $('#stline').innerHTML='<span class="spin"></span><span class="st">작업 대기 중…</span>';
-    $('#bar').style.width='5%';
+    $('#bar').style.width='0%'; $('#pct').textContent='—'; $('#eta').textContent='진행 정보 수신 대기';
     m.textContent='큐에 추가됨. ComfyUI 준비 중…';
     $('#stop').disabled=false;
   } else if(j.status==='starting'){
     $('#stline').innerHTML='<span class="spin"></span><span class="st">ComfyUI 기동 중…</span>';
-    $('#bar').style.width='15%';
+    $('#bar').style.width='0%'; $('#pct').textContent='—'; $('#eta').textContent='진행 정보 수신 대기';
     m.textContent='ComfyUI 서비스 시작 대기 중…';
     $('#stop').disabled=false;
   } else if(j.status==='running'||j.status==='queued'&&p.phase){
@@ -1304,7 +1304,7 @@ $('#go').onclick=async()=>{
   $('#go').disabled=true;
   $('#jobbox').style.display='block';
   $('#stline').innerHTML='<span class="spin"></span><span class="st">요청 중…</span>';
-  $('#bar').style.width='2%';
+  $('#bar').style.width='0%'; $('#pct').textContent='—'; $('#eta').textContent='진행 정보 수신 대기';
 
   const body={prompt, negative, width:W, height:H, seconds:S, steps:STEPS, strategy:STRATEGY, seg_seconds:SEG_SECONDS, seed, mode:MODE, filename:fname, realism_lora:REALISM_LORA};
   if(MODE==='i2v'){
@@ -1411,6 +1411,14 @@ function cleanupError(jid){
     })
     .catch(e=>alert('정리 실패: '+e));
 }
+function deleteCompleted(jid){
+  if(!confirm('NAS에 보관된 완료 영상을 영구 삭제할까요?\n이 작업은 되돌릴 수 없습니다.')) return;
+  fetch('/api/delete/'+jid,{method:'POST'})
+    .then(r=>r.json()).then(d=>{
+      if(!d.ok){ alert(d.error||'삭제 실패'); return; }
+      alert(d.message||'삭제 완료'); loadRecent();
+    }).catch(e=>alert('삭제 실패: '+e));
+}
 
 // 최근 작업 목록
 function fmtAgo(ts){
@@ -1494,7 +1502,7 @@ function loadRecent(){
           <div class="rsub">
             <span class="${stCls}">${stTxt}</span> · ${fmtAgo(j.created||0)}
             ${j.status==='running'||j.status==='starting'||j.status==='queued'
-              ?` · <b>${(j.progress&&j.progress.pct!=null?Math.round(j.progress.pct)+'%':'…')}</b>`
+              ?` · <b>${(j.progress&&j.progress.pct!=null&&!j.progress.unavailable?Math.round(j.progress.pct)+'%':'—')}</b>`
               :''}
             ${res?' · '+res:''}
             ${j.total_seconds?' · '+j.total_seconds+'초':''}
@@ -1506,7 +1514,9 @@ function loadRecent(){
         </div>
         ${st==='done'
           ?`<button class="rbtn pview" title="스크립트 보기">S</button>
-            <a class="rbtn open" href="${view}" target="_blank" rel="noopener">열기</a>`
+            <a class="rbtn open" href="${view}" target="_blank" rel="noopener">열기</a>
+            <a class="rbtn" href="/api/download/${j.id}" download="${j.id}.mp4">저장</a>
+            ${j.nas_saved?'<button class="rbtn del" title="NAS archive 영구 삭제">삭제</button>':''}`
           :(st==='error'||st==='cancelled'||st==='interrupted'
             ?`<button class="rbtn del">오류 정리</button>`
             :'')
@@ -1515,7 +1525,7 @@ function loadRecent(){
       const pv=item.querySelector('.pview');
       if(pv) pv.onclick=()=>showPrompt(j);
       const delB=item.querySelector('.del');
-      if(delB) delB.onclick=()=>cleanupError(j.id);
+      if(delB) delB.onclick=()=>st==='done'?deleteCompleted(j.id):cleanupError(j.id);
       list.appendChild(item);
     });
   }).catch(()=>{});

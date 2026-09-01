@@ -1207,12 +1207,12 @@ function setJobUI(j){
   const p=j.progress||{};
   if(j.status==='queued'){
     $('#stline').innerHTML='<span class="spin"></span><span class="st">작업 대기 중…</span>';
-    $('#bar').style.width='5%';
+    $('#bar').style.width='0%'; $('#pct').textContent='—'; $('#eta').textContent='진행 정보 수신 대기';
     m.textContent='큐에 추가됨. ComfyUI 준비 중…';
     $('#stop').disabled=false;
   } else if(j.status==='starting'){
     $('#stline').innerHTML='<span class="spin"></span><span class="st">ComfyUI 기동 중…</span>';
-    $('#bar').style.width='15%';
+    $('#bar').style.width='0%'; $('#pct').textContent='—'; $('#eta').textContent='진행 정보 수신 대기';
     m.textContent='ComfyUI 서비스 시작 대기 중…';
     $('#stop').disabled=false;
   } else if(j.status==='running'||j.status==='queued'&&p.phase){
@@ -1304,7 +1304,7 @@ $('#go').onclick=async()=>{
   $('#go').disabled=true;
   $('#jobbox').style.display='block';
   $('#stline').innerHTML='<span class="spin"></span><span class="st">요청 중…</span>';
-  $('#bar').style.width='2%';
+  $('#bar').style.width='0%'; $('#pct').textContent='—'; $('#eta').textContent='진행 정보 수신 대기';
 
   const body={prompt, negative, width:W, height:H, seconds:S, steps:STEPS, strategy:STRATEGY, seg_seconds:SEG_SECONDS, seed, mode:MODE, filename:fname, realism_lora:REALISM_LORA};
   if(MODE==='i2v'){
@@ -1502,7 +1502,7 @@ function loadRecent(){
           <div class="rsub">
             <span class="${stCls}">${stTxt}</span> · ${fmtAgo(j.created||0)}
             ${j.status==='running'||j.status==='starting'||j.status==='queued'
-              ?` · <b>${(j.progress&&j.progress.pct!=null?Math.round(j.progress.pct)+'%':'…')}</b>`
+              ?` · <b>${(j.progress&&j.progress.pct!=null&&!j.progress.unavailable?Math.round(j.progress.pct)+'%':'—')}</b>`
               :''}
             ${res?' · '+res:''}
             ${j.total_seconds?' · '+j.total_seconds+'초':''}
