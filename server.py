@@ -565,7 +565,11 @@ def _copy_to_nas(src_path):
     dst = os.path.join(NAS_DIR, os.path.basename(src_path))
     try:
         if not os.path.isdir(NAS_DIR):
-            os.makedirs(NAS_DIR, exist_ok=True)
+            try:
+                os.makedirs(NAS_DIR, exist_ok=True)
+            except OSError as e:
+                # CIFS automount 권한/장애는 SSH archive fallback으로 계속 진행한다.
+                log(f"  CIFS NAS 디렉터리 준비 실패 ({e}) -> SSH archive 폴백")
         # 직접 쓰기 (NAS_DIR은 aski 소유 CIFS — uid 1000/1000)
         # CIFS + seccomp: chmod/chown이 EPERM → os.open(mode=0o644)로 생성 시점에 권한 지정
         try:
