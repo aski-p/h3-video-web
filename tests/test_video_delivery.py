@@ -53,6 +53,20 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertNotIn("progress", job)
 
+    def test_comfy_unavailable_clears_measured_percent(self):
+        job = {"id": "job", "started": 1, "segments": 1, "status": "running"}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), patch.object(server, "_save_job"):
+            server.apply_comfy_event("job", "ours", {
+                "type": "progress", "data": {"prompt_id": "ours", "value": 4, "max": 20}
+            })
+            server.update_job("job", comfy_status="unavailable",
+                              progress=server._prog("job", "ComfyUI 상태 확인 불가",
+                                                    unavailable=True))
+        self.assertTrue(job["progress"]["unavailable"])
+        self.assertIsNone(job["progress"]["pct"])
+        self.assertEqual(job["progress"]["value"], 4)
+        self.assertEqual(job["progress"]["max"], 20)
+
     def test_queue_lifecycle_is_prompt_scoped_and_never_invents_percent(self):
         job = {"id": "job", "started": 1, "segments": 1, "status": "queued"}
         with patch.dict(server.JOBS, {"job": job}, clear=True), patch.object(server, "_save_job"):
