@@ -1137,9 +1137,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.command == "HEAD":
             return
         if remote:
-            # NAS에 복사본을 만들지 않고 dd로 필요한 Byte Range만 SSH stream한다.
+            # QNAP BusyBox dd does not implement GNU iflag=skip_bytes.  bs=1
+            # makes skip/count exact bytes (Range requests are typically small
+            # initial probes or browser-managed chunks) and works on both NAS
+            # and GNU userlands.
             proc = subprocess.Popen(["ssh", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", NAS_SSH_HOST,
-                                     "dd", f"if={src}", "iflag=skip_bytes", f"skip={start}", f"count={length}", "status=none"],
+                                     "dd", f"if={src}", "bs=1", f"skip={start}", f"count={length}"],
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             assert proc.stdout is not None and proc.stderr is not None
             try:

@@ -166,9 +166,17 @@ class VideoDeliveryTests(unittest.TestCase):
     def test_video_ui_has_closeable_in_page_player_and_distinguishes_queue(self):
         html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
         self.assertIn('id="videoModal"', html)
-        self.assertIn('function showVideo(', html)
         self.assertIn('aria-label="영상 닫기"', html)
+        self.assertIn("function showVideo", html)
         self.assertIn("st==='queued'){ stTxt='대기열'", html)
+
+    def test_remote_archive_stream_uses_busybox_compatible_byte_ranges(self):
+        source = (Path(__file__).resolve().parents[1] / "server.py").read_text()
+        self.assertIn('"bs=1", f"skip={start}", f"count={length}"', source)
+        self.assertNotIn('"iflag=skip_bytes"', source)
+
+    def test_recent_video_open_does_not_escape_to_an_unclosable_tab(self):
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
         self.assertNotIn('class="rbtn open" href="${view}" target="_blank"', html)
 
 
