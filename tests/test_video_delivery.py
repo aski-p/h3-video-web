@@ -1,5 +1,6 @@
 import http.client
 import os
+from pathlib import Path
 import tempfile
 import threading
 import unittest
@@ -79,6 +80,9 @@ class VideoDeliveryTests(unittest.TestCase):
             }), "pending")
             self.assertIsNone(job["progress"]["pct"])
             self.assertEqual(job["progress"]["phase"], "ComfyUI 대기 중")
+            # A ComfyUI queue entry is waiting, not generating.  Keep the
+            # public lifecycle separate so the UI cannot label it "in progress".
+            self.assertEqual(job["status"], "queued")
             self.assertEqual(server.reconcile_comfy_prompt("job", "ours", {}, {
                 "queue_running": [[0, "ours"]], "queue_pending": []
             }), "running")
@@ -132,10 +136,13 @@ class VideoDeliveryTests(unittest.TestCase):
             status = 206
             headers = {"Content-Type": "video/mp4", "Content-Length": "4", "Content-Range": "bytes 2-5/10", "Accept-Ranges": "bytes", "Content-Disposition": "inline; filename=job.mp4"}
             def read(self, _size):
+                seen["reads"] = seen.get("reads", 0) + 1
                 if getattr(self, "done", False):
                     return b""
                 self.done = True
                 return b"2345"
+            def close(self):
+                seen["closed"] = True
             def __enter__(self): return self
             def __exit__(self, *_): return False
 
@@ -150,7 +157,19 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertEqual(seen["range"], "bytes=2-5")
         self.assertEqual(started[0], "206")
         self.assertEqual(started[1]["Content-Range"], "bytes 2-5/10")
+        # The endpoint must return before consuming the video body; Vercel can
+        # then pass chunks through instead of buffering an entire MP4.
+        self.assertNotIn("reads", seen)
         self.assertEqual(b"".join(result), b"2345")
+        self.assertEqual(seen["reads"], 2)
+        self.assertTrue(seen["closed"])
+    def test_video_ui_has_closeable_in_page_player_and_distinguishes_queue(self):
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        self.assertIn('id="videoModal"', html)
+        self.assertIn('function showVideo(', html)
+        self.assertIn('aria-label="영상 닫기"', html)
+        self.assertIn("st==='queued'){ stTxt='대기열'", html)
+        self.assertNotIn('class="rbtn open" href="${view}" target="_blank"', html)
 
 
 if __name__ == "__main__":

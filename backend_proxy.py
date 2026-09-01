@@ -19,13 +19,20 @@ def _proxy_response(r, start_response, is_video=False):
             if value:
                 headers.append((name, value))
     start_response(f"{r.status}", headers)
-    chunks = []
-    while True:
-        chunk = r.read(65536)
-        if not chunk:
-            break
-        chunks.append(chunk)
-    return chunks
+
+    # WSGI consumes an iterable lazily.  Returning a list here buffered the
+    # entire MP4 before sending its first byte, which can exhaust a serverless
+    # proxy or turn a healthy upstream connection into a 520/timeout.
+    def stream():
+        try:
+            while True:
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            r.close()
+    return stream()
 
 
 def proxy(environ, start_response):
@@ -46,8 +53,11 @@ def proxy(environ, start_response):
     req = urllib.request.Request(url, data=body if method == "POST" else None,
                                   method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=300) as r:
-            return _proxy_response(r, start_response, is_video)
+        # Do not use a context manager here: _proxy_response returns a lazy
+        # WSGI iterator that must keep the upstream socket open while bytes
+        # are sent to the browser.
+        r = urllib.request.urlopen(req, timeout=300)
+        return _proxy_response(r, start_response, is_video)
     except urllib.error.HTTPError as e:
         data = e.read()
         headers = [("Content-Type", "application/json"),

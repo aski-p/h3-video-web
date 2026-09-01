@@ -281,12 +281,14 @@ def reconcile_comfy_prompt(job_id, prompt_id, history, queue, seg_done=0,
     pending = {str(row[1]) for row in queue.get("queue_pending", [])
                if isinstance(row, (list, tuple)) and len(row) > 1}
     if str(prompt_id) in running:
-        comfy_status, phase, result = "running", "영상 생성 중", "running"
+        comfy_status, phase, result, job_status = "running", "영상 생성 중", "running", "running"
     elif str(prompt_id) in pending:
-        comfy_status, phase, result = "pending", "ComfyUI 대기 중", "pending"
+        # ComfyUI exposes queued and executing prompts separately.  Do not
+        # label a waiting prompt as generating merely because H3 accepted it.
+        comfy_status, phase, result, job_status = "pending", "ComfyUI 대기 중", "pending", "queued"
     else:
         return "unknown"
-    update_job(job_id, status="running", comfy_status=comfy_status,
+    update_job(job_id, status=job_status, comfy_status=comfy_status,
                progress=_prog(job_id, phase, seg_done=seg_done,
                               queue_running=len(queue.get("queue_running", [])),
                               queue_pending=len(queue.get("queue_pending", []))))
@@ -752,7 +754,7 @@ def run_job(job_id, cfg):
                 err_msg = json.dumps(queued, ensure_ascii=False)
                 raise RuntimeError(err_msg[:600])
             pid = queued["prompt_id"]
-            update_job(job_id, status="running", comfy_prompt_id=pid, segment_started=time.time(),
+            update_job(job_id, status="queued", comfy_prompt_id=pid, segment_started=time.time(),
                        comfy_status="pending",
                        progress=_prog(job_id, f"세그먼트 {i+1}/{segments} ComfyUI 대기 중" if segments > 1 else "ComfyUI 대기 중",
                                       seg_done=i, queue_pending=1))
