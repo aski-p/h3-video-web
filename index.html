@@ -469,7 +469,7 @@ button:disabled{opacity:.35;cursor:not-allowed}
 @media(max-width:480px){.tracking-modal{padding:16px}.track-grid{grid-template-columns:1fr}.track-status{align-items:flex-start;flex-direction:column;gap:3px}}
 
 /* 최근 작업은 작은 인라인 카드가 아니라 전용 전체 팝업에서 관리한다. */
-.recent-modal{width:min(980px,100%);height:calc(100vh - 32px);max-height:none;display:flex;flex-direction:column;overflow:hidden}
+.recent-modal{width:min(980px,100%);max-width:none;height:calc(100vh - 32px);max-height:none;display:flex;flex-direction:column;overflow:hidden}
 .recent-modal-head{display:flex;justify-content:space-between;gap:12px;align-items:baseline;margin-bottom:12px;padding-right:42px}
 .recent-modal-head p{margin:0;color:var(--tx4);font-size:12px}
 .recent-modal .recent{max-height:none;flex:1;overflow-y:auto;padding:2px 4px 12px 0}
