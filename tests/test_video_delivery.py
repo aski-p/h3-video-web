@@ -179,6 +179,19 @@ class VideoDeliveryTests(unittest.TestCase):
         html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
         self.assertNotIn('class="rbtn open" href="${view}" target="_blank"', html)
 
+    def test_mobile_recent_jobs_group_actions_below_metadata(self):
+        """A 390px viewport must not squeeze the title into one character columns.
+
+        Completed-job controls are grouped so CSS can place them on a dedicated,
+        full-width action row instead of keeping five flex children in one row.
+        """
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        self.assertIn('class="ractions"', html)
+        self.assertIn('.ractions{', html)
+        mobile_css = html.split('@media(max-width:480px){', 1)[1].split('</style>', 1)[0]
+        self.assertIn('.ritem{display:grid;grid-template-columns:64px minmax(0,1fr)', mobile_css)
+        self.assertIn('.ractions{grid-column:1 / -1', mobile_css)
+
 
 if __name__ == "__main__":
     unittest.main()

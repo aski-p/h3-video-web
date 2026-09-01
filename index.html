@@ -511,6 +511,8 @@ button:disabled{opacity:.35;cursor:not-allowed}
 .rbtn.del{color:var(--err);border-color:rgba(255,107,107,0.1)}
 .rbtn.del:hover{border-color:rgba(255,107,107,0.25);background:rgba(255,107,107,0.06);color:var(--err)}
 .rbtn.open{color:var(--tx4)}
+/* Completed-job controls need a single layout unit on narrow screens. */
+.ractions{display:flex;gap:8px;align-items:center;flex-shrink:0}
 .rempty{font-size:12px;color:var(--tx4);text-align:center;padding:16px 0}
 
 /* ── Footer ── */
@@ -524,7 +526,14 @@ footer{
 /* ── Responsive ── */
 @media(max-width:480px){
   .wrap{padding:16px 12px 30px}
-  .recent{max-height:300px}
+  .recent{max-height:300px;padding-right:0}
+  /* Keep thumbnail + readable metadata together; controls move to their own row. */
+  .ritem{display:grid;grid-template-columns:64px minmax(0,1fr);align-items:center;gap:8px;padding:10px}
+  .rmeta{grid-column:2;min-width:0}
+  .rprompt{white-space:normal;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+  .rsub{word-break:keep-all}
+  .ractions{grid-column:1 / -1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));width:100%;gap:6px;margin-top:2px}
+  .ractions .rbtn{width:100%;min-width:0;padding:8px 4px;text-align:center}
   .mtabs{flex-direction:column;gap:6px}
   .mtab{padding:12px 0}
   .btns{flex-direction:column}
@@ -1547,12 +1556,14 @@ function loadRecent(){
           </div>
         </div>
         ${st==='done'
-          ?`<button class="rbtn pview" title="스크립트 보기">S</button>
-            <button class="rbtn open" type="button">열기</button>
-            <a class="rbtn" href="/api/download/${j.id}" download="${j.id}.mp4">저장</a>
-            ${j.nas_saved?'<button class="rbtn del" title="NAS archive 영구 삭제">삭제</button>':''}`
+          ?`<div class="ractions">
+              <button class="rbtn pview" title="스크립트 보기">S</button>
+              <button class="rbtn open" type="button">열기</button>
+              <a class="rbtn" href="/api/download/${j.id}" download="${j.id}.mp4">저장</a>
+              ${j.nas_saved?'<button class="rbtn del" title="NAS archive 영구 삭제">삭제</button>':''}
+            </div>`
           :(st==='error'||st==='cancelled'||st==='interrupted'
-            ?`<button class="rbtn del">오류 정리</button>`
+            ?`<div class="ractions"><button class="rbtn del">오류 정리</button></div>`
             :'')
         }
       `;
