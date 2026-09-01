@@ -695,6 +695,15 @@ footer{
     </div>
   </div>
 
+  <!-- 리얼리즘 LoRA: 기본 생성은 보존하고, 요청한 경우에만 서버 워크플로에 연결 -->
+  <div class="card">
+    <h2>리얼리즘</h2>
+    <div class="chips">
+      <div class="chip" id="realismToggle" role="switch" aria-checked="false" tabindex="0">리얼리즘 LoRA 끄기 <span class="sub">· 기본 스타일</span></div>
+    </div>
+    <div class="hint" id="realismHint">끄면 기본 Turbo 스타일로 생성합니다.</div>
+  </div>
+
   <!-- 고정 설정 (접기 카드 — 접힌 상태에서는 카드 내부 스크립트가 화면에 표시되지 않음) -->
   <div class="card collapsible" id="cfgcard">
     <h2 class="cfgtoggle" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between">설정<span id="cfgchev" style="font-size:10px;opacity:.6">▸</span></h2>
@@ -722,6 +731,8 @@ footer{
       <span class="js">예상 완료 <b id="eta">—</b></span>
     </div>
     <div class="meta" id="metatext"></div>
+    <pre class="err" id="errmsg" style="display:none"></pre>
+    <button class="dl dldel" id="cleanError" style="display:none">오류 영상 정리</button>
     <div class="result" id="result" style="display:none">
       <div class="i2v-stage" id="i2vstage">
         <video id="player" controls playsinline></video>
@@ -730,7 +741,6 @@ footer{
       <div class="dlrow">
         <a class="dl" id="dl1" download>⬇ MP4 다운로드</a>
         <a class="dl" id="dl2" target="_blank" rel="noopener">새 탭에서 열기</a>
-        <button class="dl dldel" id="del1">삭제</button>
         <button class="dl" id="viewScript">스크립트</button>
       </div>
     </div>
@@ -744,7 +754,7 @@ footer{
   <!-- 최근 작업 -->
   <div class="card" id="recentcard" style="display:none">
     <h2>최근 작업</h2>
-    <div style="font-size:11px;color:var(--tx4);margin-bottom:10px">서버 저장 · 재접속 복원 · 완료 파일 삭제</div>
+    <div style="font-size:11px;color:var(--tx4);margin-bottom:10px">서버 저장 · 재접속 복원 · 오류 작업 정리</div>
     <div class="recent" id="recentlist"></div>
   </div>
 
@@ -766,7 +776,7 @@ footer{
 <script>
 const $=s=>document.querySelector(s);
 let W=1344,H=768,S=5,timer=null,currentJob=null;
-let STRATEGY='single', SEG_SECONDS=4, STEPS=6;
+let STRATEGY='single', SEG_SECONDS=4, STEPS=6, REALISM_LORA=false;
 
 // 모드 (t2v / i2v)
 let MODE='t2v', imgNonce='', imgW=0, imgH=0, imgName='';
@@ -888,6 +898,21 @@ document.querySelectorAll('#segsel .chip').forEach(c=>c.onclick=()=>{
   c.classList.add('on'); SEG_SECONDS=+c.dataset.s;
   updateStrategyHint();
 });
+
+function setRealismLora(on){
+  REALISM_LORA=!!on;
+  const toggle=$('#realismToggle');
+  toggle.classList.toggle('on', REALISM_LORA);
+  toggle.setAttribute('aria-checked', String(REALISM_LORA));
+  toggle.innerHTML=REALISM_LORA
+    ? '리얼리즘 LoRA 켜짐 <span class="sub">· 인물 질감·사실감 강화</span>'
+    : '리얼리즘 LoRA 끄기 <span class="sub">· 기본 스타일</span>';
+  $('#realismHint').textContent=REALISM_LORA
+    ? 'H3 Turbo 뒤에 인물 리얼리즘 LoRA (strength 0.8)를 추가 적용합니다.'
+    : '끄면 기본 Turbo 스타일로 생성합니다.';
+}
+$('#realismToggle').onclick=()=>setRealismLora(!REALISM_LORA);
+$('#realismToggle').onkeydown=e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); setRealismLora(!REALISM_LORA); } };
 
 // 샘플링 스텝 (range slider)
 (function(){
@@ -1176,6 +1201,8 @@ function setJobUI(j){
   $('#jobbox').style.display='block';
   $('#result').style.display='none';
   const i2v=$('#i2vframe'); if(i2v){i2v.style.display='none';i2v.style.opacity='0';i2v.style.backgroundImage='';}
+  $('#errmsg').style.display='none';
+  $('#cleanError').style.display='none';
   const m=$('#metatext');
   const p=j.progress||{};
   if(j.status==='queued'){
@@ -1244,16 +1271,20 @@ function setJobUI(j){
     }
     $('#dl1').href=dl; $('#dl1').download=j.id+'.mp4';
     $('#dl2').href=dl;
-    $('#del1').onclick=()=>delJob(j.id);
     $('#viewScript').onclick=()=>showPrompt(j);
     $('#stop').disabled=true;
     clearInterval(timer); timer=null; currentJob=null;
   } else if(j.status==='error'){
     $('#stline').innerHTML='<span class="st" style="color:var(--err)">✕ 오류</span>';
     $('#bar').style.width='100%';
+    $('#errmsg').textContent=j.error||'알 수 없는 오류'; $('#errmsg').style.display='block';
+    $('#cleanError').style.display='inline-flex';
+    $('#cleanError').onclick=()=>cleanupError(j.id);
     $('#stop').disabled=true; clearInterval(timer); timer=null; currentJob=null;
   } else if(j.status==='cancelled'){
     $('#stline').innerHTML='<span class="st" style="color:var(--warn)">■ 중단됨</span>';
+    $('#cleanError').style.display='inline-flex';
+    $('#cleanError').onclick=()=>cleanupError(j.id);
     $('#stop').disabled=true; clearInterval(timer); timer=null; currentJob=null;
   }
 }
@@ -1272,7 +1303,7 @@ $('#go').onclick=async()=>{
   $('#stline').innerHTML='<span class="spin"></span><span class="st">요청 중…</span>';
   $('#bar').style.width='2%';
 
-  const body={prompt, negative, width:W, height:H, seconds:S, steps:STEPS, strategy:STRATEGY, seg_seconds:SEG_SECONDS, seed, mode:MODE, filename:fname};
+  const body={prompt, negative, width:W, height:H, seconds:S, steps:STEPS, strategy:STRATEGY, seg_seconds:SEG_SECONDS, seed, mode:MODE, filename:fname, realism_lora:REALISM_LORA};
   if(MODE==='i2v'){
     if(imgNonce){
       body.image=imgNonce;
@@ -1327,6 +1358,7 @@ function showPrompt(j){
     if(c.strategy!=='single'&&c.seg_seconds) cfgLines.push((c.seg_seconds)+'초/세그먼트');
     cfgLines.push('체크포인트: minimax_h3_fl2va_pruned_int8_convrot.safetensors');
     cfgLines.push('LoRA: minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors (strength 1.0)');
+    cfgLines.push(c.realism_lora ? '리얼리즘 LoRA: h3-realism-people-t2v-i2v-r2v.safetensors (strength 0.8)' : '리얼리즘 LoRA: 사용 안 함');
     cfgLines.push('인코더: Qwen3-VL 32B (PGX 로컬)');
     cfgLines.push('저장: NAS (aski_main/comfyui/h3_videos) + 로컬');
     cfgLines.push(c.strategy==='single'?'분할: 단일 생성':'분할: 선택된 세그먼트 길이 → 자동 ffconcat 스티치');
@@ -1361,29 +1393,20 @@ document.addEventListener('keydown',e=>{
   }
 });
 
-// 삭제
-function delJob(jid){
-  if(!confirm('이 영상을 삭제할까요?\n(로컬 + NAS 저장본이 함께 삭제됩니다)')) return;
-  fetch('/api/delete/'+jid,{method:'POST'})
+// 오류/중단 작업의 깨진 출력만 정리 (정상 완료/NAS MP4는 서버에서 보호)
+function cleanupError(jid){
+  if(!confirm('오류 작업의 깨진 임시 영상만 정리할까요?\n정상 완료 MP4와 NAS 저장본은 삭제하지 않습니다.')) return;
+  fetch('/api/delete-error/'+jid,{method:'POST'})
     .then(r=>r.json())
     .then(d=>{
-      if(!d.ok){ alert(d.error||'삭제 실패'); return; }
-      try{$('#player').pause();}catch(e){}
-      $('#player').removeAttribute('src');
-      const i2v=$('#i2vframe'); if(i2v){i2v.style.display='none';i2v.style.opacity='0';i2v.style.backgroundImage='';}
-      $('#result').style.display='none';
+      if(!d.ok){ alert(d.error||'정리 실패'); return; }
+      alert(d.message||'오류 출력 정리 완료');
+      $('#cleanError').style.display='none';
       $('#jobbox').style.display='none';
-      $('#stline').innerHTML='';
-      $('#bar').style.width='0%';
-      $('#metatext').textContent='';
-      const d1=$('#del1');
-      if(d1) d1.onclick=null;
       if(currentJob===jid) currentJob=null;
-      if(timer){ clearInterval(timer); timer=null; }
-      $('#stop').disabled=true;
       loadRecent();
     })
-    .catch(e=>alert('삭제 실패: '+e));
+    .catch(e=>alert('정리 실패: '+e));
 }
 
 // 최근 작업 목록
@@ -1479,15 +1502,16 @@ function loadRecent(){
         </div>
         ${st==='done'
           ?`<button class="rbtn pview" title="스크립트 보기">S</button>
-            <a class="rbtn open" href="${dl}" target="_blank">열기</a>
-            <button class="rbtn del">삭제</button>`
-          :''
+            <a class="rbtn open" href="${dl}" target="_blank">열기</a>`
+          :(st==='error'||st==='cancelled'||st==='interrupted'
+            ?`<button class="rbtn del">오류 정리</button>`
+            :'')
         }
       `;
       const pv=item.querySelector('.pview');
       if(pv) pv.onclick=()=>showPrompt(j);
       const delB=item.querySelector('.del');
-      if(delB) delB.onclick=()=>delJob(j.id);
+      if(delB) delB.onclick=()=>cleanupError(j.id);
       list.appendChild(item);
     });
   }).catch(()=>{});

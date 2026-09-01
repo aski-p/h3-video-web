@@ -44,6 +44,8 @@ H3_CLIP = os.environ.get("H3_CLIP", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensor
 H3_VIDEO_VAE = os.environ.get("H3_VIDEO_VAE", "minimax_h3_video_vae_fp16.safetensors")
 H3_AUDIO_VAE = os.environ.get("H3_AUDIO_VAE", "minimax_h3_audio_vae_fp32.safetensors")
 H3_LORA = os.environ.get("H3_LORA", "minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors")
+REALISM_LORA = os.environ.get("REALISM_LORA", "h3-realism-people-t2v-i2v-r2v.safetensors")
+REALISM_LORA_STRENGTH = float(os.environ.get("REALISM_LORA_STRENGTH", "0.8"))
 
 # H3 model: 24fps, 17k+5 frame grid
 MAX_SECONDS = 60
@@ -430,7 +432,7 @@ def ensure_comfyui():
     raise RuntimeError("ComfyUI 기동 실패 (300초 대기 초과)")
 
 
-def build_workflow(text, negative, width, height, length, steps, seed, image_name=None, prefix="h3", video_name=None):
+def build_workflow(text, negative, width, height, length, steps, seed, image_name=None, prefix="h3", video_name=None, realism_lora=False):
     """T2V/I2V 워크플로우 — H3 전용. Wan 폴백 제거 (사용자 지정).
     video_name: LoadVideo 노드를 통한 참조 동영상 (인물 동영상 모드)"""
     base_negative = "text, subtitles, captions, watermark, logo, script overlay, on-screen text, UI elements"
@@ -439,14 +441,15 @@ def build_workflow(text, negative, width, height, length, steps, seed, image_nam
     else:
         full_prompt = f"{text} (do NOT include: {base_negative})"
 
-    # ---- H3 워크플로우 (원본) ----
-    lora_name = H3_LORA
-    lora_avail = any(
-        os.path.exists(os.path.join(d, lora_name))
-        for d in ["/home/aski/ComfyUI/models/loras",
-                  "/home/aski/ComfyUI/models/loras/split_files/loras"]
+    # 기본 Turbo 뒤에, 사용자가 토글을 켠 경우에만 리얼리즘 LoRA를 누적한다.
+    lora_dirs = ["/home/aski/ComfyUI/models/loras",
+                 "/home/aski/ComfyUI/models/loras/split_files/loras"]
+    lora_avail = any(os.path.exists(os.path.join(d, H3_LORA)) for d in lora_dirs)
+    realism_lora = realism_lora is True  # 문자열 "false" 등 truthy 값은 허용하지 않음
+    realism_avail = realism_lora and any(
+        os.path.exists(os.path.join(d, REALISM_LORA)) for d in lora_dirs
     )
-    model_ref = ["1a", 0] if lora_avail else ["1", 0]
+    model_ref = ["1b", 0] if realism_avail else (["1a", 0] if lora_avail else ["1", 0])
     wf = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": H3_UNET, "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": H3_CLIP, "type": "minimax", "device": "default"}},
@@ -464,7 +467,13 @@ def build_workflow(text, negative, width, height, length, steps, seed, image_nam
         "14": {"class_type": "SaveVideo", "inputs": {"video": ["13", 0], "filename_prefix": prefix, "format": "mp4", "codec": "h264", "encoding": "re-encode", "crf": 18.0}},
     }
     if lora_avail:
-        wf["1a"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": lora_name, "strength_model": 1.0}}
+        wf["1a"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": H3_LORA, "strength_model": 1.0}}
+    if realism_avail:
+        wf["1b"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+            "model": ["1a", 0] if lora_avail else ["1", 0],
+            "lora_name": REALISM_LORA,
+            "strength_model": REALISM_LORA_STRENGTH,
+        }}
     if image_name:
         wf["15"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
         wf["5"]["inputs"]["first_frame"] = ["15", 0]
@@ -605,7 +614,8 @@ def run_job(job_id, cfg):
             workflow = build_workflow(cfg["prompt"], cfg.get("negative", ""), cfg["width"], cfg["height"],
                                    seg_frames, cfg["steps"], seed,
                                    image_name=cfg.get("image_name", ""),
-                                   video_name=cfg.get("video_name", ""), prefix=prefix)
+                                   video_name=cfg.get("video_name", ""), prefix=prefix,
+                                   realism_lora=cfg.get("realism_lora", False))
             cid = str(uuid.uuid4())
             queued = comfy_post("/prompt", {"prompt": workflow, "client_id": cid})
             if "error" in queued:
@@ -1311,6 +1321,8 @@ class Handler(BaseHTTPRequestHandler):
             steps = max(STEPS_MIN, min(STEPS_MAX, steps))
             est = estimate_seconds(seconds, seg_seconds, strategy, steps)
             fname = re.sub(r'[^\w\-]', '_', (data.get("filename") or "video")).strip()[:40] or "video"
+            # JSON true만 허용한다. 문자열 "false" 등으로 우회해 켜지지 않는다.
+            realism_lora = data.get("realism_lora") is True
             cfg = {
                 "mode": mode,
                 "prompt": prompt,
@@ -1325,6 +1337,7 @@ class Handler(BaseHTTPRequestHandler):
                 "filename": fname,
                 "image_name": image_name,
                 "video_name": video_name,
+                "realism_lora": realism_lora,
             }
             # admission slot을 먼저 예약한다. 따라서 동시에 여러 HTTP 요청이 와도
             # 대기열(예약 포함) 6번째는 이 시점에서 원자적으로 거절된다.
@@ -1354,7 +1367,8 @@ class Handler(BaseHTTPRequestHandler):
             log(f"new job {jid} [{mode}]: {prompt[:50]}... {cfg['width']}x{cfg['height']} "
                 f"{seconds}s [{strategy}] {segments}seg steps={cfg['steps']}"
                 + (f" img={image_name}" if image_name else "")
-                + (f" vid={video_name}" if video_name else ""))
+                + (f" vid={video_name}" if video_name else "")
+                + (" realism_lora=on" if realism_lora else " realism_lora=off"))
             send_json(self, {
                 "ok": True, "job": jid,
                 "segments": segments, "total_seconds": seconds,

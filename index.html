@@ -695,6 +695,15 @@ footer{
     </div>
   </div>
 
+  <!-- 리얼리즘 LoRA: 기본 생성은 보존하고, 요청한 경우에만 서버 워크플로에 연결 -->
+  <div class="card">
+    <h2>리얼리즘</h2>
+    <div class="chips">
+      <div class="chip" id="realismToggle" role="switch" aria-checked="false" tabindex="0">리얼리즘 LoRA 끄기 <span class="sub">· 기본 스타일</span></div>
+    </div>
+    <div class="hint" id="realismHint">끄면 기본 Turbo 스타일로 생성합니다.</div>
+  </div>
+
   <!-- 고정 설정 (접기 카드 — 접힌 상태에서는 카드 내부 스크립트가 화면에 표시되지 않음) -->
   <div class="card collapsible" id="cfgcard">
     <h2 class="cfgtoggle" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between">설정<span id="cfgchev" style="font-size:10px;opacity:.6">▸</span></h2>
@@ -767,7 +776,7 @@ footer{
 <script>
 const $=s=>document.querySelector(s);
 let W=1344,H=768,S=5,timer=null,currentJob=null;
-let STRATEGY='single', SEG_SECONDS=4, STEPS=6;
+let STRATEGY='single', SEG_SECONDS=4, STEPS=6, REALISM_LORA=false;
 
 // 모드 (t2v / i2v)
 let MODE='t2v', imgNonce='', imgW=0, imgH=0, imgName='';
@@ -889,6 +898,21 @@ document.querySelectorAll('#segsel .chip').forEach(c=>c.onclick=()=>{
   c.classList.add('on'); SEG_SECONDS=+c.dataset.s;
   updateStrategyHint();
 });
+
+function setRealismLora(on){
+  REALISM_LORA=!!on;
+  const toggle=$('#realismToggle');
+  toggle.classList.toggle('on', REALISM_LORA);
+  toggle.setAttribute('aria-checked', String(REALISM_LORA));
+  toggle.innerHTML=REALISM_LORA
+    ? '리얼리즘 LoRA 켜짐 <span class="sub">· 인물 질감·사실감 강화</span>'
+    : '리얼리즘 LoRA 끄기 <span class="sub">· 기본 스타일</span>';
+  $('#realismHint').textContent=REALISM_LORA
+    ? 'H3 Turbo 뒤에 인물 리얼리즘 LoRA (strength 0.8)를 추가 적용합니다.'
+    : '끄면 기본 Turbo 스타일로 생성합니다.';
+}
+$('#realismToggle').onclick=()=>setRealismLora(!REALISM_LORA);
+$('#realismToggle').onkeydown=e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); setRealismLora(!REALISM_LORA); } };
 
 // 샘플링 스텝 (range slider)
 (function(){
@@ -1279,7 +1303,7 @@ $('#go').onclick=async()=>{
   $('#stline').innerHTML='<span class="spin"></span><span class="st">요청 중…</span>';
   $('#bar').style.width='2%';
 
-  const body={prompt, negative, width:W, height:H, seconds:S, steps:STEPS, strategy:STRATEGY, seg_seconds:SEG_SECONDS, seed, mode:MODE, filename:fname};
+  const body={prompt, negative, width:W, height:H, seconds:S, steps:STEPS, strategy:STRATEGY, seg_seconds:SEG_SECONDS, seed, mode:MODE, filename:fname, realism_lora:REALISM_LORA};
   if(MODE==='i2v'){
     if(imgNonce){
       body.image=imgNonce;
@@ -1334,6 +1358,7 @@ function showPrompt(j){
     if(c.strategy!=='single'&&c.seg_seconds) cfgLines.push((c.seg_seconds)+'초/세그먼트');
     cfgLines.push('체크포인트: minimax_h3_fl2va_pruned_int8_convrot.safetensors');
     cfgLines.push('LoRA: minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors (strength 1.0)');
+    cfgLines.push(c.realism_lora ? '리얼리즘 LoRA: h3-realism-people-t2v-i2v-r2v.safetensors (strength 0.8)' : '리얼리즘 LoRA: 사용 안 함');
     cfgLines.push('인코더: Qwen3-VL 32B (PGX 로컬)');
     cfgLines.push('저장: NAS (aski_main/comfyui/h3_videos) + 로컬');
     cfgLines.push(c.strategy==='single'?'분할: 단일 생성':'분할: 선택된 세그먼트 길이 → 자동 ffconcat 스티치');
