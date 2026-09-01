@@ -192,6 +192,17 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertIn('.ritem{display:grid;grid-template-columns:64px minmax(0,1fr)', mobile_css)
         self.assertIn('.ractions{grid-column:1 / -1', mobile_css)
 
+    def test_active_job_tracking_has_a_detail_modal_and_refreshes_live_data(self):
+        """Active jobs expose their measured progress and saved generation config."""
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        self.assertIn('id="trackingModal"', html)
+        self.assertIn('id="trackingModalClose"', html)
+        self.assertIn('function showJobTracking(j)', html)
+        self.assertIn('data-track-job="${j.id}"', html)
+        self.assertIn("fetch('/api/job/'+jid)", html)
+        self.assertIn('ComfyUI 원본 측정값', html)
+        self.assertIn('리얼리즘 LoRA', html)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -458,6 +458,15 @@ button:disabled{opacity:.35;cursor:not-allowed}
 }
 .modal .ptext.neg{color:var(--err)}
 .modal .ptext.cfg{font-size:12px;color:var(--tx3);font-family:var(--mono)}
+.tracking-modal{width:min(680px,100%);max-height:calc(100vh - 40px);overflow:auto}
+.track-status{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:10px}
+.track-status b{font-size:16px;color:var(--tx)}
+.track-progress{height:9px;border-radius:999px;background:rgba(255,255,255,.07);overflow:hidden;margin:8px 0 6px}
+.track-progress>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),#73b4ff);transition:width .3s ease}
+.track-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.track-kv{border:1px solid var(--line-subtle);background:rgba(255,255,255,.025);border-radius:var(--r-sm);padding:9px;min-width:0}
+.track-kv small{display:block;color:var(--tx4);font-size:10px;margin-bottom:3px}.track-kv span{display:block;color:var(--tx2);font-size:12px;overflow-wrap:anywhere}
+@media(max-width:480px){.tracking-modal{padding:16px}.track-grid{grid-template-columns:1fr}.track-status{align-items:flex-start;flex-direction:column;gap:3px}}
 
 /* ── Recent jobs ── */
 #recentlist{min-width:0}
@@ -781,6 +790,15 @@ footer{
     <button class="close-btn" id="modalClose">✕</button>
     <h3>스크립트 / 프롬프트</h3>
     <div id="modalBody"></div>
+  </div>
+</div>
+
+<!-- 진행 중 작업 추적: 서버가 저장한 작업과 ComfyUI 원본 측정값만 표시한다. -->
+<div class="modal-overlay" id="trackingModal" aria-hidden="true">
+  <div class="modal tracking-modal" role="dialog" aria-modal="true" aria-labelledby="trackingModalTitle">
+    <button class="close-btn" id="trackingModalClose" aria-label="작업 추적 닫기">✕</button>
+    <h3 id="trackingModalTitle">작업 추적</h3>
+    <div id="trackingModalBody"></div>
   </div>
 </div>
 
@@ -1407,6 +1425,56 @@ function showPrompt(j){
 function closePrompt(){
   $('#scriptModal').classList.remove('show');
 }
+let trackingTimer=null, trackingReturnFocus=null;
+function trackValue(label, value){
+  return '<div class="track-kv"><small>'+esc(label)+'</small><span>'+esc(value==null||value===''?'—':value)+'</span></div>';
+}
+function renderTracking(j){
+  const c=j.cfg||{}, p=j.progress||{};
+  const measured=p.pct!=null&&!p.unavailable;
+  const pct=measured?Math.max(0,Math.min(100,Math.round(p.pct))):null;
+  const status={queued:'ComfyUI 대기열',starting:'ComfyUI 기동 중',running:'영상 생성 중',done:'완료',error:'오류',cancelled:'중단됨'}[j.status]||j.status||'알 수 없음';
+  const phase=p.phase||(p.unavailable?'ComfyUI 상태 확인 불가':'진행 정보 수신 대기');
+  const seed=j.seed!=null&&j.seed>=0?j.seed:(c.seed!=null&&c.seed>=0?c.seed:'랜덤');
+  const strategy=c.strategy==='single'?'단일 생성':'세그먼트 분할';
+  let h='<div class="track-status"><b>'+esc(status)+'</b><span class="phint">'+esc(phase)+'</span></div>';
+  h+='<div class="track-progress" aria-label="진행률"><i style="width:'+(pct==null?0:pct)+'%"></i></div>';
+  h+='<div class="phint" style="margin-bottom:14px">'+(pct==null?'진행률: 서버가 ComfyUI에서 측정값을 아직 받지 못했습니다.':'실측 진행률: '+pct+'%')+(p.eta!=null?' · 남은 시간 '+fmtEta(Math.max(0,p.eta)):'')+'</div>';
+  h+='<div class="track-grid">';
+  h+=trackValue('작업 ID',j.id);
+  h+=trackValue('ComfyUI Prompt ID',j.comfy_prompt_id);
+  h+=trackValue('상태',j.comfy_status||j.status);
+  h+=trackValue('경과 시간',p.elapsed!=null?p.elapsed+'초':j.elapsed!=null?j.elapsed+'초':null);
+  h+=trackValue('모드',j.mode||c.mode||'t2v');
+  h+=trackValue('해상도',c.width&&c.height?c.width+'×'+c.height:null);
+  h+=trackValue('총 길이',j.total_seconds||c.seconds?(j.total_seconds||c.seconds)+'초':null);
+  h+=trackValue('샘플링',((j.steps||c.steps)||'—')+' step · seed '+seed);
+  h+=trackValue('생성 방식',strategy+(c.strategy!=='single'?(j.segments?' · '+j.segments+' 세그먼트':'')+(c.seg_seconds?' · '+c.seg_seconds+'초/세그먼트':''):''));
+  h+=trackValue('참조/LoRA',(j.mode||c.mode)==='i2v'?'I2V 참조 사용':c.realism_lora?'T2V · 리얼리즘 LoRA 사용':'T2V · 리얼리즘 LoRA 미사용');
+  h+='</div>';
+  h+='<div class="section" style="margin-top:14px"><span class="plbl">스크립트 / 프롬프트</span><div class="ptext">'+esc(j.prompt||'—')+'</div></div>';
+  if(c.negative||j.negative) h+='<div class="section"><span class="plbl">배제 프롬프트</span><div class="ptext neg">'+esc(c.negative||j.negative)+'</div></div>';
+  $('#trackingModalBody').innerHTML=h;
+}
+function showJobTracking(j){
+  if(!j||!j.id) return;
+  const jid=j.id;
+  $('#trackingModalTitle').textContent='작업 추적 · '+jid.slice(0,8);
+  renderTracking(j);
+  const modal=$('#trackingModal');
+  modal.classList.add('show'); modal.setAttribute('aria-hidden','false');
+  $('#trackingModalClose').focus();
+  clearInterval(trackingTimer);
+  trackingTimer=setInterval(async()=>{
+    try{const r=await fetch('/api/job/'+jid);const d=await r.json();if(d.job) renderTracking(d.job);}catch(e){}
+  },4000);
+}
+function closeTracking(){
+  clearInterval(trackingTimer); trackingTimer=null;
+  const modal=$('#trackingModal'); modal.classList.remove('show'); modal.setAttribute('aria-hidden','true');
+  if(trackingReturnFocus&&document.contains(trackingReturnFocus)) trackingReturnFocus.focus();
+  trackingReturnFocus=null;
+}
 function showVideo(url, title='영상 미리보기'){
   const modal=$('#videoModal');
   $('#videoModalTitle').textContent=title;
@@ -1427,12 +1495,15 @@ function closeVideo(){
 }
 $('#modalClose').onclick=closePrompt;
 $('#videoModalClose').onclick=closeVideo;
+$('#trackingModalClose').onclick=closeTracking;
 $('#scriptModal').onclick=e=>{ if(e.target===e.currentTarget) closePrompt(); };
 $('#videoModal').onclick=e=>{ if(e.target===e.currentTarget) closeVideo(); };
+$('#trackingModal').onclick=e=>{ if(e.target===e.currentTarget) closeTracking(); };
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){
     closeVideo();
     closePrompt();
+    closeTracking();
     $('#promptModal').classList.remove('show');
   }
 });
@@ -1564,9 +1635,11 @@ function loadRecent(){
             </div>`
           :(st==='error'||st==='cancelled'||st==='interrupted'
             ?`<div class="ractions"><button class="rbtn del">오류 정리</button></div>`
-            :'')
+            :`<div class="ractions"><button class="rbtn track" type="button" data-track-job="${j.id}">추적</button></div>`)
         }
       `;
+      const trackB=item.querySelector('[data-track-job]');
+      if(trackB) trackB.onclick=()=>{ trackingReturnFocus=trackB; showJobTracking(j); };
       const pv=item.querySelector('.pview');
       if(pv) pv.onclick=()=>showPrompt(j);
       const openB=item.querySelector('.open');
