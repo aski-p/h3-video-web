@@ -15,12 +15,19 @@ import os
 import re
 import time
 import shutil
+import shlex
 import threading
+import socket
 import subprocess
 import urllib.request
 import urllib.error
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+
+try:
+    import websocket  # websocket-client; ComfyUI의 실제 sampler progress 수신용
+except ImportError:
+    websocket = None
 from urllib.parse import urlparse
 
 HOST = os.environ.get("H3_HOST", "0.0.0.0")
@@ -30,15 +37,22 @@ ASUI = os.environ.get("ASUI", "aski")
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
 COMFY_OUT = "/home/aski/minimax-h3/output"
 NAS_DIR = "/mnt/comfyui_videos/comfyui/h3_videos"
+# CIFS automount 장애 때도 NAS로 직접 보관하는 SSH fallback. 키는 PGX의
+# aski 계정 전용 비밀 파일이며 저장소에는 포함하지 않는다.
+NAS_SSH_HOST = os.environ.get("H3_NAS_SSH_HOST", "admin@192.168.50.202")
+NAS_SSH_KEY = os.environ.get("H3_NAS_SSH_KEY", os.path.expanduser("~/.ssh/id_ed25519_qnas"))
+NAS_SSH_DIR = os.environ.get("H3_NAS_SSH_DIR", "/share/aski_main/comfyui/h3_videos")
 OUT_DIR = os.environ.get("H3_OUT_DIR", os.path.expanduser("~/h3-web/output"))
 
 # MiniMax H3 Eros E3 production profile. Override filenames with env vars when
 # the PGX model directory uses a different revision.
 H3_UNET = os.environ.get("H3_UNET", "minimax_h3_fl2va_pruned_int8_convrot.safetensors")
-H3_CLIP = os.environ.get("H3_CLIP", "qwen3vl_32b_minimax_h3_bf16.safetensors")
+H3_CLIP = os.environ.get("H3_CLIP", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors")
 H3_VIDEO_VAE = os.environ.get("H3_VIDEO_VAE", "minimax_h3_video_vae_fp16.safetensors")
 H3_AUDIO_VAE = os.environ.get("H3_AUDIO_VAE", "minimax_h3_audio_vae_fp32.safetensors")
 H3_LORA = os.environ.get("H3_LORA", "minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors")
+REALISM_LORA = os.environ.get("REALISM_LORA", "h3-realism-people-t2v-i2v-r2v.safetensors")
+REALISM_LORA_STRENGTH = float(os.environ.get("REALISM_LORA_STRENGTH", "0.8"))
 
 # H3 model: 24fps, 17k+5 frame grid
 MAX_SECONDS = 60
@@ -46,6 +60,14 @@ MAX_SECONDS = 60
 # 세그먼트 길이 (초)
 SEG_CHOICES = (2, 4, 8)
 SEG_SECONDS = 4  # 기본값
+
+# 고정 참조 (고정 이미지): 한번 등록하면 서버가 영구 보관 — 삭제 전까지 자동 유지
+REF_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".h3-web", "ref")
+REF_META = os.path.join(REF_DIR, "meta.json")
+
+# 고정 동영상 참조 (인물 동영상): 추출된 프레임 + 원본 mp4를 영구 보관
+REFV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".h3-web", "refv")
+REFV_META = os.path.join(REFV_DIR, "meta.json")
 
 # 생성 방식
 STRATEGY_CHOICES = ("single", "split")
@@ -63,8 +85,34 @@ JOBS = {}
 LOCK = threading.Lock()
 JOBS_DIR = os.path.join(os.path.expanduser("~"), "h3-web", "jobs")
 QUEUE = []            # FIFO: 대기 중인 job_id
+MAX_PENDING_JOBS = 5  # 실행 중 작업은 제외하고, 대기열만 최대 5개
+QUEUE_RESERVATIONS = 0  # 요청 처리 중인 admission slot; 동시 요청 우회 방지
 QUEUE_LOCK = threading.Lock()
 ACTIVE = [None]       # 실행 중인 job_id (동시 1개)
+
+
+def host_memory_stats(meminfo_text=None):
+    """Return kernel-measured host RAM, using MemAvailable when available."""
+    if meminfo_text is None:
+        try:
+            with open("/proc/meminfo", encoding="utf-8") as f:
+                meminfo_text = f.read()
+        except OSError:
+            return None
+    values = {}
+    for line in meminfo_text.splitlines():
+        match = re.match(r"^(MemTotal|MemAvailable):\s+(\d+)\s+kB$", line)
+        if match:
+            values[match.group(1)] = int(match.group(2)) * 1024
+    total = values.get("MemTotal")
+    available = values.get("MemAvailable")
+    if not total or available is None:
+        return None
+    return {
+        "total_gb": round(total / 1e9, 1),
+        "used_gb": round((total - available) / 1e9, 1),
+        "available_gb": round(available / 1e9, 1),
+    }
 
 
 def _job_file(jid):
@@ -118,9 +166,13 @@ def _restore_jobs():
         j.setdefault("status", "unknown")
         # started가 없으면 created로 fallback (타임라인 계산용)
         j.setdefault("started", j.get("created", now))
-        if j["status"] in ("queued", "starting", "running"):
+        # A transient ComfyUI lookup failure cannot survive a backend restart:
+        # no worker remains attached to that prompt.  Make the recovery action
+        # explicit instead of displaying an endlessly-empty progress bar.
+        if j["status"] in ("queued", "starting", "running", "unavailable"):
             j["status"] = "interrupted"
             j["error"] = j.get("error") or "서버 재시작으로 중단됨 — 다시 생성해 주세요"
+            j["progress"] = _prog(jid, "생성 중단됨 — 다시 생성해 주세요", unavailable=True)
         with LOCK:
             JOBS[jid] = j
     log(f"  job {len(JOBS)}개 복원 ({JOBS_DIR})")
@@ -162,18 +214,126 @@ def log(msg):
 
 
 def _prog(job_id, phase, **extra):
-    """progress 객체: phase + elapsed + pct + eta + (추가 필드)."""
+    """Build an honest progress payload; never estimate percentage from time/queue.
+
+    ``sampler_pct`` is accepted only when it originated in the matching
+    ComfyUI WebSocket event.  Queue data remains informational and missing
+    sampler data is intentionally represented as ``pct: null``.
+    """
     j = JOBS.get(job_id) or {}
-    est = j.get("estimated_seconds") or 75
     now = time.time()
     elapsed = round(now - j.get("started", now), 1)
-    total = (j.get("segments") or 1) + 3  # 생성 + 스티치 + 24fps + NAS
-    done = extra.get("seg_done", 0) + extra.get("done_phase", 0)
-    pct = min(95.0, round(5 + 85 * done / total, 1))
-    remain = round(est - elapsed, 0)
-    out = {"phase": phase, "elapsed": elapsed, "pct": pct, "eta": max(0, int(remain))}
+    segments = max(1, j.get("segments") or 1)
+    seg_done = min(segments, int(extra.get("seg_done", 0)))
+    sampler_pct = extra.get("sampler_pct")
+    pct = None
+    if sampler_pct is not None:
+        # This is *only* the raw matching sampler event: 4/20 -> 20.
+        # Do not blend segment count, elapsed time, or queue position into it.
+        pct = round(100 * max(0, min(1, float(sampler_pct))))
+    if extra.get("completed"):
+        pct = 100
+    out = {"phase": phase, "elapsed": elapsed, "pct": pct,
+           "eta": None, "updated_at": now}
     out.update(extra)
+    # A connectivity failure invalidates the displayed percentage, but must not
+    # discard the last raw measurement received from the matching prompt.
+    # Keeping it makes the unavailable state auditable without turning old data
+    # into a current progress estimate.
+    if extra.get("unavailable"):
+        previous = j.get("progress") if isinstance(j.get("progress"), dict) else {}
+        for key in ("value", "max", "node", "last_progress_at"):
+            if key not in out and key in previous:
+                out[key] = previous[key]
     return out
+
+
+def apply_comfy_event(job_id, prompt_id, event, seg_done=0, segments=1):
+    """Apply one ComfyUI WebSocket event only when it belongs to ``prompt_id``.
+
+    ComfyUI broadcasts events for all clients. Prompt-id equality is the sole
+    correlation key, so unrelated work cannot affect an H3 job.
+    """
+    if not isinstance(event, dict):
+        return False
+    data = event.get("data") or {}
+    if str(data.get("prompt_id") or "") != str(prompt_id):
+        return False
+    typ = event.get("type")
+    if typ == "progress":
+        value, maximum = data.get("value"), data.get("max")
+        if (not isinstance(value, (int, float)) or not isinstance(maximum, (int, float))
+                or maximum <= 0):
+            return False
+        ratio = max(0.0, min(1.0, value / maximum))
+        update_job(job_id, status="running", comfy_status="running",
+                   progress=_prog(job_id, "영상 생성 중", seg_done=seg_done,
+                                  sampler_pct=ratio, node=data.get("node"),
+                                  value=value, max=maximum,
+                                  last_progress_at=time.time()))
+        return True
+    if typ == "executing":
+        # node=None signals completion, but history is still authoritative for
+        # output discovery.
+        update_job(job_id, status="running", comfy_status="running",
+                   progress=_prog(job_id, "영상 생성 중", seg_done=seg_done,
+                                  node=data.get("node")))
+        return True
+    if typ == "execution_error":
+        raise RuntimeError("ComfyUI 실행 오류: " + json.dumps(data, ensure_ascii=False)[:700])
+    return False
+
+
+def reconcile_comfy_prompt(job_id, prompt_id, history, queue, seg_done=0,
+                           segments=1, final=False):
+    """Reconcile one prompt's queue/history snapshot without inventing progress.
+
+    Queue membership is lifecycle information only.  It never provides an
+    execution percentage, and entries for other prompts are ignored.
+    """
+    history = history if isinstance(history, dict) else {}
+    queue = queue if isinstance(queue, dict) else {}
+    record = history.get(prompt_id)
+    if isinstance(record, dict):
+        status = record.get("status") or {}
+        if status.get("status_str") == "error" or not status.get("completed", False):
+            return "error"
+        if final:
+            update_job(job_id, status="done", comfy_status="completed",
+                       progress=_prog(job_id, "생성 완료", completed=True,
+                                      seg_done=segments))
+        return "completed"
+
+    running = {str(row[1]) for row in queue.get("queue_running", [])
+               if isinstance(row, (list, tuple)) and len(row) > 1}
+    pending = {str(row[1]) for row in queue.get("queue_pending", [])
+               if isinstance(row, (list, tuple)) and len(row) > 1}
+    if str(prompt_id) in running:
+        comfy_status, phase, result, job_status = "running", "영상 생성 중", "running", "running"
+    elif str(prompt_id) in pending:
+        # ComfyUI exposes queued and executing prompts separately.  Do not
+        # label a waiting prompt as generating merely because H3 accepted it.
+        comfy_status, phase, result, job_status = "pending", "ComfyUI 대기 중", "pending", "queued"
+    else:
+        return "unknown"
+    update_job(job_id, status=job_status, comfy_status=comfy_status,
+               progress=_prog(job_id, phase, seg_done=seg_done,
+                              queue_running=len(queue.get("queue_running", [])),
+                              queue_pending=len(queue.get("queue_pending", []))))
+    return result
+
+
+def _comfy_ws(client_id):
+    """Open a short-lived ComfyUI event socket, or return None if unavailable."""
+    if websocket is None:
+        return None
+    ws_url = re.sub(r"^http", "ws", COMFY, count=1).rstrip("/") + "/ws?clientId=" + client_id
+    try:
+        ws = websocket.create_connection(ws_url, timeout=2)
+        ws.settimeout(1)
+        return ws
+    except Exception:
+        return None
 
 
 def snap_len(seconds):
@@ -184,7 +344,9 @@ def snap_len(seconds):
 
 def estimate_seconds(total_seconds, seg_seconds, strategy, steps):
     """생성 시간 추정 (초). 6스텝 기준 75초/4초세그먼트."""
-    step_factor = 1.0 + EST_STEP_COEF * (steps - STEPS_DEFAULT) / max(STEPS_DEFAULT, 1)
+    # step당 시간 증감은 완만하게 반영한다. 기존 수식은 2-step에서 음수 예상시간을
+    # 만들 수 있었으므로 최소 35%로 하한을 둔다.
+    step_factor = max(0.35, 1.0 + 0.12 * (steps - STEPS_DEFAULT))
     if strategy == STRATEGY_SINGLE:
         # 단일 세그먼트 (길이 그대로, 1회 생성)
         n = max(1, total_seconds / 4.0)
@@ -265,6 +427,84 @@ def comfy_upload_image(data: bytes, filename: str, subfolder: str = "", overwrit
     return out["name"]
 
 
+def comfy_upload_video(data: bytes, filename: str):
+    """바이너리를 ComfyUI 입력 디렉터리에 저장 후 LoadVideo/LoadAnimatedPNG용 이름 반환.
+    comfy_upload_image와 동일하게 직접 쓰기 → /upload/image 폴백 구조."""
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(filename))
+    try:
+        base = os.environ.get("COMFY_INPUT_DIR")
+        target_dir = base
+        if not target_dir:
+            for cand in ("/home/aski/ComfyUI/input", "/home/aski/minimax-h3/ComfyUI/input"):
+                if os.path.isdir(cand):
+                    target_dir = cand
+                    break
+            if target_dir is None:
+                raise RuntimeError("input dir not found")
+        dst = os.path.join(target_dir, safe_name)
+        with open(dst, "wb") as f:
+            f.write(data)
+        log(f"  동영상 업로드(직접): {dst}")
+        return safe_name
+    except Exception as e:
+        log(f"  직접 쓰기 실패 ({e}) -> /upload 폴백")
+    boundary = "----h3web" + uuid.uuid4().hex
+    parts = [
+        f"--{boundary}\r\n".encode(),
+        f'Content-Disposition: form-data; name="image"; filename="{safe_name}"\r\n'.encode(),
+        b"Content-Type: application/octet-stream\r\n\r\n",
+        data,
+        b"\r\n",
+        f"--{boundary}\r\n".encode(),
+        b'Content-Disposition: form-data; name="subfolder"\r\n\r\n',
+        b"\r\n",
+        f"--{boundary}\r\n".encode(),
+        b'Content-Disposition: form-data; name="overwrite"\r\n\r\n',
+        b"true\r\n",
+        f"--{boundary}--\r\n".encode(),
+    ]
+    payload = b"".join(parts)
+    req = urllib.request.Request(COMFY + "/upload/image", data=payload,
+                                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        out = json.load(r)
+    if not out.get("name"):
+        raise RuntimeError(f"ComfyUI 업로드 실패: {out}")
+    log(f"  동영상 업로드(/upload): {out.get('name')}")
+    return out["name"]
+
+
+def extract_ref_video_frame(video_bytes: bytes, ts_offset: float = 0.5) -> bytes:
+    """동영상 mp4에서 ts_offset 초 지점의 인물 프레임을 추출.
+    ffmpeg -ss → PNG 바이트 반환. 실패 시 RuntimeError."""
+    tmp_dir = os.path.join(OUT_DIR, "refs")
+    os.makedirs(tmp_dir, exist_ok=True)
+    src = os.path.join(tmp_dir, f"refv_in_{uuid.uuid4().hex[:8]}.mp4")
+    out_png = os.path.join(tmp_dir, f"refv_frame_{uuid.uuid4().hex[:8]}.png")
+    ts = max(0.0, min(float(ts_offset), 4.0))
+    try:
+        with open(src, "wb") as f:
+            f.write(video_bytes)
+        cmd = ["ffmpeg", "-y", "-ss", str(ts), "-i", src,
+               "-frames:v", "1", "-q:v", "2", out_png]
+        p = subprocess.run(cmd, capture_output=True, timeout=90)
+        if p.returncode != 0 or not os.path.isfile(out_png):
+            raise RuntimeError(f"프레임 추출 실패: {p.stderr.decode(errors='replace')[:300]}")
+        with open(out_png, "rb") as f:
+            data = f.read()
+        if not data:
+            raise RuntimeError("추출된 프레임이 비어 있음")
+        log(f"  고정 동영상 참조: {ts:.1f}s 지점 프레임 추출 ({len(data)}B)")
+        return data
+    finally:
+        for pth in (src, out_png):
+            try:
+                if os.path.isfile(pth):
+                    os.remove(pth)
+            except Exception:
+                pass
+
+
 def comfy_up():
     try:
         comfy_get("/system_stats", timeout=8)
@@ -317,22 +557,42 @@ def ensure_comfyui():
     raise RuntimeError("ComfyUI 기동 실패 (300초 대기 초과)")
 
 
-def build_workflow(text, negative, width, height, length, steps, seed, image_name=None, prefix="h3"):
-    """T2V/I2V 워크플로우 — H3 전용. Wan 폴백 제거 (사용자 지정)."""
+CAM_LORA_1000 = "cam_motion_1000.safetensors"
+CAM_LORA_3000 = "cam_motion_3000.safetensors"
+CAM_LORA_STRENGTH = 1.0
+
+
+def build_workflow(text, negative, width, height, length, steps, seed, image_name=None, prefix="h3", video_name=None, realism_lora=False, cam_motion="", realism_strength=None, cam_strength=None):
+    """T2V/I2V 워크플로우 — H3 전용. Wan 폴백 제거 (사용자 지정).
+    video_name: LoadVideo 노드를 통한 참조 동영상 (인물 동영상 모드)
+    realism_strength/cam_strength: None이면 기본값, 실수면 0.0~2.0으로 클램프"""
+    def _clamp(v, default):
+        if v is None:
+            return default
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return default
+        if f != f or f in (float("inf"), float("-inf")):
+            return default
+        return max(0.0, min(2.0, f))
+    r_strength = _clamp(realism_strength, REALISM_LORA_STRENGTH)
+    c_strength = _clamp(cam_strength, CAM_LORA_STRENGTH)
     base_negative = "text, subtitles, captions, watermark, logo, script overlay, on-screen text, UI elements"
     if negative:
         full_prompt = f"{text} (do NOT include: {base_negative}, {negative})"
     else:
         full_prompt = f"{text} (do NOT include: {base_negative})"
 
-    # ---- H3 워크플로우 (원본) ----
-    lora_name = H3_LORA
-    lora_avail = any(
-        os.path.exists(os.path.join(d, lora_name))
-        for d in ["/home/aski/ComfyUI/models/loras",
-                  "/home/aski/ComfyUI/models/loras/split_files/loras"]
+    # 기본 Turbo 뒤에, 사용자가 토글을 켠 경우에만 리얼리즘 LoRA를 누적한다.
+    lora_dirs = ["/home/aski/ComfyUI/models/loras",
+                 "/home/aski/ComfyUI/models/loras/split_files/loras"]
+    lora_avail = any(os.path.exists(os.path.join(d, H3_LORA)) for d in lora_dirs)
+    realism_lora = realism_lora is True  # 문자열 "false" 등 truthy 값은 허용하지 않음
+    realism_avail = realism_lora and any(
+        os.path.exists(os.path.join(d, REALISM_LORA)) for d in lora_dirs
     )
-    model_ref = ["1a", 0] if lora_avail else ["1", 0]
+    model_ref = ["1b", 0] if realism_avail else (["1a", 0] if lora_avail else ["1", 0])
     wf = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": H3_UNET, "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": H3_CLIP, "type": "minimax", "device": "default"}},
@@ -350,10 +610,36 @@ def build_workflow(text, negative, width, height, length, steps, seed, image_nam
         "14": {"class_type": "SaveVideo", "inputs": {"video": ["13", 0], "filename_prefix": prefix, "format": "mp4", "codec": "h264", "encoding": "re-encode", "crf": 18.0}},
     }
     if lora_avail:
-        wf["1a"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": lora_name, "strength_model": 1.0}}
+        wf["1a"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": H3_LORA, "strength_model": 1.0}}
+    if realism_avail:
+        wf["1b"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+            "model": ["1a", 0] if lora_avail else ["1", 0],
+            "lora_name": REALISM_LORA,
+            "strength_model": r_strength,
+        }}
+    # 카메라 모션 LoRA (H3 전용): 토글 시 마지막에 누적
+    cam_lo = None
+    if cam_motion == "1000":
+        cam_lo = CAM_LORA_1000
+    elif cam_motion == "3000":
+        cam_lo = CAM_LORA_3000
+    if cam_lo:
+        cam_avail = any(os.path.exists(os.path.join(d, cam_lo)) for d in lora_dirs)
+        if cam_avail:
+            wf["1c"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+                "model": model_ref, "lora_name": cam_lo, "strength_model": c_strength,
+            }}
+            model_ref = ["1c", 0]
+            # 8/9의 model 참조 갱신
+            wf["8"]["inputs"]["model"] = model_ref
+            wf["9"]["inputs"]["model"] = model_ref
     if image_name:
         wf["15"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
         wf["5"]["inputs"]["first_frame"] = ["15", 0]
+    if video_name:
+        # LoadVideo → first_frame 입력 (인물 동영상 참조: 첫 프레임 기준)
+        wf["16"] = {"class_type": "LoadVideo", "inputs": {"video": video_name, "force_rate": 24}}
+        wf["5"]["inputs"]["first_frame"] = ["16", 0]
     return wf
 
 
@@ -387,12 +673,15 @@ def nas_ok():
 
 
 def _copy_to_nas(src_path):
-    """원본 파일을 NAS에 저장. 실패해도 로컬은 유지.
-    CIFS uid 제한 → run_asu(aski)로 우회."""
+    """NAS에 완전 검증 저장 후 경로를 반환한다. 실패 시 None이고 로컬은 유지된다."""
     dst = os.path.join(NAS_DIR, os.path.basename(src_path))
     try:
         if not os.path.isdir(NAS_DIR):
-            os.makedirs(NAS_DIR, exist_ok=True)
+            try:
+                os.makedirs(NAS_DIR, exist_ok=True)
+            except OSError as e:
+                # CIFS automount 권한/장애는 SSH archive fallback으로 계속 진행한다.
+                log(f"  CIFS NAS 디렉터리 준비 실패 ({e}) -> SSH archive 폴백")
         # 직접 쓰기 (NAS_DIR은 aski 소유 CIFS — uid 1000/1000)
         # CIFS + seccomp: chmod/chown이 EPERM → os.open(mode=0o644)로 생성 시점에 권한 지정
         try:
@@ -400,15 +689,22 @@ def _copy_to_nas(src_path):
             with os.fdopen(fd, 'wb') as f:
                 with open(src_path, 'rb') as s:
                     f.write(s.read())
+            if os.path.getsize(dst) != os.path.getsize(src_path):
+                raise RuntimeError("NAS 복사 크기 불일치")
             log(f"  NAS 저장: {dst}")
-            return True
+            return dst
         except Exception as e:
             log(f"  직접 NAS 쓰기 실패 ({e}) -> run_asu 폴백")
         # 직접 쓰기 실패 (CIFS seccomp 등) → run_asu 폴백
-        p = run_asu(f"cp '{src_path}' '{dst}' && chmod 644 '{dst}'", timeout=60)
-        if p.returncode == 0 and os.path.isfile(dst):
-            log(f"  NAS 저장(run_asu): {dst}")
-            return True
+        try:
+            p = run_asu(f"cp '{src_path}' '{dst}' && chmod 644 '{dst}'", timeout=60)
+        except Exception as e:
+            p = None
+            log(f"  run_asu NAS 저장 실패 ({e}) -> SSH archive 폴백")
+        if p and p.returncode == 0 and os.path.isfile(dst):
+            if os.path.getsize(dst) == os.path.getsize(src_path):
+                log(f"  NAS 저장(run_asu): {dst}")
+                return dst
         # run_asu도 실패 (CIFS에서 로컬 파일 stat 불가) → 로컬에서 읽고 NAS에 쓰기
         try:
             with open(src_path, 'rb') as s:
@@ -416,13 +712,30 @@ def _copy_to_nas(src_path):
             fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
             with os.fdopen(fd, 'wb') as f:
                 f.write(data)
+            if os.path.getsize(dst) != os.path.getsize(src_path):
+                raise RuntimeError("NAS 복사 크기 불일치")
             log(f"  NAS 저장(로컬읽기→직접쓰기): {dst}")
-            return True
+            return dst
         except Exception as e2:
-            raise RuntimeError(f"NAS 저장 전 경로 실패: {e}")
+            log(f"  CIFS NAS 저장 실패: {e2}")
+        # CIFS가 실패한 경우 NAS SSH archive를 쓰고 SHA256을 대조한다.
+        if os.path.isfile(NAS_SSH_KEY):
+            remote = f"{NAS_SSH_DIR.rstrip('/')}/{os.path.basename(src_path)}"
+            ssh = ["ssh", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", NAS_SSH_HOST]
+            mkdir_cmd = "/bin/sh -c " + shlex.quote(f"mkdir -p -- {NAS_SSH_DIR}")
+            mkdir = subprocess.run(ssh + [mkdir_cmd], capture_output=True, text=True, timeout=30)
+            if mkdir.returncode == 0:
+                put = subprocess.run(["scp", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", src_path, f"{NAS_SSH_HOST}:{remote}"], capture_output=True, text=True, timeout=300)
+                local_hash = subprocess.check_output(["sha256sum", src_path], text=True).split()[0]
+                verify_cmd = "/bin/sh -c " + shlex.quote(f"sha256sum -- {remote}")
+                verify = subprocess.run(ssh + [verify_cmd], capture_output=True, text=True, timeout=45)
+                if put.returncode == 0 and verify.returncode == 0 and verify.stdout.split() and verify.stdout.split()[0] == local_hash:
+                    log(f"  NAS 저장(SSH+SHA256): {remote}")
+                    return remote
+                log(f"  NAS SSH 저장/검증 실패: {put.stderr.strip()[:160] or verify.stderr.strip()[:160]}")
     except Exception as e:
         log(f"  NAS 저장 실패 (로컬 유지): {e}")
-        return False
+    return None
 
 
 def _remux_24fps(src_path, dst_path):
@@ -486,54 +799,120 @@ def run_job(job_id, cfg):
             prefix = f"h3web/{job_id}_s{i:02d}"
             workflow = build_workflow(cfg["prompt"], cfg.get("negative", ""), cfg["width"], cfg["height"],
                                    seg_frames, cfg["steps"], seed,
-                                   image_name=cfg.get("image_name", ""), prefix=prefix)
+                                   image_name=cfg.get("image_name", ""),
+                                   video_name=cfg.get("video_name", ""), prefix=prefix,
+                                   realism_lora=cfg.get("realism_lora", False),
+                                   cam_motion=cfg.get("cam_motion", ""),
+                                   realism_strength=cfg.get("realism_strength"),
+                                   cam_strength=cfg.get("cam_strength"))
             cid = str(uuid.uuid4())
+            # Subscribe before queueing so an immediately-started prompt cannot
+            # emit its first real progress event before this client is listening.
+            ws = _comfy_ws(cid)
             queued = comfy_post("/prompt", {"prompt": workflow, "client_id": cid})
             if "error" in queued:
+                if ws:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
                 err_msg = json.dumps(queued, ensure_ascii=False)
                 raise RuntimeError(err_msg[:600])
             pid = queued["prompt_id"]
+            update_job(job_id, status="queued", comfy_prompt_id=pid, segment_started=time.time(),
+                       comfy_status="pending",
+                       progress=_prog(job_id, f"세그먼트 {i+1}/{segments} ComfyUI 대기 중" if segments > 1 else "ComfyUI 대기 중",
+                                      seg_done=i, queue_pending=1))
             log(f"  seg {i+1}/{segments} queued pid={pid} (H3)")
 
-            # 폴링
-            while True:
-                h = comfy_get(f"/history/{pid}", timeout=30)
-                if pid in h:
-                    result = h[pid]
-                    status = result.get("status", {})
-                    if status.get("status_str") == "error" or not status.get("completed", False):
-                        raise RuntimeError(f"seg {i+1} 실패: " + json.dumps(result, ensure_ascii=False)[:800])
-                    files = []
-                    for out in result.get("outputs", {}).values():
-                        for key in ("videos", "gifs", "images"):
-                            for f in out.get(key, []):
-                                if isinstance(f, dict):
-                                    fn = f.get("filename", "")
-                                    sub = f.get("subfolder", "")
-                                    files.append(os.path.join(sub, fn) if sub else fn)
-                                else:
-                                    files.append(str(f))
-                    mp4 = [f for f in files if str(f).lower().endswith(".mp4")] or files
-                    if not mp4:
-                        raise RuntimeError(f"seg {i+1} 완료되었으나 mp4 없음: {str(files)[:300]}")
-                    fname = str(mp4[0])
-                    src = _resolve_output(fname)
-                    dst_dir = os.path.join(OUT_DIR, job_id)
-                    os.makedirs(dst_dir, exist_ok=True)
-                    dst = os.path.join(dst_dir, f"seg_{i:02d}.mp4")
-                    if os.access(src, os.R_OK):
-                        shutil.copy2(src, dst)
-                    else:
-                        run_asu(f"cp '{src}' '{dst}' && chmod 644 '{dst}'", timeout=60)
-                    seg_files.append(dst)
-                    log(f"  seg {i+1}/{segments} 완료 → {dst}")
-                    break
-                q = comfy_get("/queue", timeout=30)
-                update_job(job_id, progress=_prog(job_id,
-                    f"세그먼트 {i+1}/{segments} 대기", seg_done=i,
-                    queue_running=len(q.get("queue_running", [])),
-                    queue_pending=len(q.get("queue_pending", []))))
-                time.sleep(8)
+            # A websocket supplies sampler measurements. Queue/history only
+            # establish this prompt's lifecycle; neither can manufacture a pct.
+            try:
+                while True:
+                    if ws:
+                        try:
+                            raw = ws.recv()
+                            if isinstance(raw, str):
+                                apply_comfy_event(job_id, pid, json.loads(raw), i, segments)
+                        except Exception as e:
+                            # A read timeout just means no event arrived yet;
+                            # it is not a connection failure.
+                            if websocket and isinstance(e, websocket.WebSocketTimeoutException):
+                                pass
+                            else:
+                                # Socket loss is fail-closed, not a fabricated
+                                # continuation. History polling below may recover.
+                                try:
+                                    ws.close()
+                                except Exception:
+                                    pass
+                                ws = None
+                                update_job(job_id, comfy_status="unavailable",
+                                           progress=_prog(job_id, "ComfyUI 진행 정보 수신 대기", seg_done=i,
+                                                          unavailable=True))
+                    try:
+                        h = comfy_get(f"/history/{pid}", timeout=30)
+                    except Exception:
+                        update_job(job_id, comfy_status="unavailable",
+                                   progress=_prog(job_id, "ComfyUI 상태 확인 불가", seg_done=i,
+                                                  unavailable=True))
+                        time.sleep(2)
+                        continue
+                    if pid in h:
+                        result = h[pid]
+                        status = result.get("status", {})
+                        if status.get("status_str") == "error" or not status.get("completed", False):
+                            raise RuntimeError(f"seg {i+1} 실패: " + json.dumps(result, ensure_ascii=False)[:800])
+                        files = []
+                        for out in result.get("outputs", {}).values():
+                            for key in ("videos", "gifs", "images"):
+                                for f in out.get(key, []):
+                                    if isinstance(f, dict):
+                                        fn = f.get("filename", "")
+                                        sub = f.get("subfolder", "")
+                                        files.append(os.path.join(sub, fn) if sub else fn)
+                                    else:
+                                        files.append(str(f))
+                        mp4 = [f for f in files if str(f).lower().endswith(".mp4")] or files
+                        if not mp4:
+                            raise RuntimeError(f"seg {i+1} 완료되었으나 mp4 없음: {str(files)[:300]}")
+                        fname = str(mp4[0])
+                        src = _resolve_output(fname)
+                        dst_dir = os.path.join(OUT_DIR, job_id)
+                        os.makedirs(dst_dir, exist_ok=True)
+                        dst = os.path.join(dst_dir, f"seg_{i:02d}.mp4")
+                        if os.access(src, os.R_OK):
+                            shutil.copy2(src, dst)
+                        else:
+                            run_asu(f"cp '{src}' '{dst}' && chmod 644 '{dst}'", timeout=60)
+                        seg_files.append(dst)
+                        log(f"  seg {i+1}/{segments} 완료 → {dst}")
+                        break
+                    # Without the event stream a queue position cannot be
+                    # represented as generation progress. Remain fail-closed
+                    # even if the prompt is visible in /queue.
+                    if ws is None:
+                        update_job(job_id, comfy_status="unavailable",
+                                   progress=_prog(job_id, "ComfyUI 진행 정보 수신 대기", seg_done=i,
+                                                  unavailable=True))
+                        time.sleep(2)
+                        continue
+                    try:
+                        q = comfy_get("/queue", timeout=30)
+                    except Exception:
+                        update_job(job_id, comfy_status="unavailable",
+                                   progress=_prog(job_id, "ComfyUI 상태 확인 불가", seg_done=i,
+                                                  unavailable=True))
+                        time.sleep(2)
+                        continue
+                    reconcile_comfy_prompt(job_id, pid, {}, q, i, segments)
+                    time.sleep(2)
+            finally:
+                if ws:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
 
         # 최종 파일 경로
         dst_dir = os.path.join(OUT_DIR, job_id)
@@ -553,17 +932,25 @@ def run_job(job_id, cfg):
 
         # NAS에 저장
         update_job(job_id, progress=_prog(job_id, "NAS 저장 중", seg_done=segments, done_phase=3))
-        nas_success = _copy_to_nas(final_local)
-
+        nas_path = _copy_to_nas(final_local)
         fsize = os.path.getsize(final_local)
+        # NAS archive가 크기 또는 SHA256으로 검증됐을 때에만 PGX 원본/세그먼트를
+        # 제거한다. archive 실패 시에는 복구를 위해 로컬을 유지한다.
+        if nas_path:
+            shutil.rmtree(dst_dir)
+            final_src = nas_path
+        else:
+            final_src = final_local
         update_job(job_id,
-            status="done", file=os.path.basename(final_local), src=final_local,
+            status="done", file=os.path.basename(final_local), src=final_src,
+            progress=_prog(job_id, "생성 완료", completed=True, eta=0, seg_done=segments),
             elapsed=round(time.time() - JOBS[job_id].get("started", time.time()), 1),
             segments=segments, total_seconds=total_seconds,
             size=fsize,
-            nas_saved=nas_success,
+            nas_saved=bool(nas_path),
+            storage="nas" if nas_path else "pgx-local-recovery",
         )
-        log(f"job {job_id} done → {final_local} ({segments}seg, {total_seconds}s, 24fps, {fsize//1048576}MB, nas={'OK' if nas_success else 'FAIL'})")
+        log(f"job {job_id} done → {final_src} ({segments}seg, {total_seconds}s, 24fps, {fsize//1048576}MB, nas={'OK' if nas_path else 'FAIL'})")
         return
     except Exception as e:
         update_job(job_id, status="error", error=str(e)[:800])
@@ -596,6 +983,104 @@ def _gc_uploads(keep=None):
                 del UPLOADED[k]
 
 
+def _ref_path():
+    return os.path.join(REF_DIR, "ref.png")
+
+
+def _load_ref():
+    """고정 참조 이미지 존재 여부 + meta 반환. 없으면 None."""
+    meta_f = REF_META
+    if not os.path.isfile(meta_f) or not os.path.isfile(_ref_path()):
+        return None
+    try:
+        with open(meta_f) as f:
+            m = json.load(f)
+    except Exception:
+        return None
+    return {
+        "name": m.get("name", ""),
+        "w": m.get("w", 0), "h": m.get("h", 0),
+        "size": m.get("size", 0), "ts": m.get("ts", 0),
+    }
+
+
+def _save_ref(data: bytes, w: int, h: int, name: str):
+    """고정 참조 이미지 영구 저장 (삭제 전까지 유지)."""
+    os.makedirs(REF_DIR, exist_ok=True)
+    with open(_ref_path(), "wb") as f:
+        f.write(data)
+    meta = {"name": name, "w": w, "h": h, "size": len(data), "ts": time.time()}
+    with open(REF_META, "w") as f:
+        json.dump(meta, f, ensure_ascii=False)
+    return meta
+
+
+def _delete_ref():
+    try:
+        if os.path.isfile(_ref_path()):
+            os.remove(_ref_path())
+    except Exception:
+        pass
+    try:
+        if os.path.isfile(REF_META):
+            os.remove(REF_META)
+    except Exception:
+        pass
+
+
+def _refv_path():
+    return os.path.join(REFV_DIR, "ref_frame.png")
+
+
+def _refv_video_path():
+    return os.path.join(REFV_DIR, "ref_video.mp4")
+
+
+def _load_refv():
+    """고정 동영상 참조 meta 반환. 없으면 None."""
+    meta_f = REFV_META
+    if not os.path.isfile(meta_f) or not os.path.isfile(_refv_path()):
+        return None
+    try:
+        with open(meta_f) as f:
+            m = json.load(f)
+    except Exception:
+        return None
+    return {
+        "name": m.get("name", ""),
+        "w": m.get("w", 0), "h": m.get("h", 0),
+        "size": m.get("size", 0), "ts": m.get("ts", 0),
+        "duration_s": m.get("duration_s", 0),
+        "ts_offset": m.get("ts_offset", 0),
+    }
+
+
+def _save_refv(video_bytes: bytes, frame_bytes: bytes, w: int, h: int,
+               name: str, duration_s: float, ts_offset: float):
+    """고정 동영상 참조: 원본 mp4 + 추출 프레임을 영구 저장."""
+    os.makedirs(REFV_DIR, exist_ok=True)
+    with open(_refv_path(), "wb") as f:
+        f.write(frame_bytes)
+    with open(_refv_video_path(), "wb") as f:
+        f.write(video_bytes)
+    meta = {"name": name, "w": w, "h": h, "size": len(video_bytes),
+            "ts": time.time(), "duration_s": duration_s, "ts_offset": ts_offset,
+            "frame_size": len(frame_bytes)}
+    with open(REFV_META, "w") as f:
+        json.dump(meta, f, ensure_ascii=False)
+    log(f"고정 동영상 참조 저장: {name} ({w}x{h}, {duration_s:.1f}s, {ts_offset:.1f}s 지점)")
+    return meta
+
+
+def _delete_refv():
+    for pth in (_refv_path(), _refv_video_path(), REFV_META):
+        try:
+            if os.path.isfile(pth):
+                os.remove(pth)
+        except Exception:
+            pass
+
+
 def send_json(handler, obj, code=200):
     body = json.dumps(obj, ensure_ascii=False).encode()
     handler.send_response(code)
@@ -607,6 +1092,34 @@ def send_json(handler, obj, code=200):
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def parse_byte_range(header, size):
+    """Return an inclusive single HTTP byte range or None for a full response."""
+    if not header:
+        return None
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", header.strip())
+    if not match or size <= 0:
+        raise ValueError("invalid range")
+    first, last = match.groups()
+    if not first and not last:
+        raise ValueError("invalid range")
+    if first:
+        start = int(first)
+        end = int(last) if last else size - 1
+    else:
+        suffix = int(last)
+        if suffix <= 0:
+            raise ValueError("invalid range")
+        start, end = max(0, size - suffix), size - 1
+    if start >= size or end < start:
+        raise ValueError("unsatisfiable range")
+    return start, min(end, size - 1)
+
+
+def valid_job_id(jid):
+    """Reject path-like identifiers before using them in an output path."""
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{1,64}", jid or ""))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -622,6 +1135,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         self._cors()
+
+    def do_HEAD(self):
+        self.do_GET()
 
     def _static(self, path):
         if path in ("/", "/index.html"):
@@ -645,6 +1161,77 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_video(self, src, jid, disposition):
+        """Stream video with byte-range support for playback, seeking and resume."""
+        remote = src.startswith(NAS_SSH_DIR.rstrip("/") + "/")
+        if remote:
+            if not os.path.isfile(NAS_SSH_KEY):
+                send_json(self, {"ok": False, "error": "NAS archive 키가 없습니다"}, 503)
+                return
+            meta = subprocess.run(["ssh", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", NAS_SSH_HOST,
+                                   "stat", "-c", "%s", "--", src], capture_output=True, text=True, timeout=30)
+            if meta.returncode != 0 or not meta.stdout.strip().isdigit():
+                send_json(self, {"ok": False, "error": "NAS archive 영상을 찾을 수 없습니다"}, 404)
+                return
+            size = int(meta.stdout.strip())
+        else:
+            size = os.path.getsize(src)
+        try:
+            byte_range = parse_byte_range(self.headers.get("Range"), size)
+        except ValueError:
+            self.send_response(416)
+            self.send_header("Content-Range", f"bytes */{size}")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            return
+        if byte_range:
+            start, end = byte_range
+            length, code = end - start + 1, 206
+        else:
+            start, length, code = 0, size, 200
+        self.send_response(code)
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Content-Length", str(length))
+        self.send_header("Content-Disposition", f'{disposition}; filename="{jid}.mp4"')
+        self.send_header("Accept-Ranges", "bytes")
+        if byte_range:
+            self.send_header("Content-Range", f"bytes {start}-{start + length - 1}/{size}")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        if remote:
+            # QNAP BusyBox dd does not implement GNU iflag=skip_bytes.  bs=1
+            # makes skip/count exact bytes (Range requests are typically small
+            # initial probes or browser-managed chunks) and works on both NAS
+            # and GNU userlands.
+            proc = subprocess.Popen(["ssh", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", NAS_SSH_HOST,
+                                     "dd", f"if={src}", "bs=1", f"skip={start}", f"count={length}"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            assert proc.stdout is not None and proc.stderr is not None
+            try:
+                while True:
+                    chunk = proc.stdout.read(1024 * 256)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                if proc.wait(timeout=60) != 0:
+                    log(f"NAS SSH video stream 실패: {proc.stderr.read().decode(errors='replace')[:160]}")
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+        else:
+            with open(src, "rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining:
+                    chunk = f.read(min(1024 * 256, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+
     def do_GET(self):
         u = urlparse(self.path)
         p = u.path
@@ -658,15 +1245,20 @@ class Handler(BaseHTTPRequestHandler):
                 active_id = ACTIVE[0]
             # 상세 상태: ComfyUI 버전/GPU, NAS, 활성 job
             cstats = comfy_get("/system_stats", timeout=3) if comfy_up() else {}
+            device = (cstats.get("devices") or [{}])[0]
+            vram_free = device.get("vram_free", 0)
+            vram_total = device.get("vram_total", 0)
             send_json(self, {
                 "ok": True, "jobs": items,
                 "comfy_up": comfy_up(),
                 "comfy_info": {
                     "version": cstats.get("system", {}).get("comfyui_version", ""),
-                    "gpu": (cstats.get("devices") or [{}])[0].get("name", ""),
-                    "gpu_vram_free_gb": round((cstats.get("devices") or [{}])[0].get("vram_free", 0) / 1e9, 1),
-                    "gpu_vram_total_gb": round((cstats.get("devices") or [{}])[0].get("vram_total", 0) / 1e9, 1),
+                    "gpu": device.get("name", ""),
+                    "gpu_vram_free_gb": round(vram_free / 1e9, 1),
+                    "gpu_vram_used_gb": round(max(vram_total - vram_free, 0) / 1e9, 1),
+                    "gpu_vram_total_gb": round(vram_total / 1e9, 1),
                 } if cstats else None,
+                "host_memory": host_memory_stats(),
                 "nas_ok": nas_ok(),
                 "queue_len": q_len,
                 "active_job": active_id,
@@ -676,27 +1268,74 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 j = dict(JOBS.get(jid)) if JOBS.get(jid) else None
             send_json(self, {"ok": True, "job": j}, code=200 if j else 404)
-        elif p.startswith("/api/download/"):
+        elif p.startswith("/api/ref/status"):
+            # GET /api/ref/status — 고정 참조 메타데이터만
+            ref = _load_ref()
+            send_json(self, {"ok": True, "ref": ref})
+        elif p.startswith("/api/ref"):
+            # GET /api/ref — 고정 참조 이미지 byte 반환 (없으면 404)
+            ref = _load_ref()
+            if not ref:
+                send_json(self, {"ok": False, "ref": None}, 404)
+                return
+            fsize = os.path.getsize(_ref_path())
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(fsize))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with open(_ref_path(), "rb") as f:
+                self.wfile.write(f.read())
+        elif p.startswith("/api/refv/frame"):
+            # GET /api/refv/frame — 고정 동영상 참조에서 추출된 프레임 PNG (없으면 404)
+            if not _load_refv():
+                send_json(self, {"ok": False, "refv": None}, 404)
+                return
+            fsize = os.path.getsize(_refv_path())
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(fsize))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with open(_refv_path(), "rb") as f:
+                self.wfile.write(f.read())
+        elif p.startswith("/api/refv/status"):
+            # GET /api/refv/status — 고정 동영상 참조 메타데이터
+            send_json(self, {"ok": True, "refv": _load_refv()})
+        elif p.startswith("/api/refv"):
+            # GET /api/refv — 고정 동영상 원본 mp4 (없으면 404)
+            if not os.path.isfile(_refv_video_path()):
+                send_json(self, {"ok": False, "refv": None}, 404)
+                return
+            fsize = os.path.getsize(_refv_video_path())
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(fsize))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with open(_refv_video_path(), "rb") as f:
+                shutil.copyfileobj(f, self.wfile, length=1024 * 256)
+        elif p.startswith("/api/download/") or p.startswith("/api/view/"):
             jid = p.split("/")[3]
+            if not valid_job_id(jid):
+                send_json(self, {"ok": False, "error": "invalid job id"}, 400)
+                return
             # 1) JOBS에서 src 확인
             with LOCK:
                 j = JOBS.get(jid)
             src = j.get("src") if j and j.get("status") == "done" else None
+            is_remote_archive = bool(src and src.startswith(NAS_SSH_DIR.rstrip("/") + "/"))
             # 2) 폴백: JOBS에 없어도 파일 기반 탐색
-            if not src or not os.path.exists(src):
+            if not src or (not is_remote_archive and not os.path.exists(src)):
                 src = os.path.join(OUT_DIR, jid, f"{jid}.mp4")
-            if not os.path.exists(src):
+                is_remote_archive = False
+            if not is_remote_archive and not os.path.exists(src):
                 send_json(self, {"ok": False, "error": f"다운로드 가능 영상 없음 ({jid})"}, 404)
                 return
-            fsize = os.path.getsize(src)
-            self.send_response(200)
-            self.send_header("Content-Type", "video/mp4")
-            self.send_header("Content-Length", str(fsize))
-            self.send_header("Content-Disposition", f'attachment; filename="{jid}.mp4"')
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            with open(src, "rb") as f:
-                shutil.copyfileobj(f, self.wfile, length=1024 * 256)
+            self._serve_video(src, jid, "attachment" if p.startswith("/api/download/") else "inline")
         elif p == "/api/health":
             with QUEUE_LOCK:
                 q_len = len(QUEUE)
@@ -789,6 +1428,165 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         p = u.path
+        if p == "/api/ref/set":
+            # 고정 참조 등록 (multipart/form-data: file=이미지)
+            ctype = self.headers.get("Content-Type", "")
+            clen = int(self.headers.get("Content-Length", 0))
+            if clen > MAX_UPLOAD_BYTES:
+                self.rfile.read(clen)
+                send_json(self, {"ok": False, "error": f"파일 초과 (최대 {MAX_UPLOAD_BYTES//1048576}MB)"}, 400)
+                return
+            raw = self.rfile.read(clen) if clen else b""
+            if not raw:
+                send_json(self, {"ok": False, "error": "빈 요청"}, 400)
+                return
+            data = None
+            fname = "ref.png"
+            if ctype.startswith("multipart/form-data"):
+                m = re.search(r"boundary=(\"?)([^\";]+)\1", ctype)
+                if not m:
+                    send_json(self, {"ok": False, "error": "boundary 없음"}, 400)
+                    return
+                boundary = ("--" + m.group(2)).encode()
+                for part in raw.split(boundary):
+                    if b"Content-Disposition" not in part:
+                        continue
+                    head, _, body = part.partition(b"\r\n\r\n")
+                    body = body.rstrip(b"\r\n")
+                    hm = re.search(rb'name="([^"]*)"', head)
+                    fm = re.search(rb'filename="([^"]*)"', head)
+                    name = hm.group(1).decode() if hm else ""
+                    if name == "file" and body:
+                        fname = fm.group(1).decode() if fm else "ref.png"
+                        data = body
+                        break
+                if data is None:
+                    send_json(self, {"ok": False, "error": "file 필드 없음"}, 400)
+                    return
+            else:
+                data = raw
+                disp = self.headers.get("Content-Disposition", "")
+                fm = re.search(r'filename="?([^";]+)"?', disp)
+                if fm:
+                    fname = fm.group(1)
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+                send_json(self, {"ok": False, "error": "지원 형식: png/jpg/webp/bmp"}, 400)
+                return
+            w = h = 0
+            try:
+                import io
+                from PIL import Image
+                with Image.open(io.BytesIO(data)) as im:
+                    w, h = im.size
+            except Exception:
+                pass
+            meta = _save_ref(data, w, h, fname)
+            log(f"고정 참조 등록: {fname} ({w}x{h})")
+            send_json(self, {"ok": True, "ref": meta})
+            return
+        if p == "/api/ref/delete":
+            _delete_ref()
+            log("고정 참조 삭제")
+            send_json(self, {"ok": True})
+            return
+        if p == "/api/refv/status":
+            send_json(self, {"ok": True, "refv": _load_refv()})
+            return
+        if p == "/api/refv/delete":
+            _delete_refv()
+            log("고정 동영상 참조 삭제")
+            send_json(self, {"ok": True})
+            return
+        if p == "/api/refv/set":
+            ctype = self.headers.get("Content-Type", "")
+            clen = int(self.headers.get("Content-Length", 0))
+            if clen > MAX_UPLOAD_BYTES:
+                self.rfile.read(clen)
+                send_json(self, {"ok": False, "error": f"파일 초과 (최대 {MAX_UPLOAD_BYTES//1048576}MB)"}, 400)
+                return
+            raw = self.rfile.read(clen) if clen else b""
+            if not raw:
+                send_json(self, {"ok": False, "error": "빈 요청"}, 400)
+                return
+            fname = "refv.mp4"
+            data = None
+            if "multipart/form-data" in ctype:
+                m = re.search(r"boundary=(\"?)([^\\s;\"']+)\\1", ctype)
+                boundary = m.group(2).encode() if m else b"----h3web"
+                parts = raw.split(b"--" + boundary)
+                for seg in parts:
+                    seg = seg.lstrip(b"\r\n")
+                    if not seg:
+                        continue
+                    fm = re.search(rb'name="file";\s*filename="([^"]+)"', seg)
+                    hm = re.search(rb'name="name";\s*content="([^"]*)"', seg)
+                    if fm:
+                        name = hm.group(1).decode() if hm else ""
+                        if name == "file" and b"\r\n\r\n" in seg:
+                            fname = fm.group(1).decode() or "refv.mp4"
+                            data = seg.split(b"\r\n\r\n", 1)[1]
+                            break
+                if data is None:
+                    send_json(self, {"ok": False, "error": "file 필드 없음"}, 400)
+                    return
+            else:
+                data = raw
+                disp = self.headers.get("Content-Disposition", "")
+                fm2 = re.search(r'filename="?([^";]+)"?', disp)
+                if fm2:
+                    fname = fm2.group(1)
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in (".mp4", ".mov", ".webm", ".mkv", ".avi"):
+                send_json(self, {"ok": False, "error": "동영상 형식: mp4/mov/webm/mkv/avi"}, 400)
+                return
+            # 동영상 메타: ffmpeg로 길이/해상도 확인
+            probe = {"w": 0, "h": 0, "duration_s": 0.0}
+            tmp_probe = os.path.join(OUT_DIR, f"probe_{uuid.uuid4().hex[:8]}.mp4")
+            try:
+                import json as _json
+                os.makedirs(OUT_DIR, exist_ok=True)
+                with open(tmp_probe, "wb") as f:
+                    f.write(data)
+                out = subprocess.run(
+                    ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                     "-show_entries", "stream=width,height",
+                     "-show_entries", "format=duration",
+                     "-of", "json", tmp_probe],
+                    capture_output=True, timeout=15)
+                if out.returncode == 0:
+                    pj = _json.loads(out.stdout.decode())
+                    st = (pj.get("streams") or [{}])[0]
+                    probe["w"] = int(st.get("width") or 0)
+                    probe["h"] = int(st.get("height") or 0)
+                    probe["duration_s"] = round(float(pj.get("format", {}).get("duration") or 0), 2)
+            except Exception as e:
+                log(f"  ffprobe 실패 ({e}) — 메타 없는 상태로 저장")
+            finally:
+                try:
+                    if os.path.isfile(tmp_probe):
+                        os.remove(tmp_probe)
+                except Exception:
+                    pass
+            if probe["duration_s"] == 0.0:
+                send_json(self, {"ok": False, "error": "동영상 길이를 읽을 수 없습니다"}, 400)
+                return
+            if probe["w"] == 0 or probe["h"] == 0:
+                send_json(self, {"ok": False, "error": "해상도를 읽을 수 없습니다"}, 400)
+                return
+            # 프레임 추출 (0.5s 지점 — 인물 샷 기준, 4s 이내로 클램프)
+            ts_offset = 0.5
+            try:
+                frame_data = extract_ref_video_frame(data, ts_offset)
+            except RuntimeError as e:
+                log(f"  프레임 추출 실패: {e}")
+                send_json(self, {"ok": False, "error": f"프레임 추출 실패: {str(e)[:100]}"}, 400)
+                return
+            meta = _save_refv(data, frame_data, probe["w"], probe["h"],
+                              os.path.basename(fname), probe["duration_s"], ts_offset)
+            log(f"고정 동영상 참조 등록: {fname} ({probe['w']}x{probe['h']}, {probe['duration_s']:.1f}s)")
+            send_json(self, {"ok": True, "refv": meta})
+            return
         if p == "/api/upload":
             self._handle_upload()
             return
@@ -809,26 +1607,54 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # 이미지 업로드 nonce (I2V 전용)
             image_name = ""
+            video_name = ""
             upload_nonce = (data.get("image") or "").strip()
+            ref_mode = str(data.get("ref_mode") or "").strip()
             if mode == "i2v":
-                if not upload_nonce:
-                    send_json(self, {"ok": False, "error": "이미지를 먼저 업로드해야 합니다 (I2V)"}, 400)
-                    return
-                with UPLOAD_LOCK:
-                    up = UPLOADED.get(upload_nonce)
-                if not up:
-                    send_json(self, {"ok": False, "error": "이미지가 만료되었습니다 — 다시 업로드해 주세요"}, 400)
-                    return
-                # 즉시 ComfyUI 입력 디렉터리로 전송
-                try:
-                    with open(up["path"], "rb") as f:
-                        img_bytes = f.read()
-                    safe_fname = f"h3web_{upload_nonce}.png"
-                    image_name = comfy_upload_image(img_bytes, safe_fname)
-                    log(f"  I2V 이미지: {image_name} ({up['w']}x{up['h']})")
-                except Exception as e:
-                    send_json(self, {"ok": False, "error": f"이미지 전송 실패: {e}"}, 500)
-                    return
+                if not upload_nonce and ref_mode == "fixed":
+                    # 고정 참조 모드: 서버가 영구 보관한 참조 이미지를 자동 사용
+                    ref = _load_ref()
+                    if not ref:
+                        send_json(self, {"ok": False, "error": "고정 참조가 등록되지 않았습니다 — 참조 이미지를 먼저 등록해 주세요"}, 400)
+                        return
+                    try:
+                        with open(_ref_path(), "rb") as f:
+                            ref_bytes = f.read()
+                        image_name = comfy_upload_image(ref_bytes, f"h3web_ref_{uuid.uuid4().hex[:8]}.png")
+                        log(f"  고정 참조 자동 사용: {ref['name']} ({ref['w']}x{ref['h']}) → {image_name}")
+                    except Exception as e:
+                        send_json(self, {"ok": False, "error": f"고정 참조 전송 실패: {e}"}, 500)
+                        return
+                elif not upload_nonce:
+                    # 고정 동영상 참조 (인물 동영상) — ref_mode=video 또는 자동
+                    refv = _load_refv()
+                    if not refv or not os.path.isfile(_refv_path()):
+                        send_json(self, {"ok": False, "error": "이미지를 먼저 업로드하거나 고정 참조(이미지/동영상)를 선택해 주세요 (I2V)"}, 400)
+                        return
+                    try:
+                        with open(_refv_path(), "rb") as f:
+                            refv_bytes = f.read()
+                        video_name = comfy_upload_video(refv_bytes, f"h3web_refv_{uuid.uuid4().hex[:8]}.mp4")
+                        log(f"  고정 동영상 참조 자동 사용: {refv.get('name')} ({refv.get('w')}x{refv.get('h')}, {refv.get('duration_s')}s) → {video_name}")
+                    except Exception as e:
+                        send_json(self, {"ok": False, "error": f"고정 동영상 참조 전송 실패: {e}"}, 500)
+                        return
+                else:
+                    with UPLOAD_LOCK:
+                        up = UPLOADED.get(upload_nonce)
+                    if not up:
+                        send_json(self, {"ok": False, "error": "이미지가 만료되었습니다 — 다시 업로드해 주세요"}, 400)
+                        return
+                    # 즉시 ComfyUI 입력 디렉터리로 전송
+                    try:
+                        with open(up["path"], "rb") as f:
+                            img_bytes = f.read()
+                        safe_fname = f"h3web_{upload_nonce}.png"
+                        image_name = comfy_upload_image(img_bytes, safe_fname)
+                        log(f"  I2V 이미지: {image_name} ({up['w']}x{up['h']})")
+                    except Exception as e:
+                        send_json(self, {"ok": False, "error": f"이미지 전송 실패: {e}"}, 500)
+                        return
             seconds = min(float(data.get("seconds", 5)), MAX_SECONDS)
             strategy = (data.get("strategy") or STRATEGY_SPLIT).strip().lower()
             if strategy not in STRATEGY_CHOICES:
@@ -850,6 +1676,21 @@ class Handler(BaseHTTPRequestHandler):
             steps = max(STEPS_MIN, min(STEPS_MAX, steps))
             est = estimate_seconds(seconds, seg_seconds, strategy, steps)
             fname = re.sub(r'[^\w\-]', '_', (data.get("filename") or "video")).strip()[:40] or "video"
+            # JSON true만 허용한다. 문자열 "false" 등으로 우회해 켜지지 않는다.
+            realism_lora = data.get("realism_lora") is True
+            # 카메라 모션 LoRA: "off"|"1000"|"3000" — 다른 값은 off로 처리
+            cam_motion = data.get("cam_motion")
+            cam_motion = cam_motion if cam_motion in ("1000", "3000") else ""
+            # LoRA 강도: 실수만 허용, 부동/문자열/bool은 None → 기본값
+            def _num(v):
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    return None
+                f = float(v)
+                if f != f or f in (float("inf"), float("-inf")):
+                    return None
+                return max(0.0, min(2.0, f))
+            realism_strength = _num(data.get("realism_strength"))
+            cam_strength = _num(data.get("cam_strength"))
             cfg = {
                 "mode": mode,
                 "prompt": prompt,
@@ -863,7 +1704,22 @@ class Handler(BaseHTTPRequestHandler):
                 "seed": int(data.get("seed", -1)),
                 "filename": fname,
                 "image_name": image_name,
+                "video_name": video_name,
+                "realism_lora": realism_lora,
+                "cam_motion": cam_motion,
+                "realism_strength": realism_strength,
+                "cam_strength": cam_strength,
             }
+            # admission slot을 먼저 예약한다. 따라서 동시에 여러 HTTP 요청이 와도
+            # 대기열(예약 포함) 6번째는 이 시점에서 원자적으로 거절된다.
+            global QUEUE_RESERVATIONS
+            with QUEUE_LOCK:
+                pending_total = len(QUEUE) + QUEUE_RESERVATIONS
+                if pending_total >= MAX_PENDING_JOBS:
+                    send_json(self, {"ok": False, "error": "대기열이 가득 찼습니다 (최대 5개). 실행 중인 작업이 끝난 뒤 다시 시도해 주세요.",
+                                     "code": "QUEUE_FULL", "queue_pending": pending_total, "queue_limit": MAX_PENDING_JOBS}, 429)
+                    return
+                QUEUE_RESERVATIONS += 1
             jid = str(uuid.uuid4())[:8]
             with LOCK:
                 JOBS[jid] = {
@@ -874,11 +1730,19 @@ class Handler(BaseHTTPRequestHandler):
                     "estimated_seconds": est,
                 }
             _save_job(jid)
+            # 서버에서 원자적으로 제한한다. 프런트엔드 체크를 우회해도 6번째
+            # 대기 요청은 절대 enqueue되지 않는다.
             with QUEUE_LOCK:
+                QUEUE_RESERVATIONS -= 1
                 QUEUE.append(jid)
             log(f"new job {jid} [{mode}]: {prompt[:50]}... {cfg['width']}x{cfg['height']} "
                 f"{seconds}s [{strategy}] {segments}seg steps={cfg['steps']}"
-                + (f" img={image_name}" if image_name else ""))
+                + (f" img={image_name}" if image_name else "")
+                + (f" vid={video_name}" if video_name else "")
+                + (" realism_lora=on" if realism_lora else " realism_lora=off")
+                + (f" (x{cfg['realism_strength']})" if cfg.get("realism_strength") is not None else "")
+                + (f" cam_motion={cam_motion}" if cam_motion else "")
+                + (f" (x{cfg['cam_strength']})" if cfg.get("cam_strength") is not None else ""))
             send_json(self, {
                 "ok": True, "job": jid,
                 "segments": segments, "total_seconds": seconds,
@@ -901,47 +1765,108 @@ class Handler(BaseHTTPRequestHandler):
                     send_json(self, {"ok": True})
                 else:
                     send_json(self, {"ok": False, "error": "이미 실행 중이라 취소 불가"}, 400)
-        elif p.startswith("/api/delete/"):
+        elif p.startswith("/api/delete-error/"):
+            # 정상 완료 영상은 어떤 경우에도 이 API로 지우지 않는다. 오류/중단/취소
+            # 작업의 job 전용 임시 디렉터리 안에서만, 실제로 깨진 mp4만 정리한다.
             jid = p.split("/")[3]
             with LOCK:
                 j = JOBS.get(jid)
                 if not j:
                     send_json(self, {"ok": False, "error": "job 없음"}, 404)
                     return
-                if j["status"] in ("queued", "starting", "running"):
-                    send_json(self, {"ok": False, "error": "실행 중이라 삭제 불가"}, 400)
+                if j.get("status") not in ("error", "interrupted", "cancelled"):
+                    send_json(self, {"ok": False, "error": "오류/중단 작업만 정리할 수 있습니다. 정상 완료 영상은 보호됩니다."}, 400)
                     return
-                # 파일 삭제
-                src = j.get("src", "")
+                job_dir = os.path.realpath(os.path.join(OUT_DIR, jid))
+                root = os.path.realpath(OUT_DIR) + os.sep
+                if not job_dir.startswith(root):
+                    send_json(self, {"ok": False, "error": "안전하지 않은 출력 경로"}, 400)
+                    return
+            deleted, preserved = [], []
+            if os.path.isdir(job_dir):
+                for base, _, names in os.walk(job_dir):
+                    for name in names:
+                        path = os.path.realpath(os.path.join(base, name))
+                        if not path.startswith(job_dir + os.sep):
+                            continue
+                        if not name.lower().endswith(".mp4"):
+                            try:
+                                os.remove(path)
+                                deleted.append(os.path.basename(path))
+                            except OSError:
+                                pass
+                            continue
+                        # 최소 크기, 컨테이너 검사, 전체 디코드 중 하나라도 실패해야 삭제한다.
+                        bad = not os.path.isfile(path) or os.path.getsize(path) < 1024 * 1024
+                        if not bad:
+                            probe = subprocess.run(["ffprobe", "-v", "error", "-show_format", "-show_streams", path],
+                                                   capture_output=True, text=True, timeout=20)
+                            bad = probe.returncode != 0
+                        if not bad:
+                            decode = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-f", "null", "-"],
+                                                    capture_output=True, text=True, timeout=180)
+                            bad = decode.returncode != 0
+                        if bad:
+                            try:
+                                os.remove(path)
+                                deleted.append(os.path.basename(path))
+                            except OSError as e:
+                                preserved.append(f"{os.path.basename(path)} (삭제 실패: {e})")
+                        else:
+                            preserved.append(os.path.basename(path))
+                # 빈 디렉터리만 제거. 유효 mp4는 보존한다.
                 try:
-                    if src and os.path.isfile(src):
-                        os.remove(src)
-                    dst_dir = os.path.join(OUT_DIR, jid)
-                    if os.path.isdir(dst_dir):
-                        shutil.rmtree(dst_dir)
-                except OSError as e:
-                    log(f"  delete 파일 실패: {e}")
-                # NAS에서도 삭제 (run_asu로, CIFS uid 제한 우회)
-                try:
-                    base = os.path.basename(src) if src else f"{jid}.mp4"
-                    nas_f = os.path.join(NAS_DIR, base)
-                    if os.path.isfile(nas_f):
-                        p = run_asu(f"rm -f '{nas_f}'", timeout=10)
-                        if p.returncode == 0:
-                            log(f"  NAS 삭제: {base}")
-                    elif os.path.isfile(os.path.join(NAS_DIR, f"{jid}.mp4")):
-                        p = run_asu(f"rm -f '{os.path.join(NAS_DIR, f'{jid}.mp4')}'", timeout=10)
-                        if p.returncode == 0:
-                            log(f"  NAS 삭제: {jid}.mp4")
-                except Exception as e:
-                    log(f"  NAS 삭제 실패: {e}")
-                # job 제거
-                del JOBS[jid]
-                jf = os.path.join(JOBS_DIR, f"{jid}.json")
+                    if not any(os.scandir(job_dir)):
+                        os.rmdir(job_dir)
+                except OSError:
+                    pass
+            if not preserved:
+                with LOCK:
+                    JOBS.pop(jid, None)
+                jf = _job_file(jid)
                 if os.path.isfile(jf):
                     os.remove(jf)
-                log(f"  삭제: {jid}")
-                send_json(self, {"ok": True})
+            log(f"  오류 출력 정리: {jid}, 삭제 {len(deleted)}, 보존 {len(preserved)}")
+            send_json(self, {"ok": True, "deleted": deleted, "preserved": preserved,
+                             "message": "깨진 출력만 정리했습니다" if not preserved else "유효 MP4는 보호되어 삭제하지 않았습니다"})
+        elif p.startswith("/api/delete/"):
+            jid = p.split("/")[3]
+            if not valid_job_id(jid):
+                send_json(self, {"ok": False, "error": "invalid job id"}, 400)
+                return
+            with LOCK:
+                j = JOBS.get(jid)
+                if not j:
+                    send_json(self, {"ok": False, "error": "job 없음"}, 404)
+                    return
+                if j.get("status") != "done" or not j.get("nas_saved"):
+                    send_json(self, {"ok": False, "error": "NAS에 검증 저장된 완료 영상만 삭제할 수 있습니다"}, 400)
+                    return
+                name = os.path.basename(str(j.get("file", "")))
+            try:
+                archive = os.path.realpath(os.path.join(NAS_DIR, name))
+                root = os.path.realpath(NAS_DIR) + os.sep
+                if not name or not archive.startswith(root):
+                    raise RuntimeError("안전하지 않은 NAS archive 경로")
+                if os.path.isfile(archive):
+                    os.remove(archive)
+                else:
+                    remote = f"{NAS_SSH_DIR.rstrip('/')}/{name}"
+                    if not os.path.isfile(NAS_SSH_KEY):
+                        raise RuntimeError("NAS archive 키가 없습니다")
+                    quoted = remote.replace("'", "'\\''")
+                    pdel = subprocess.run(["ssh", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", NAS_SSH_HOST,
+                                           f"/bin/sh -c 'rm -f \\\"{quoted}\\\"'"], capture_output=True, text=True, timeout=45)
+                    if pdel.returncode != 0:
+                        raise RuntimeError(pdel.stderr.strip()[:200] or "NAS SSH 삭제 실패")
+                with LOCK:
+                    JOBS.pop(jid, None)
+                jf = _job_file(jid)
+                if os.path.isfile(jf):
+                    os.remove(jf)
+                send_json(self, {"ok": True, "message": "NAS archive 영상과 작업 기록을 삭제했습니다"})
+            except Exception as e:
+                send_json(self, {"ok": False, "error": f"NAS 삭제 실패: {e}"}, 500)
         else:
             send_json(self, {"ok": False, "error": "not found"}, 404)
 
