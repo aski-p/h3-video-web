@@ -734,8 +734,8 @@ footer{
     </div>
     <div class="row steprow" id="realismStrengthRow" style="display:none">
       <label for="realismStrength" style="font-size:12px;opacity:.7">강도</label>
-      <input type="range" id="realismStrength" min="0" max="2" step="0.1" value="0.8" style="flex:1;min-width:120px">
-      <span id="realismStrengthVal" style="font-size:12px;min-width:34px;text-align:right">0.8</span>
+      <input type="range" id="realismStrength" min="0" max="2" step="0.5" value="1" style="flex:1;min-width:120px">
+      <span id="realismStrengthVal" style="font-size:12px;min-width:34px;text-align:right">1.0</span>
     </div>
     <div class="hint" id="realismHint">끄면 기본 Turbo 스타일로 생성합니다.</div>
   </div>
@@ -750,7 +750,7 @@ footer{
     </div>
     <div class="row steprow" id="camStrengthRow" style="display:none;margin-top:10px">
       <label for="camStrength" style="font-size:12px;opacity:.7;flex:0 0 auto">강도</label>
-      <input type="range" id="camStrength" min="0" max="2" step="0.1" value="1.0" style="flex:1;min-width:120px">
+      <input type="range" id="camStrength" min="0" max="2" step="0.5" value="1" style="flex:1;min-width:120px">
       <span id="camStrengthVal" style="font-size:12px;min-width:34px;text-align:right;flex:0 0 auto">1.0</span>
     </div>
     <div class="hint" id="camHint">카메라 움직임(팬·틸트·돌림 등) 표현을 강화합니다. H3 전용 LoRA입니다.</div>
@@ -857,7 +857,7 @@ footer{
 <script>
 const $=s=>document.querySelector(s);
 let W=1344,H=768,S=5,timer=null,currentJob=null;
-let STRATEGY='single', SEG_SECONDS=4, STEPS=6, REALISM_LORA=false, CAM_MOTION='', REALISM_STRENGTH=0.8, CAM_STRENGTH=1.0;
+let STRATEGY='single', SEG_SECONDS=4, STEPS=6, REALISM_LORA=false, CAM_MOTION='', REALISM_STRENGTH=1.0, CAM_STRENGTH=1.0;
 
 // 모드 (t2v / i2v)
 let MODE='t2v', imgNonce='', imgW=0, imgH=0, imgName='';
@@ -1520,7 +1520,7 @@ function showPrompt(j){
     if(c.strategy!=='single'&&c.seg_seconds) cfgLines.push((c.seg_seconds)+'초/세그먼트');
     cfgLines.push('체크포인트: minimax_h3_fl2va_pruned_int8_convrot.safetensors');
     cfgLines.push('LoRA: minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors (strength 1.0)');
-    cfgLines.push(c.realism_lora ? '리얼리즘 LoRA: h3-realism-people-t2v-i2v-r2v.safetensors (strength '+(c.realism_strength!=null?c.realism_strength:0.8)+')' : '리얼리즘 LoRA: 사용 안 함');
+    cfgLines.push(c.realism_lora ? '리얼리즘 LoRA: h3-realism-people-t2v-i2v-r2v.safetensors (strength '+(c.realism_strength!=null?c.realism_strength:1.0)+')' : '리얼리즘 LoRA: 사용 안 함');
     const cStrength=c.cam_motion?(c.cam_strength!=null?c.cam_strength:1.0):null; cfgLines.push(c.cam_motion==='1000' ? '카메라 모션 LoRA: cam_motion_1000.safetensors (strength '+cStrength+')' : c.cam_motion==='3000' ? '카메라 모션 LoRA: cam_motion_3000.safetensors (strength '+cStrength+')' : '카메라 모션 LoRA: 사용 안 함');
     cfgLines.push('인코더: Qwen3-VL 32B (PGX 로컬)');
     cfgLines.push('저장: NAS (aski_main/comfyui/h3_videos) + 로컬');
@@ -1586,8 +1586,8 @@ function renderTracking(j){
   h+=trackValue('생성 방식',strategy+(c.strategy!=='single'?(j.segments?' · '+j.segments+' 세그먼트':'')+(c.seg_seconds?' · '+c.seg_seconds+'초/세그먼트':''):''));
   const camLabel=c.cam_motion==='1000'?'카메라 LoRA(경도) ':c.cam_motion==='3000'?'카메라 LoRA(강도) ':'';
   const cStrengthV=c.cam_motion?(c.cam_strength!=null?c.cam_strength:1.0):null;
-  const rStrength=c.realism_lora?(c.realism_strength!=null?c.realism_strength:0.8):null;
-h+=trackValue('참조/LoRA',(j.mode||c.mode)==='i2v'?'I2V 참조 사용':'T2V · 리얼리즘 LoRA '+(c.realism_lora?'사용 (×'+(rStrength!=null?rStrength:0.8)+')':'미사용')+(c.cam_motion?' · '+camLabel+' (×'+(cStrengthV!=null?cStrengthV:1.0)+')':''));
+  const rStrength=c.realism_lora?(c.realism_strength!=null?c.realism_strength:1.0):null;
+h+=trackValue('참조/LoRA',(j.mode||c.mode)==='i2v'?'I2V 참조 사용':'T2V · 리얼리즘 LoRA '+(c.realism_lora?'사용 (×'+(rStrength!=null?rStrength:1.0)+')':'미사용')+(c.cam_motion?' · '+camLabel+' (×'+(cStrengthV!=null?cStrengthV:1.0)+')':''));
   h+='</div>';
   h+='<div class="section" style="margin-top:14px"><span class="plbl">스크립트 / 프롬프트</span><div class="ptext">'+esc(j.prompt||'—')+'</div></div>';
   if(c.negative||j.negative) h+='<div class="section"><span class="plbl">배제 프롬프트</span><div class="ptext neg">'+esc(c.negative||j.negative)+'</div></div>';

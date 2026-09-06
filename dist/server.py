@@ -52,7 +52,7 @@ H3_VIDEO_VAE = os.environ.get("H3_VIDEO_VAE", "minimax_h3_video_vae_fp16.safeten
 H3_AUDIO_VAE = os.environ.get("H3_AUDIO_VAE", "minimax_h3_audio_vae_fp32.safetensors")
 H3_LORA = os.environ.get("H3_LORA", "minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors")
 REALISM_LORA = os.environ.get("REALISM_LORA", "h3-realism-people-t2v-i2v-r2v.safetensors")
-REALISM_LORA_STRENGTH = float(os.environ.get("REALISM_LORA_STRENGTH", "0.8"))
+REALISM_LORA_STRENGTH = float(os.environ.get("REALISM_LORA_STRENGTH", "1.0"))
 
 # H3 model: 24fps, 17k+5 frame grid
 MAX_SECONDS = 60
