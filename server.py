@@ -557,9 +557,27 @@ def ensure_comfyui():
     raise RuntimeError("ComfyUI 기동 실패 (300초 대기 초과)")
 
 
-def build_workflow(text, negative, width, height, length, steps, seed, image_name=None, prefix="h3", video_name=None, realism_lora=False):
+CAM_LORA_1000 = "cam_motion_1000.safetensors"
+CAM_LORA_3000 = "cam_motion_3000.safetensors"
+CAM_LORA_STRENGTH = 1.0
+
+
+def build_workflow(text, negative, width, height, length, steps, seed, image_name=None, prefix="h3", video_name=None, realism_lora=False, cam_motion="", realism_strength=None, cam_strength=None):
     """T2V/I2V 워크플로우 — H3 전용. Wan 폴백 제거 (사용자 지정).
-    video_name: LoadVideo 노드를 통한 참조 동영상 (인물 동영상 모드)"""
+    video_name: LoadVideo 노드를 통한 참조 동영상 (인물 동영상 모드)
+    realism_strength/cam_strength: None이면 기본값, 실수면 0.0~2.0으로 클램프"""
+    def _clamp(v, default):
+        if v is None:
+            return default
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return default
+        if f != f or f in (float("inf"), float("-inf")):
+            return default
+        return max(0.0, min(2.0, f))
+    r_strength = _clamp(realism_strength, REALISM_LORA_STRENGTH)
+    c_strength = _clamp(cam_strength, CAM_LORA_STRENGTH)
     base_negative = "text, subtitles, captions, watermark, logo, script overlay, on-screen text, UI elements"
     if negative:
         full_prompt = f"{text} (do NOT include: {base_negative}, {negative})"
@@ -597,8 +615,24 @@ def build_workflow(text, negative, width, height, length, steps, seed, image_nam
         wf["1b"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
             "model": ["1a", 0] if lora_avail else ["1", 0],
             "lora_name": REALISM_LORA,
-            "strength_model": REALISM_LORA_STRENGTH,
+            "strength_model": r_strength,
         }}
+    # 카메라 모션 LoRA (H3 전용): 토글 시 마지막에 누적
+    cam_lo = None
+    if cam_motion == "1000":
+        cam_lo = CAM_LORA_1000
+    elif cam_motion == "3000":
+        cam_lo = CAM_LORA_3000
+    if cam_lo:
+        cam_avail = any(os.path.exists(os.path.join(d, cam_lo)) for d in lora_dirs)
+        if cam_avail:
+            wf["1c"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+                "model": model_ref, "lora_name": cam_lo, "strength_model": c_strength,
+            }}
+            model_ref = ["1c", 0]
+            # 8/9의 model 참조 갱신
+            wf["8"]["inputs"]["model"] = model_ref
+            wf["9"]["inputs"]["model"] = model_ref
     if image_name:
         wf["15"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
         wf["5"]["inputs"]["first_frame"] = ["15", 0]
@@ -767,7 +801,10 @@ def run_job(job_id, cfg):
                                    seg_frames, cfg["steps"], seed,
                                    image_name=cfg.get("image_name", ""),
                                    video_name=cfg.get("video_name", ""), prefix=prefix,
-                                   realism_lora=cfg.get("realism_lora", False))
+                                   realism_lora=cfg.get("realism_lora", False),
+                                   cam_motion=cfg.get("cam_motion", ""),
+                                   realism_strength=cfg.get("realism_strength"),
+                                   cam_strength=cfg.get("cam_strength"))
             cid = str(uuid.uuid4())
             # Subscribe before queueing so an immediately-started prompt cannot
             # emit its first real progress event before this client is listening.
@@ -1641,6 +1678,19 @@ class Handler(BaseHTTPRequestHandler):
             fname = re.sub(r'[^\w\-]', '_', (data.get("filename") or "video")).strip()[:40] or "video"
             # JSON true만 허용한다. 문자열 "false" 등으로 우회해 켜지지 않는다.
             realism_lora = data.get("realism_lora") is True
+            # 카메라 모션 LoRA: "off"|"1000"|"3000" — 다른 값은 off로 처리
+            cam_motion = data.get("cam_motion")
+            cam_motion = cam_motion if cam_motion in ("1000", "3000") else ""
+            # LoRA 강도: 실수만 허용, 부동/문자열/bool은 None → 기본값
+            def _num(v):
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    return None
+                f = float(v)
+                if f != f or f in (float("inf"), float("-inf")):
+                    return None
+                return max(0.0, min(2.0, f))
+            realism_strength = _num(data.get("realism_strength"))
+            cam_strength = _num(data.get("cam_strength"))
             cfg = {
                 "mode": mode,
                 "prompt": prompt,
@@ -1656,6 +1706,9 @@ class Handler(BaseHTTPRequestHandler):
                 "image_name": image_name,
                 "video_name": video_name,
                 "realism_lora": realism_lora,
+                "cam_motion": cam_motion,
+                "realism_strength": realism_strength,
+                "cam_strength": cam_strength,
             }
             # admission slot을 먼저 예약한다. 따라서 동시에 여러 HTTP 요청이 와도
             # 대기열(예약 포함) 6번째는 이 시점에서 원자적으로 거절된다.
@@ -1686,7 +1739,10 @@ class Handler(BaseHTTPRequestHandler):
                 f"{seconds}s [{strategy}] {segments}seg steps={cfg['steps']}"
                 + (f" img={image_name}" if image_name else "")
                 + (f" vid={video_name}" if video_name else "")
-                + (" realism_lora=on" if realism_lora else " realism_lora=off"))
+                + (" realism_lora=on" if realism_lora else " realism_lora=off")
+                + (f" (x{cfg['realism_strength']})" if cfg.get("realism_strength") is not None else "")
+                + (f" cam_motion={cam_motion}" if cam_motion else "")
+                + (f" (x{cfg['cam_strength']})" if cfg.get("cam_strength") is not None else ""))
             send_json(self, {
                 "ok": True, "job": jid,
                 "segments": segments, "total_seconds": seconds,
