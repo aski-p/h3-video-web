@@ -14,6 +14,13 @@ import server
 
 
 class VideoDeliveryTests(unittest.TestCase):
+    def test_server_honours_railway_standard_port_environment_variable(self):
+        source = inspect.getsource(server)
+        self.assertIn(
+            'PORT = int(os.environ.get("H3_PORT") or os.environ.get("PORT") or "8300")',
+            source,
+        )
+
     def test_camera_motion_strength_is_percent_ui_mapped_to_lora_scale(self):
         source = (Path(__file__).resolve().parents[1] / "index.html").read_text()
         self.assertIn('id="camStrength" min="0" max="200" step="5" value="100"', source)

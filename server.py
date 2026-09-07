@@ -31,7 +31,7 @@ except ImportError:
 from urllib.parse import urlparse
 
 HOST = os.environ.get("H3_HOST", "0.0.0.0")
-PORT = int(os.environ.get("H3_PORT", "8300"))
+PORT = int(os.environ.get("H3_PORT") or os.environ.get("PORT") or "8300")
 COMFY = os.environ.get("COMFY_BASE", "http://127.0.0.1:8188")
 ASUI = os.environ.get("ASUI", "aski")
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
