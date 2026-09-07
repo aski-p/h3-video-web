@@ -57,6 +57,15 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertIn("refvMeta=refvD.refv||null;", source)
         self.assertIn("const refv=refvD.refv||null;", source)
 
+    def test_fixed_reference_picker_opens_once_and_allows_same_file_retry(self):
+        source = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        picker_block = source[source.index("function openReferencePicker()"):
+                              source.index("// 동영상 고정 참조 클릭")]
+        self.assertEqual(picker_block.count(".click();"), 1)
+        self.assertIn("input.value='';", picker_block)
+        self.assertIn("document.getElementById('refzone_inner').onclick=openReferencePicker;", picker_block)
+        self.assertNotIn("zv.addEventListener('click'", source)
+
     def test_fixed_video_generation_uploads_the_saved_mp4_not_png_frame(self):
         source = inspect.getsource(server.Handler.do_POST)
         start = source.index("# 고정 동영상 참조")
