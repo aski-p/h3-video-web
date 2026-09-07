@@ -1,4 +1,5 @@
 import http.client
+import inspect
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,49 @@ import server
 
 
 class VideoDeliveryTests(unittest.TestCase):
+    def test_camera_motion_strength_is_percent_ui_mapped_to_lora_scale(self):
+        source = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        self.assertIn('id="camStrength" min="0" max="200" step="5" value="100"', source)
+        self.assertIn('id="camStrengthVal"', source)
+        self.assertIn('>100%</span>', source)
+        self.assertIn('CAM_STRENGTH=percentToLoraStrength(sl.value);', source)
+        self.assertIn("v.textContent=Math.round(+sl.value)+'%';", source)
+        self.assertIn('body.cam_strength=CAM_STRENGTH;', source)
+        self.assertNotIn('>경도 <span', source)
+        self.assertNotIn('>강도 <span', source)
+
+    def test_realism_strength_uses_exact_point_zero_five_steps(self):
+        source = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        self.assertIn('id="realismStrength" min="0" max="2" step="0.05" value="1"', source)
+
+    def test_camera_motion_workflow_receives_percent_mapped_strength(self):
+        with patch.object(server.os.path, "exists", return_value=True):
+            workflow = server.build_workflow(
+                "camera test", "", 768, 1344, 121, 6, 1,
+                cam_motion="3000", cam_strength=1.35,
+            )
+        self.assertEqual(workflow["1c"]["inputs"]["lora_name"], server.CAM_LORA_3000)
+        self.assertEqual(workflow["1c"]["inputs"]["strength_model"], 1.35)
+        self.assertEqual(workflow["8"]["inputs"]["model"], ["1c", 0])
+
+    def test_fixed_reference_state_survives_kind_switch_and_reload(self):
+        source = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        switch_handler = source[source.index("document.querySelectorAll('#refkind"):
+                                source.index("// 고정 참조 영상 업로드")]
+        self.assertNotIn("refvActive=false", switch_handler)
+        self.assertNotIn("refvMeta=null", switch_handler)
+        self.assertIn("refreshReferenceState().then(renderSelectedReference);", switch_handler)
+        self.assertIn("refvActive=!!refvD.refv;", source)
+        self.assertIn("refvMeta=refvD.refv||null;", source)
+        self.assertIn("const refv=refvD.refv||null;", source)
+
+    def test_fixed_video_generation_uploads_the_saved_mp4_not_png_frame(self):
+        source = inspect.getsource(server.Handler.do_POST)
+        start = source.index("# 고정 동영상 참조")
+        video_branch = source[start:source.index("else:", start)]
+        self.assertIn('with open(_refv_video_path(), "rb") as f:', video_branch)
+        self.assertNotIn('with open(_refv_path(), "rb") as f:', video_branch)
+
     def test_byte_range_parser(self):
         self.assertEqual(server.parse_byte_range("bytes=4-7", 20), (4, 7))
         self.assertEqual(server.parse_byte_range("bytes=4-", 20), (4, 19))

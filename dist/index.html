@@ -734,8 +734,8 @@ footer{
     </div>
     <div class="row steprow" id="realismStrengthRow" style="display:none">
       <label for="realismStrength" style="font-size:12px;opacity:.7">강도</label>
-      <input type="range" id="realismStrength" min="0" max="2" step="0.5" value="1" style="flex:1;min-width:120px">
-      <span id="realismStrengthVal" style="font-size:12px;min-width:34px;text-align:right">1.0</span>
+      <input type="range" id="realismStrength" min="0" max="2" step="0.05" value="1" style="flex:1;min-width:120px">
+      <span id="realismStrengthVal" style="font-size:12px;min-width:34px;text-align:right">1.00</span>
     </div>
     <div class="hint" id="realismHint">끄면 기본 Turbo 스타일로 생성합니다.</div>
   </div>
@@ -745,13 +745,13 @@ footer{
     <h2>카메라 모션</h2>
     <div class="chips">
       <div class="chip" id="camOffChip" role="button" aria-pressed="true" tabindex="0">끄기</div>
-      <div class="chip" id="cam1000Chip" role="button" aria-pressed="false" tabindex="0">경도 <span class="sub">· 1000 스텝</span></div>
-      <div class="chip" id="cam3000Chip" role="button" aria-pressed="false" tabindex="0">강도 <span class="sub">· 3000 스텝</span></div>
+      <div class="chip" id="cam1000Chip" role="button" aria-pressed="false" tabindex="0">부드러운 움직임 <span class="sub">· 1000 스텝</span></div>
+      <div class="chip" id="cam3000Chip" role="button" aria-pressed="false" tabindex="0">역동적인 움직임 <span class="sub">· 3000 스텝</span></div>
     </div>
     <div class="row steprow" id="camStrengthRow" style="display:none;margin-top:10px">
-      <label for="camStrength" style="font-size:12px;opacity:.7;flex:0 0 auto">강도</label>
-      <input type="range" id="camStrength" min="0" max="2" step="0.5" value="1" style="flex:1;min-width:120px">
-      <span id="camStrengthVal" style="font-size:12px;min-width:34px;text-align:right;flex:0 0 auto">1.0</span>
+      <label for="camStrength" style="font-size:12px;opacity:.7;flex:0 0 auto">모션 강도</label>
+      <input type="range" id="camStrength" min="0" max="200" step="5" value="100" style="flex:1;min-width:120px">
+      <span id="camStrengthVal" style="font-size:12px;min-width:42px;text-align:right;flex:0 0 auto">100%</span>
     </div>
     <div class="hint" id="camHint">카메라 움직임(팬·틸트·돌림 등) 표현을 강화합니다. H3 전용 LoRA입니다.</div>
   </div>
@@ -863,13 +863,27 @@ let STRATEGY='single', SEG_SECONDS=4, STEPS=6, REALISM_LORA=false, CAM_MOTION=''
 let MODE='t2v', imgNonce='', imgW=0, imgH=0, imgName='';
 let refKind='image', refvActive=false, refvMeta=null;
 
-// 고정 참조 종류 전환 (image / video)
+function renderSelectedReference(){
+  refClearUI();
+  if(refKind==='video') refvRender();
+  else refRender();
+}
+function refreshReferenceState(){
+  return Promise.all([
+    fetch('/api/ref/status').then(r=>r.json()).catch(()=>({ref:null})),
+    fetch('/api/refv/status').then(r=>r.json()).catch(()=>({refv:null}))
+  ]).then(([refD,refvD])=>{
+    refActive=!!refD.ref;
+    refvActive=!!refvD.refv;
+    refvMeta=refvD.refv||null;
+  });
+}
+
+// 모드 전환
 document.querySelectorAll('#refkind .chip').forEach(c=>c.onclick=()=>{
   document.querySelectorAll('#refkind .chip').forEach(x=>x.classList.remove('on'));
   c.classList.add('on');
   refKind=c.dataset.kind;
-  refvActive=false;
-  refvMeta=null;
   // zone 텍스트 업데이트
   const ztxt=document.getElementById('refzone_txt');
   if(ztxt){
@@ -879,13 +893,8 @@ document.querySelectorAll('#refkind .chip').forEach(c=>c.onclick=()=>{
       ztxt.innerHTML='고정 참조 이미지 등록하기<br><small>인물 사진 — 15MB 이하';
     }
   }
-  refClearUI();
-  // 현재 등록된 참조 상태(서버)에 따라 UI 갱신
-  if(refKind==='image'){
-    refRender();
-  } else {
-    refvRender();
-  }
+  // 탭 전환으로 고정 상태를 지우지 않고 서버의 영구 상태를 다시 동기화한다.
+  refreshReferenceState().then(renderSelectedReference);
 });
 
 // 고정 참조 영상 업로드
@@ -928,7 +937,7 @@ function refvRender(){
     if(vhint) vhint.style.display='';
     box.querySelector('#rmrefv').onclick=refvDelete;
     fetch('/api/refv/status').then(r=>r.json()).then(d=>{
-      const r=d.ref;
+      const r=d.refv;
       if(r){
         const mm=document.getElementById('refvmeta');
         if(mm) mm.textContent=`${r.name||'동영상'} · ${(r.size/1048576).toFixed(1)}MB${r.duration_s ? ' · '+r.duration_s+'s' : ''} · 첫 프레임 기준 인물 유지`;
@@ -979,7 +988,10 @@ document.querySelectorAll('#dur .chip').forEach(c=>c.onclick=()=>{
   c.classList.add('on'); S=+c.dataset.s;
 });
 
-// 카메라 모션 LoRA (H3 전용)
+// 카메라 모션 LoRA (H3 전용). UI는 퍼센트, API/워크플로는 0.0~2.0 배율이다.
+function percentToLoraStrength(percent){
+  return Math.max(0, Math.min(200, Number(percent)||0))/100;
+}
 function setCamMotion(val){
   CAM_MOTION=val;
   const chips={off:$('#camOffChip'), '1000':$('#cam1000Chip'), '3000':$('#cam3000Chip')};
@@ -992,7 +1004,7 @@ function setCamMotion(val){
   if(row) row.style.display=val?'flex':'none';
   if(val){
     const h=$('#camHint');
-    if(h) h.textContent='카메라 움직임 LoRA (strength '+CAM_STRENGTH.toFixed(1)+') 적용. H3 전용 LoRA입니다.';
+    if(h) h.textContent='카메라 움직임 '+Math.round(CAM_STRENGTH*100)+'% 적용. H3 전용 LoRA입니다.';
   } else {
     const h=$('#camHint');
     if(h) h.textContent='카메라 움직임(팬·틸트·돌림 등) 표현을 강화합니다. H3 전용 LoRA입니다.';
@@ -1003,12 +1015,12 @@ function setCamMotion(val){
   const sl=document.getElementById('camStrength');
   if(!sl) return;
   sl.oninput=function(){
-    CAM_STRENGTH=+sl.value;
+    CAM_STRENGTH=percentToLoraStrength(sl.value);
     const v=$('#camStrengthVal');
-    if(v) v.textContent=(+sl.value).toFixed(1);
+    if(v) v.textContent=Math.round(+sl.value)+'%';
     if(CAM_MOTION){
       const h=$('#camHint');
-      if(h) h.textContent='카메라 움직임 LoRA (strength '+(+sl.value).toFixed(1)+') 적용. H3 전용 LoRA입니다.';
+      if(h) h.textContent='카메라 움직임 '+Math.round(+sl.value)+'% 적용. H3 전용 LoRA입니다.';
     }
   };
 })();
@@ -1050,10 +1062,10 @@ function setRealismLora(on){
   sl.oninput=function(){
     REALISM_STRENGTH=+sl.value;
     const v=$('#realismStrengthVal');
-    if(v) v.textContent=(+sl.value).toFixed(1);
+    if(v) v.textContent=(+sl.value).toFixed(2);
     if(REALISM_LORA){
       const h=$('#realismHint');
-      if(h) h.textContent='H3 Turbo 뒤에 인물 리얼리즘 LoRA (strength '+(+sl.value).toFixed(1)+')를 추가 적용합니다.';
+      if(h) h.textContent='H3 Turbo 뒤에 인물 리얼리즘 LoRA (strength '+(+sl.value).toFixed(2)+')를 추가 적용합니다.';
     }
   };
 })();
@@ -1210,15 +1222,9 @@ function refClearUI(){
   if(zone) zone.style.display='';
 }
 function refRender(){
-  const box = document.getElementById('refbox');
-  const zone = document.getElementById('refzone');
-  const hint = document.getElementById('refhint');
-  if(refvActive) {
-    box.style.display='none';
-    zone.style.display='none';
-    if(hint) hint.textContent = '동영상 참조가 등록되어 있어 I2V 생성 시 자동으로 사용됩니다.';
-    return;
-  }
+  const box=document.getElementById('refbox');
+  const zone=document.getElementById('refzone');
+  const hint=document.getElementById('refhint');
   // 이미지 모드일 때만 이미지 UI 표시
   if(refKind !== 'image') {
     box.style.display='none';
@@ -1694,7 +1700,7 @@ function loadRecent(){
   ]).then(([d,refD,refvD])=>{
     const jobs=(d.jobs||[]).slice(0,10);
     const ref=refD.ref||null;
-    const refv=refvD.ref||null;
+    const refv=refvD.refv||null;
     $('#recentcard').style.display='block';
     const list=$('#recentModalList');
     list.innerHTML='';
@@ -1799,10 +1805,8 @@ function loadRecent(){
 }
 loadRecent(); setInterval(loadRecent, 15000);
 
-// 고정 참조 상태 초기화 (페이지 로드 시)
-fetch('/api/ref/status').then(r=>r.json()).then(d=>{
-  if(d.ok && d.ref){ refActive=true; refRender(); }
-}).catch(()=>{});
+// 고정 이미지와 동영상을 모두 복원한다.
+refreshReferenceState().then(renderSelectedReference);
 </script>
 </body>
 </html>

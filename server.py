@@ -1632,7 +1632,7 @@ class Handler(BaseHTTPRequestHandler):
                         send_json(self, {"ok": False, "error": "이미지를 먼저 업로드하거나 고정 참조(이미지/동영상)를 선택해 주세요 (I2V)"}, 400)
                         return
                     try:
-                        with open(_refv_path(), "rb") as f:
+                        with open(_refv_video_path(), "rb") as f:
                             refv_bytes = f.read()
                         video_name = comfy_upload_video(refv_bytes, f"h3web_refv_{uuid.uuid4().hex[:8]}.mp4")
                         log(f"  고정 동영상 참조 자동 사용: {refv.get('name')} ({refv.get('w')}x{refv.get('h')}, {refv.get('duration_s')}s) → {video_name}")
