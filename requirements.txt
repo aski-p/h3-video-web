@@ -1,1 +1,2 @@
-# 표준 라이브러리만 사용
+# ComfyUI sampler 이벤트 수신 및 끊긴 진행 스트림 재연결용.
+websocket-client>=1.8,<2

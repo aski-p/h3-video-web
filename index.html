@@ -153,6 +153,11 @@ textarea::placeholder,input::placeholder{color:var(--tx4)}
   color:var(--acc);
   font-weight:590;
 }
+.chip[aria-disabled="true"]{
+  opacity:.38;
+  cursor:not-allowed;
+  pointer-events:none;
+}
 .chip .sub{font-weight:400;opacity:.65;margin-left:3px}
 
 /* ── Range slider ── */
@@ -561,8 +566,10 @@ footer{
   .dl{min-width:100px}
 }
 </style>
+<link rel="stylesheet" href="/apple-redesign.css?v=20260908-nas">
 </head>
 <body>
+<a class="skip-link" href="#main-controls">생성 설정으로 바로가기</a>
 <div class="wrap">
   <header>
     <div class="logo">▶</div>
@@ -674,7 +681,7 @@ footer{
       <div class="chip" data-s="30">약 30초</div>
       <div class="chip" data-s="60">약 60초</div>
     </div>
-    <div class="hint">세그먼트 분할 방식: 길이만큼 세그먼트 분할. 단일 생성: 한 번에 전체 프레임 생성.</div>
+    <div class="hint" id="durationHint">세그먼트 분할 방식: 길이만큼 세그먼트 분할. 단일 생성: 한 번에 전체 프레임 생성.</div>
   </div>
 
   <!-- 생성 방식 -->
@@ -713,7 +720,7 @@ footer{
     <h2>샘플링 스텝</h2>
     <div class="row steprow">
       <div class="stepslider">
-        <input type="range" id="steps" min="2" max="30" step="1" value="6"
+        <input type="range" id="steps" min="2" max="20" step="1" value="6"
           oninput="document.getElementById('stepval').textContent=this.value">
       </div>
       <div class="stepval"><span id="stepval">6</span></div>
@@ -722,7 +729,8 @@ footer{
       스텝이 높을수록 품질이 좋아지지만 생성 시간이 길어집니다.<br>
       - 2–5: 초안 · 빠름 · 저품질<br>
       - <b>6 (기본 · 권장)</b><br>
-      - 7–10: 고품질 · 느림
+      - 7–10: 고품질 · 느림<br>
+      - <b>11–20: 최고 품질 · 생성 시간 증가</b>
     </div>
   </div>
 
@@ -766,7 +774,7 @@ footer{
       - LoRA: minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors (strength 1.0)<br>
       - 프로파일: <b>MiniMax H3 Eros E3 · Turbo 6-step</b><br>
       - 인코더: Qwen3-VL 32B (PGX 로컬)<br>
-      - 저장: NAS (aski_main/comfyui/h3_videos) + 로컬<br>
+      - 저장: NAS (aski_main/comfyui/h3_videos)<br>
       - 분할: 선택된 세그먼트 길이 → 자동 ffconcat 스티치
     </div>
     </div>
@@ -774,7 +782,7 @@ footer{
 
   <!-- job 상태 -->
   <div class="card" id="jobbox">
-    <div class="statusline" id="stline"><span class="spin"></span><span class="st" id="sttext">작업 대기 중…</span></div>
+    <div class="statusline" id="stline"><span class="ready-icon" aria-hidden="true">✓</span><span class="st" id="sttext">생성 준비</span></div>
     <div class="bar"><i id="bar"></i></div>
     <div class="jobstats">
       <span class="js">ID <b id="jobid">—</b></span>
@@ -782,7 +790,7 @@ footer{
       <span class="js">진행 <b id="pct">0%</b></span>
       <span class="js">예상 완료 <b id="eta">—</b></span>
     </div>
-    <div class="meta" id="metatext"></div>
+    <div class="meta" id="metatext">왼쪽 설정을 확인한 뒤 영상 생성을 시작하세요.</div>
     <pre class="err" id="errmsg" style="display:none"></pre>
     <button class="dl dldel" id="cleanError" style="display:none">오류 영상 정리</button>
     <div class="result" id="result" style="display:none">
@@ -791,10 +799,11 @@ footer{
         <div class="i2v-frame" id="i2vframe" style="display:none"></div>
       </div>
       <div class="dlrow">
-        <a class="dl" id="dl1" download>⬇ MP4 다운로드</a>
+        <button class="dl" id="dl1" type="button">⬇ MP4 저장</button>
         <button class="dl" id="dl2" type="button">팝업으로 열기</button>
         <button class="dl" id="viewScript">스크립트</button>
       </div>
+      <p class="hint" id="saveStatus" role="status" aria-live="polite" hidden></p>
     </div>
   </div>
 
@@ -845,22 +854,138 @@ footer{
   </div>
 </div>
 
-<!-- 영상 미리보기 팝업: 새 탭 대신 앱 안에서 재생해 명시적으로 닫을 수 있다. -->
+<!-- 영상 미리보기: 재생 상태와 저장/전체화면 도구를 앱 안에서 제공한다. -->
 <div class="modal-overlay" id="videoModal" aria-hidden="true">
   <div class="modal video-modal" role="dialog" aria-modal="true" aria-labelledby="videoModalTitle">
     <button class="close-btn" id="videoModalClose" aria-label="영상 닫기">✕</button>
     <h3 id="videoModalTitle">영상 미리보기</h3>
-    <video id="modalPlayer" controls playsinline preload="metadata"></video>
+    <div class="video-watch" id="videoWatch">
+      <div class="video-stage">
+        <video id="modalPlayer" controls playsinline preload="auto"></video>
+        <p class="video-status" id="videoStatus" role="status" aria-live="polite">영상을 준비하고 있어요…</p>
+      </div>
+      <div class="watch-toolbar">
+        <label class="watch-rate" for="modalPlaybackRate">속도
+          <select id="modalPlaybackRate" aria-label="재생 속도">
+            <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
+            <option value="1" selected>1×</option><option value="1.25">1.25×</option>
+            <option value="1.5">1.5×</option><option value="2">2×</option>
+          </select>
+        </label>
+        <div class="watch-actions" aria-label="영상 도구">
+          <button class="pbtn" id="modalPip" type="button">PIP</button>
+          <button class="pbtn" id="modalFullscreen" type="button">전체화면</button>
+          <button class="pbtn primary" id="modalSave" type="button">MP4 저장</button>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
 <script>
+/* Preserve every existing control while grouping the dense card stack into a
+   focused Configure / Operate workspace. This runs before behavior binding. */
+(function buildAppleWorkspace(){
+  const wrap=document.querySelector('.wrap');
+  const tabs=wrap&&wrap.querySelector(':scope > .mtabs');
+  const job=document.getElementById('jobbox');
+  const footer=wrap&&wrap.querySelector(':scope > footer');
+  if(!wrap||!tabs||!job||!footer) return;
+
+  const children=[...wrap.children];
+  const first=children.indexOf(tabs);
+  const last=children.indexOf(job);
+  const workspace=document.createElement('div');
+  workspace.className='workspace';
+  const controls=document.createElement('main');
+  controls.className='controls';
+  controls.id='main-controls';
+  controls.setAttribute('aria-label','영상 생성 설정');
+  const output=document.createElement('aside');
+  output.className='output-panel';
+  output.setAttribute('aria-label','생성 작업 및 결과');
+  wrap.insertBefore(workspace,tabs);
+  workspace.append(controls,output);
+
+  children.slice(first,last).forEach(node=>{
+    if(node.classList&&node.classList.contains('modal-overlay')) document.body.appendChild(node);
+    else controls.appendChild(node);
+  });
+  const buttons=document.getElementById('go')?.closest('.btns');
+  const recent=document.getElementById('recentcard');
+  job.classList.add('live-job-card');
+  // Keep the current generation state visible before the dense controls.
+  wrap.insertBefore(job,workspace);
+  if(buttons) output.appendChild(buttons);
+  if(recent) output.appendChild(recent);
+})();
+
 const $=s=>document.querySelector(s);
-let W=1344,H=768,S=5,timer=null,currentJob=null;
+let W=1344,H=768,S=5,currentJob=null;
+let pollTimer=null,pollDelay=4000;
 let STRATEGY='single', SEG_SECONDS=4, STEPS=6, REALISM_LORA=false, CAM_MOTION='', REALISM_STRENGTH=1.0, CAM_STRENGTH=1.0;
+
+async function fetchJsonWithTimeout(url, options={}, timeoutMs=15000){
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),timeoutMs);
+  try{
+    const response=await fetch(url,{...options,signal:controller.signal});
+    let data={};
+    try{data=await response.json();}catch(_){data={};}
+    if(!response.ok){
+      const err=new Error(data.error||`HTTP ${response.status}`);
+      err.status=response.status;
+      err.retryable=response.status===408||response.status===429||response.status>=500;
+      throw err;
+    }
+    return data;
+  }finally{clearTimeout(timeout);}
+}
+
+// Completed video bytes remain on NAS and are streamed only through the
+// same-origin Vercel API proxy.  This preserves Range/seek and iOS save behavior
+// without exposing a second public media origin.
+function completedMedia(jid){
+  const encoded=encodeURIComponent(jid);
+  return {view:'/api/view/'+encoded,download:'/api/download/'+encoded};
+}
+async function openCompletedVideo(jid, title){
+  const media=completedMedia(jid);
+  showVideo(media.view,title||jid+'.mp4',media.download);
+}
+async function saveCompletedVideo(jid, filename, button){
+  // Keep the original user activation for iOS/PWA save/share.
+  const media=completedMedia(jid);
+  return saveVideo(media.download,filename||jid+'.mp4',button);
+}
+function scheduleJobPoll(delay=4000){
+  clearTimeout(pollTimer);
+  if(currentJob)pollTimer=setTimeout(pollJob,delay);
+}
+function clearActiveJob(){
+  clearTimeout(pollTimer); pollTimer=null;
+  currentJob=null;
+  localStorage.removeItem('h3-active-job');
+}
+async function pollJob(){
+  if(!currentJob)return;
+  try{
+    const data=await fetchJsonWithTimeout('/api/job/'+encodeURIComponent(currentJob),{},15000);
+    if(data.job)setJobUI(data.job);
+    pollDelay=4000;
+  }catch(_){
+    // 프록시/모바일 네트워크의 일시적 타임아웃은 작업 실패가 아니다.
+    pollDelay=Math.min(30000,Math.max(4000,pollDelay*2));
+    $('#eta').textContent='연결 복구 중 · 생성은 서버에서 계속 진행됩니다';
+  }
+  scheduleJobPoll(pollDelay);
+}
 
 // 모드 (t2v / i2v)
 let MODE='t2v', imgNonce='', imgW=0, imgH=0, imgName='';
+const I2V_REFERENCE_MAX_SECONDS=15;
+let imgUploadSeq=0, imgUploading=false, imgUploadController=null;
+let imgSha256='', imgSize=0, imgLastModified=0;
 let refKind='image', refvActive=false, refvMeta=null;
 
 function renderSelectedReference(){
@@ -982,8 +1107,33 @@ document.querySelectorAll('#ar .chip').forEach(c=>c.onclick=()=>{
   c.classList.add('on'); W=+c.dataset.w; H=+c.dataset.h;
 });
 
+// 사진 I2V는 H3 ReferenceToVideo 검증 범위를 넘기지 않는다. 서버도 같은
+// 한도를 강제하므로, UI는 허용되지 않는 길이를 먼저 명확히 비활성화한다.
+function syncI2VDurationLimit(){
+  const isI2V=MODE==='i2v';
+  const chips=[...document.querySelectorAll('#dur .chip')];
+  let longestAllowed=null;
+  chips.forEach(c=>{
+    const seconds=Number(c.dataset.s);
+    const disabled=isI2V && seconds>I2V_REFERENCE_MAX_SECONDS;
+    c.classList.toggle('disabled',disabled);
+    c.setAttribute('aria-disabled',String(disabled));
+    if(!disabled && (!longestAllowed || seconds>Number(longestAllowed.dataset.s))) longestAllowed=c;
+  });
+  if(isI2V && S>I2V_REFERENCE_MAX_SECONDS && longestAllowed){
+    document.querySelectorAll('#dur .chip').forEach(x=>x.classList.remove('on'));
+    longestAllowed.classList.add('on');
+    S=Number(longestAllowed.dataset.s);
+  }
+  const hint=$('#durationHint');
+  if(hint) hint.textContent=isI2V
+    ? `사진 I2V는 인물 참조 품질을 위해 최대 ${I2V_REFERENCE_MAX_SECONDS}초까지만 생성합니다.`
+    : '세그먼트 분할 방식: 길이만큼 세그먼트 분할. 단일 생성: 한 번에 전체 프레임 생성.';
+}
+
 // 영상 길이
 document.querySelectorAll('#dur .chip').forEach(c=>c.onclick=()=>{
+  if(c.getAttribute('aria-disabled')==='true') return;
   document.querySelectorAll('#dur .chip').forEach(x=>x.classList.remove('on'));
   c.classList.add('on'); S=+c.dataset.s;
 });
@@ -1085,6 +1235,7 @@ $('#realismToggle').onkeydown=e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDe
   paint();
 })();
 updateStrategyHint();
+syncI2VDurationLimit();
 
 // 프롬프트 카드: 입력값이 있으면 본문/배제는 숨기고 버튼+팝업으로만 노출
 function updatePromptCardUI(){
@@ -1156,6 +1307,7 @@ document.querySelectorAll('.mtab').forEach(t=>t.onclick=()=>{
     imgwrap.style.display='none';
     refwrap.style.display='none';
   }
+  syncI2VDurationLimit();
 });
 
 function setImgUI(state, msg){
@@ -1181,7 +1333,10 @@ function setImgUI(state, msg){
   }
 }
 function clearImg(){
-  imgNonce=''; imgW=0; imgH=0; imgName=''; window.__imgBlob=null;
+  ++imgUploadSeq;
+  if(imgUploadController) imgUploadController.abort();
+  imgUploadController=null; imgUploading=false;
+  imgNonce=''; imgW=0; imgH=0; imgName=''; imgSha256=''; imgSize=0; imgLastModified=0; window.__imgBlob=null;
   document.getElementById('imgbox').style.display='none';
   const zone=document.getElementById('imgzone');
   if(zone) zone.style.display='';
@@ -1189,28 +1344,50 @@ function clearImg(){
   if(inp) inp.value='';
 }
 document.getElementById('imgzone').onclick=()=>document.getElementById('imgfile').click();
-document.getElementById('imgfile').onchange=e=>{
+async function sha256File(file){
+  const digest=await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+  return Array.from(new Uint8Array(digest), b=>b.toString(16).padStart(2,'0')).join('');
+}
+document.getElementById('imgfile').onchange=async e=>{
   const f=e.target.files[0];
   if(!f) return;
   if(f.size>15*1024*1024){ alert('이미지는 15MB 이하만 업로드할 수 있습니다'); e.target.value=''; return; }
+  const uploadSeq=++imgUploadSeq;
+  if(imgUploadController) imgUploadController.abort();
+  imgUploadController=new AbortController();
+  imgUploading=true;
+  imgNonce=''; imgSha256=''; imgSize=f.size; imgLastModified=f.lastModified||0; imgName=f.name;
   window.__imgBlob=f;
   setImgUI('busy');
   const fd=new FormData();
   fd.append('image', f, f.name);
-  fetch('/api/upload',{method:'POST', body:fd})
-    .then(r=>r.json())
-    .then(d=>{
-      if(!d.ok){ setImgUI('err', d.error||'업로드 실패'); return; }
-      imgNonce=d.nonce; imgW=d.width||0; imgH=d.height||0; imgName=d.name||f.name;
-      if(imgW&&imgH){ W=imgW; H=imgH; }
-      document.querySelectorAll('#ar .chip').forEach(x=>x.classList.remove('on'));
-      const arHint=document.getElementById('arHint');
-      if(arHint&&imgW&&imgH){ arHint.textContent=`이미지 비율 자동 반영: ${imgW}×${imgH}`; }
-      setImgUI('ok');
-      document.getElementById('imgmeta').textContent=
-        `${imgName} · ${imgW||'?'}×${imgH||'?'}px · ${(f.size/1048576).toFixed(1)}MB` + (W===imgW&&H===imgH?' · 비율 자동 맞춰짐':'');
-    })
-    .catch(e=>setImgUI('err', String(e)));
+  try{
+    const [r, localSha]=await Promise.all([
+      fetch('/api/upload',{method:'POST', body:fd, signal:imgUploadController.signal}),
+      sha256File(f)
+    ]);
+    const d=await r.json();
+    if(uploadSeq!==imgUploadSeq || window.__imgBlob!==f) return;
+    if(!d.ok) throw new Error(d.error||'업로드 실패');
+    if(d.size!==f.size || !d.sha256 || d.sha256.toLowerCase()!==localSha){
+      throw new Error('선택 이미지 검증 실패 — 다시 선택해 주세요');
+    }
+    imgNonce=d.nonce; imgW=d.width||0; imgH=d.height||0; imgName=f.name;
+    imgSha256=localSha; imgSize=f.size; imgLastModified=f.lastModified||0;
+    if(imgW&&imgH){ W=imgW; H=imgH; }
+    document.querySelectorAll('#ar .chip').forEach(x=>x.classList.remove('on'));
+    const arHint=document.getElementById('arHint');
+    if(arHint&&imgW&&imgH){ arHint.textContent=`이미지 비율 자동 반영: ${imgW}×${imgH}`; }
+    setImgUI('ok');
+    document.getElementById('imgmeta').textContent=
+      `${imgName} · ${imgW||'?'}×${imgH||'?'}px · ${(f.size/1048576).toFixed(1)}MB · SHA ${imgSha256.slice(0,12)}` + (W===imgW&&H===imgH?' · 비율 자동 맞춰짐':'');
+  }catch(err){
+    if(uploadSeq!==imgUploadSeq || (err && err.name==='AbortError')) return;
+    imgNonce=''; imgSha256='';
+    setImgUI('err', String(err));
+  }finally{
+    if(uploadSeq===imgUploadSeq){ imgUploading=false; imgUploadController=null; }
+  }
 };
 
 // ── 고정 참조 (인물 고정) ──────────────────────────────
@@ -1353,6 +1530,53 @@ function fmtEta(s){
   if(s<3600) return Math.floor(s/60)+'분 '+(s%60)+'초';
   return Math.floor(s/3600)+'시간 '+Math.floor((s%3600)/60)+'분';
 }
+
+function setSaveStatus(message, state=''){
+  const node=$('#saveStatus');
+  if(!node) return;
+  node.hidden=!message;
+  node.textContent=message||'';
+  node.dataset.state=state;
+}
+function shouldUseNativeShare(){
+  const ua=navigator.userAgent||'';
+  const appleMobile=/iPhone|iPad|iPod/.test(ua) || (navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+  const standalone=window.navigator.standalone===true || window.matchMedia?.('(display-mode: standalone)').matches;
+  return appleMobile||standalone;
+}
+function triggerNativeDownload(url, filename){
+  const link=document.createElement('a');
+  link.href=url; link.download=filename; link.rel='noopener'; link.style.display='none';
+  document.body.appendChild(link); link.click(); link.remove();
+}
+async function saveVideo(url, filename, button){
+  if(!url){ setSaveStatus('저장할 영상을 찾지 못했어요.', 'error'); return; }
+  const original=button?.textContent||'저장';
+  if(button){ button.disabled=true; button.setAttribute('aria-busy','true'); button.textContent='저장 준비 중…'; }
+  setSaveStatus('파일을 준비하고 있어요…');
+  try{
+    // Safari/iOS PWA는 download 속성을 무시한다. 파일을 받은 뒤 OS 공유/파일
+    // 저장 시트를 열면 사용자가 실제 저장 위치를 선택할 수 있다.
+    if(shouldUseNativeShare() && navigator.share && typeof File!=='undefined'){
+      const response=await fetch(url,{credentials:'same-origin'});
+      if(!response.ok) throw new Error(`다운로드 응답 ${response.status}`);
+      const blob=await response.blob();
+      if(!blob.size) throw new Error('빈 영상 응답');
+      const file=new File([blob],filename,{type:blob.type||'video/mp4'});
+      if(navigator.canShare && !navigator.canShare({files:[file]})) throw new Error('이 기기에서 파일 저장을 지원하지 않습니다');
+      await navigator.share({files:[file],title:filename,text:'생성한 MP4 영상'});
+      setSaveStatus('공유/파일 저장 시트를 열었어요. 원하는 위치에 저장해 주세요.','ok');
+    }else{
+      triggerNativeDownload(url,filename);
+      setSaveStatus('다운로드를 시작했어요. 브라우저의 다운로드 목록에서 확인해 주세요.','ok');
+    }
+  }catch(error){
+    if(error&&error.name==='AbortError') setSaveStatus('저장을 취소했어요.','');
+    else setSaveStatus('저장 실패: '+((error&&error.message)||'네트워크를 확인해 주세요.'),'error');
+  }finally{
+    if(button){ button.disabled=false; button.removeAttribute('aria-busy'); button.textContent=original; }
+  }
+}
 function setJobUI(j){
   $('#jobbox').style.display='block';
   $('#result').style.display='none';
@@ -1397,13 +1621,17 @@ function setJobUI(j){
     $('#eta').textContent='완료';
     $('#jobid').textContent=j.id;
     $('#seedv').textContent=(j.seed!=null&&j.seed>=0)?j.seed:(j.cfg&&j.cfg.seed!=null?j.cfg.seed:'랜덤');
-    const dl='/api/download/'+j.id;
-    const view='/api/view/'+j.id;
+    const media=completedMedia(j.id);
+    const dl=media.download;
+    const view=media.view;
     const nasWarn=(j.nas_saved===false)?'<br><span style="color:var(--warn)">NAS 저장 실패 — 로컬에만 저장됨</span>':'';
     const stratLine=(j.strategy==='single')?'단일생성 · ':'세그먼트 '+(j.segments||1)+'개 ('+(j.cfg&&j.cfg.seg_seconds?j.cfg.seg_seconds:SEG_SECONDS)+'초/개) · ';
     m.innerHTML='소요 '+(j.elapsed||'?')+'초 · '+stratLine+(j.total_seconds||S)+'초 · 24fps<br>'+
       (j.nas_saved===false?'NAS 저장 실패 · ':'NAS 저장 완료 · ')+'파일: '+(j.file||'')+nasWarn;
-    $('#player').src=view; $('#result').style.display='block';
+    const resultPlayer=$('#player');
+    resultPlayer.dataset.jobId=j.id;
+    resultPlayer.src=view;
+    $('#result').style.display='block';
     // I2V 모드: 원본 이미지를 2.5초간 보여준 후 자동으로 비디오로 전환
     if(j.mode==='i2v' && window.__imgBlob){
       const frame=$('#i2vframe');
@@ -1428,23 +1656,24 @@ function setJobUI(j){
     } else {
       $('#i2vframe').style.display='none';
     }
-    $('#dl1').href=dl; $('#dl1').download=j.id+'.mp4';
-    $('#dl2').onclick=()=>showVideo(view, j.file||j.id+'.mp4');
+    setSaveStatus('');
+    $('#dl1').onclick=()=>saveCompletedVideo(j.id, j.id+'.mp4', $('#dl1'));
+    $('#dl2').onclick=()=>openCompletedVideo(j.id, j.file||j.id+'.mp4');
     $('#viewScript').onclick=()=>showPrompt(j);
     $('#stop').disabled=true;
-    clearInterval(timer); timer=null; currentJob=null;
+    clearActiveJob();
   } else if(j.status==='error'){
     $('#stline').innerHTML='<span class="st" style="color:var(--err)">✕ 오류</span>';
     $('#bar').style.width='100%';
     $('#errmsg').textContent=j.error||'알 수 없는 오류'; $('#errmsg').style.display='block';
     $('#cleanError').style.display='inline-flex';
     $('#cleanError').onclick=()=>cleanupError(j.id);
-    $('#stop').disabled=true; clearInterval(timer); timer=null; currentJob=null;
+    $('#stop').disabled=true; clearActiveJob();
   } else if(j.status==='cancelled'){
     $('#stline').innerHTML='<span class="st" style="color:var(--warn)">■ 중단됨</span>';
     $('#cleanError').style.display='inline-flex';
     $('#cleanError').onclick=()=>cleanupError(j.id);
-    $('#stop').disabled=true; clearInterval(timer); timer=null; currentJob=null;
+    $('#stop').disabled=true; clearActiveJob();
   }
 }
 
@@ -1452,6 +1681,9 @@ function setJobUI(j){
 $('#go').onclick=async()=>{
   const prompt=$('#prompt').value.trim();
   if(prompt.length<3){ alert('프롬프트를 3자 이상 입력하세요'); return; }
+  if(MODE==='i2v' && window.__imgBlob && (imgUploading || !imgNonce)){
+    alert('선택한 이미지 업로드·검증이 끝날 때까지 잠시 기다려 주세요'); return;
+  }
   if(MODE==='i2v' && !imgNonce && !refActive){ alert('I2V 모드: 이미지를 업로드하거나 고정 참조를 등록해 주세요'); return; }
   const negative=$('#negative').value.trim();
   const seed=parseInt($('#seed').value)||-1;
@@ -1468,6 +1700,10 @@ $('#go').onclick=async()=>{
   if(MODE==='i2v'){
     if(imgNonce){
       body.image=imgNonce;
+      body.image_name=imgName;
+      body.image_size=imgSize;
+      body.image_last_modified=imgLastModified;
+      body.image_sha256=imgSha256;
     } else if(refActive){
       body.ref_mode='fixed';  // 고정 참조 자동 사용 (인물 유지)
     } else {
@@ -1485,14 +1721,9 @@ $('#go').onclick=async()=>{
   if(!d.ok){ alert(d.error||'요청 실패'); $('#jobbox').style.display='none'; return; }
 
   currentJob=d.job;
-  if(timer) clearInterval(timer);
-  timer=setInterval(async()=>{
-    try{
-      const jr=await fetch('/api/job/'+currentJob);
-      const jd=await jr.json();
-      if(jd.job) setJobUI(jd.job);
-    }catch(e){}
-  },4000);
+  localStorage.setItem('h3-active-job',currentJob);
+  pollDelay=4000;
+  scheduleJobPoll(0);
 };
 
 // 중단
@@ -1522,7 +1753,7 @@ function showPrompt(j){
     cfgLines.push(c.realism_lora ? '리얼리즘 LoRA: h3-realism-people-t2v-i2v-r2v.safetensors (strength '+(c.realism_strength!=null?c.realism_strength:1.0)+')' : '리얼리즘 LoRA: 사용 안 함');
     const cStrength=c.cam_motion?(c.cam_strength!=null?c.cam_strength:1.0):null; cfgLines.push(c.cam_motion==='1000' ? '카메라 모션 LoRA: cam_motion_1000.safetensors (strength '+cStrength+')' : c.cam_motion==='3000' ? '카메라 모션 LoRA: cam_motion_3000.safetensors (strength '+cStrength+')' : '카메라 모션 LoRA: 사용 안 함');
     cfgLines.push('인코더: Qwen3-VL 32B (PGX 로컬)');
-    cfgLines.push('저장: NAS (aski_main/comfyui/h3_videos) + 로컬');
+    cfgLines.push('저장: NAS (aski_main/comfyui/h3_videos)');
     cfgLines.push(c.strategy==='single'?'분할: 단일 생성':'분할: 선택된 세그먼트 길이 → 자동 ffconcat 스티치');
     h+='<div class="section"><span class="plbl">설정<button class="copybtn" data-copy="cfg">복사</button></span><div class="ptext cfg" id="ptextC">'+cfgLines.map(esc).join('<br>')+'</div></div>';
   }
@@ -1611,11 +1842,67 @@ function closeTracking(){
   if(trackingReturnFocus&&document.contains(trackingReturnFocus)) trackingReturnFocus.focus();
   trackingReturnFocus=null;
 }
-function showVideo(url, title='영상 미리보기'){
+let videoReturnFocus=null, activeVideoDownloadUrl='', activeVideoName='video.mp4';
+function setVideoStatus(message, state=''){
+  const node=$('#videoStatus');
+  if(!node) return;
+  node.textContent=message;
+  node.dataset.state=state;
+}
+function bufferedAhead(player){
+  const at=player.currentTime||0;
+  for(let i=0;i<player.buffered.length;i++){
+    const start=player.buffered.start(i), end=player.buffered.end(i);
+    if(at>=start&&at<=end) return Math.max(0,end-at);
+  }
+  return 0;
+}
+function bindModalPlayerTelemetry(){
+  const player=$('#modalPlayer');
+  if(!player) return;
+  player.addEventListener('loadstart',()=>setVideoStatus('영상 연결 중…'));
+  player.addEventListener('loadedmetadata',()=>setVideoStatus('메타데이터를 읽었어요. 재생을 시작할 수 있어요.','ok'));
+  ['waiting','stalled'].forEach(event=>player.addEventListener(event,()=>setVideoStatus('버퍼링 중… 네트워크 연결을 유지하고 있어요.','buffering')));
+  player.addEventListener('canplay',()=>setVideoStatus('재생 준비 완료','ok'));
+  player.addEventListener('playing',()=>{
+    const ahead=bufferedAhead(player);
+    setVideoStatus(ahead?`재생 중 · ${ahead.toFixed(1)}초 버퍼 확보`:'재생 중','ok');
+  });
+  player.addEventListener('progress',()=>{
+    if(!player.paused){
+      const ahead=bufferedAhead(player);
+      if(ahead) setVideoStatus(`재생 중 · ${ahead.toFixed(1)}초 버퍼 확보`,'ok');
+    }
+  });
+  player.addEventListener('error',()=>setVideoStatus('재생할 수 없어요. 잠시 후 다시 열어 주세요.','error'));
+  $('#modalPlaybackRate').onchange=e=>{ player.playbackRate=Number(e.currentTarget.value)||1; setVideoStatus(`재생 속도 ${player.playbackRate}×`,'ok'); };
+  $('#modalPip').onclick=async()=>{
+    try{
+      if(document.pictureInPictureElement) await document.exitPictureInPicture();
+      else if(player.requestPictureInPicture) await player.requestPictureInPicture();
+      else throw new Error('PIP 미지원');
+    }catch(_){ setVideoStatus('이 브라우저에서는 PIP를 사용할 수 없어요.','error'); }
+  };
+  $('#modalFullscreen').onclick=async()=>{
+    try{
+      const target=$('#videoWatch')||player;
+      if(document.fullscreenElement) await document.exitFullscreen();
+      else if(target.requestFullscreen) await target.requestFullscreen();
+      else throw new Error('전체화면 미지원');
+    }catch(_){ setVideoStatus('전체화면을 시작할 수 없어요.','error'); }
+  };
+  $('#modalSave').onclick=()=>saveVideo(activeVideoDownloadUrl,activeVideoName,$('#modalSave'));
+}
+function showVideo(url, title='영상 미리보기', downloadUrl=''){
   const modal=$('#videoModal');
+  videoReturnFocus=document.activeElement;
+  activeVideoName=title||'video.mp4';
+  activeVideoDownloadUrl=downloadUrl || (url.includes('/api/view/')?url.replace('/api/view/','/api/download/'):url);
   $('#videoModalTitle').textContent=title;
   const player=$('#modalPlayer');
   player.src=url;
+  player.load();
+  setVideoStatus('영상을 준비하고 있어요…');
   modal.classList.add('show');
   modal.setAttribute('aria-hidden','false');
   $('#videoModalClose').focus();
@@ -1628,7 +1915,10 @@ function closeVideo(){
   player.load();
   modal.classList.remove('show');
   modal.setAttribute('aria-hidden','true');
+  if(videoReturnFocus&&document.contains(videoReturnFocus)) videoReturnFocus.focus();
+  videoReturnFocus=null;
 }
+bindModalPlayerTelemetry();
 $('#modalClose').onclick=closePrompt;
 $('#videoModalClose').onclick=closeVideo;
 $('#trackingModalClose').onclick=closeTracking;
@@ -1673,12 +1963,33 @@ function deleteCompleted(jid){
 }
 
 // 최근 작업 목록
-function fmtAgo(ts){
-  const d=Date.now()-ts*1000;
-  if(d<60) return '방금 전';
+function normalizeTimestampMs(value){
+  if(value===null||value===undefined||value==='') return null;
+  if(typeof value==='string'&&!/^\d+(\.\d+)?$/.test(value.trim())){
+    const parsed=Date.parse(value);
+    return Number.isFinite(parsed)?parsed:null;
+  }
+  const n=Number(value);
+  if(!Number.isFinite(n)) return null;
+  // Unix seconds are currently about 1e9; JS epoch milliseconds about 1e12.
+  return Math.abs(n)<1e11?n*1000:n;
+}
+function fmtTime(ts){
+  const ms=normalizeTimestampMs(ts);
+  return ms===null?'시간 미상':new Date(ms).toLocaleString('ko-KR');
+}
+function fmtAgo(ts,nowMs=Date.now()){
+  const ms=normalizeTimestampMs(ts);
+  if(ms===null) return '시간 미상';
+  const d=Math.max(0,(nowMs-ms)/1000);
+  if(d<60) return Math.floor(d)+'초 전';
   if(d<3600) return Math.floor(d/60)+'분 전';
   if(d<86400) return Math.floor(d/3600)+'시간 전';
   return Math.floor(d/86400)+'일 전';
+}
+function fmtCreatedAt(ts,nowMs=Date.now()){
+  const exact=fmtTime(ts);
+  return exact==='시간 미상'?exact:`${exact} · ${fmtAgo(ts,nowMs)}`;
 }
 function fmtSize(b){
   if(!b) return '';
@@ -1733,8 +2044,6 @@ function loadRecent(){
     }
     if(!jobs.length) return;
     jobs.forEach(j=>{
-      const dl='/api/download/'+j.id;
-      const view='/api/view/'+j.id;
       const st=j.status;
       let stTxt,stCls;
       if(st==='done'){ stTxt='완료'; stCls='ok'; }
@@ -1750,8 +2059,10 @@ function loadRecent(){
       // Queued/error records do not have an MP4.  Avoid requesting their
       // video endpoint: a browser media error there makes real open/save
       // controls appear unreliable even though completed videos are available.
+      const poster='/api/thumbnail/'+encodeURIComponent(j.id);
       const thumb=st==='done'
-        ?`<video class="rthumb" src="${view}" preload="metadata" muted></video>`
+        ?`<img class="rthumb" src="${poster}" loading="lazy" alt="완료 영상 첫 프레임">
+          <div class="playbadge">▶ 재생</div>`
         :`<div class="rthumb rthumb-pending" aria-label="${st==='error'?'영상 생성 오류':'영상 생성 대기'}">${st==='error'?'오류':'대기'}</div>`;
       const item=document.createElement('div');
       item.className='ritem';
@@ -1760,7 +2071,7 @@ function loadRecent(){
         <div class="rmeta">
           <div class="rprompt" title="${(j.prompt||'').replace(/"/g,'&quot;')}">${j.prompt||j.id}</div>
           <div class="rsub">
-            <span class="${stCls}">${stTxt}</span> · ${fmtAgo(j.created||0)}
+            <span class="${stCls}">${stTxt}</span> · ${fmtCreatedAt(j.created)}
             ${j.status==='running'||j.status==='starting'||j.status==='queued'
               ?` · <b>${(j.progress&&j.progress.pct!=null&&!j.progress.unavailable?Math.round(j.progress.pct)+'%':'—')}</b>`
               :''}
@@ -1776,7 +2087,7 @@ function loadRecent(){
           ?`<div class="ractions">
               <button class="rbtn pview" title="스크립트 보기">S</button>
               <button class="rbtn open" type="button">열기</button>
-              <a class="rbtn" href="/api/download/${j.id}" download="${j.id}.mp4">저장</a>
+              <button class="rbtn save" type="button">저장</button>
               ${j.nas_saved?'<button class="rbtn del" title="NAS archive 영구 삭제">삭제</button>':''}
             </div>`
           :(st==='error'||st==='cancelled'||st==='interrupted'
@@ -1789,7 +2100,9 @@ function loadRecent(){
       const pv=item.querySelector('.pview');
       if(pv) pv.onclick=()=>showPrompt(j);
       const openB=item.querySelector('.open');
-      if(openB) openB.onclick=()=>showVideo(view, j.file||j.id+'.mp4');
+      if(openB) openB.onclick=()=>openCompletedVideo(j.id, j.file||j.id+'.mp4');
+      const saveB=item.querySelector('.save');
+      if(saveB) saveB.onclick=()=>saveCompletedVideo(j.id, j.id+'.mp4', saveB);
       const delB=item.querySelector('.del');
       if(delB) delB.onclick=()=>st==='done'?deleteCompleted(j.id):cleanupError(j.id);
       list.appendChild(item);
@@ -1800,6 +2113,13 @@ loadRecent(); setInterval(loadRecent, 15000);
 
 // 고정 이미지와 동영상을 모두 복원한다.
 refreshReferenceState().then(renderSelectedReference);
+// 새로고침/일시적 네트워크 단절 뒤에도 서버 작업을 다시 추적한다.
+const recoveredJob=localStorage.getItem('h3-active-job');
+if(recoveredJob){
+  currentJob=recoveredJob;
+  $('#jobbox').style.display='block';
+  scheduleJobPoll(0);
+}
 </script>
 </body>
 </html>

@@ -1,0 +1,20 @@
+[Unit]
+Description=MiniMax H3 Eros E3 NAS video backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/aski/h3-web
+Environment=H3_HOST=127.0.0.1
+Environment=H3_PORT=8300
+EnvironmentFile=/home/aski/h3-web/.env
+ExecStartPre=/bin/sh -c 'test -n "$H3_ORIGIN_SECRET"'
+ExecStart=/usr/bin/python3 /home/aski/h3-web/server.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
