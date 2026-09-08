@@ -13,6 +13,7 @@
 import json
 import hashlib
 import hmac
+import math
 import os
 import re
 import time
@@ -294,6 +295,16 @@ def log(msg):
     print(time.strftime("[%H:%M:%S] ") + msg, flush=True)
 
 
+def _finite_real(value):
+    """Accept bounded JSON numbers; bool and overflow/non-finite values fail closed."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
 def _prog(job_id, phase, **extra):
     """Build an honest progress payload; never estimate percentage from time/queue.
 
@@ -309,17 +320,14 @@ def _prog(job_id, phase, **extra):
     sampler_pct = extra.get("sampler_pct")
     pct = None
     eta = None
-    if sampler_pct is not None:
+    if _finite_real(sampler_pct):
         # This is *only* the raw matching sampler event: 4/20 -> 20.
         # Do not blend segment count, elapsed time, or queue position into it.
         ratio = max(0, min(1, float(sampler_pct)))
         pct = round(100 * ratio)
-        # ETA is derived only after a real sampler measurement arrives. It is
-        # the observed speed of the current segment, never elapsed-time theatre.
-        if ratio > 0:
-            segment_started = float(j.get("segment_started") or now)
-            segment_elapsed = max(0.0, now - segment_started)
-            eta = round(segment_elapsed * (1.0 - ratio) / ratio)
+        # A single sample cannot reveal sampler speed. ``apply_comfy_event``
+        # supplies ETA only after two real progress points establish an observed
+        # seconds-per-step rate, excluding queue and model-loading time.
     if extra.get("completed"):
         pct = 100
         eta = 0
@@ -332,10 +340,43 @@ def _prog(job_id, phase, **extra):
     # into a current progress estimate.
     if extra.get("unavailable"):
         previous = j.get("progress") if isinstance(j.get("progress"), dict) else {}
-        for key in ("value", "max", "node", "last_progress_at"):
+        for key in (
+            "value", "max", "node", "sampler_node", "last_progress_at",
+            "sampler_pct", "sampler_step_seconds",
+        ):
             if key not in out and key in previous:
                 out[key] = previous[key]
     return out
+
+
+def _running_lifecycle_progress(job_id, phase, **extra):
+    """Refresh lifecycle metadata without erasing the last sampler sample."""
+    progress = _prog(job_id, phase, **extra)
+    with LOCK:
+        job = JOBS.get(job_id) or {}
+        previous = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+        previous = dict(previous)
+    # Raw sampler observations remain auditable across an unavailable state and
+    # provide the baseline for the next real WebSocket progress event. They do
+    # not by themselves revive the display percentage or ETA.
+    for key in (
+        "value", "max", "sampler_node", "sampler_pct",
+        "last_progress_at", "sampler_step_seconds",
+    ):
+        if key in previous:
+            progress[key] = previous[key]
+    if previous.get("pct") is not None and not previous.get("unavailable"):
+        for key in (
+            "pct", "eta",
+        ):
+            if key in previous:
+                progress[key] = previous[key]
+        # Queue polling does not know the current node, so retain the prior one.
+        # An executing event always supplies the key (including node=None) and
+        # must remain authoritative for the latest lifecycle node.
+    if "node" not in extra and "node" in previous:
+        progress["node"] = previous["node"]
+    return progress
 
 
 def apply_comfy_event(job_id, prompt_id, event, seg_done=0, segments=1):
@@ -352,22 +393,67 @@ def apply_comfy_event(job_id, prompt_id, event, seg_done=0, segments=1):
     typ = event.get("type")
     if typ == "progress":
         value, maximum = data.get("value"), data.get("max")
-        if (not isinstance(value, (int, float)) or not isinstance(maximum, (int, float))
-                or maximum <= 0):
+        if (not _finite_real(value) or not _finite_real(maximum)
+                or value < 0 or maximum <= 0 or value > maximum):
+            return False
+        node = data.get("node")
+        with LOCK:
+            job = JOBS.get(job_id) or {}
+            previous = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+            previous = dict(previous)
+        previous_value = previous.get("value")
+        previous_maximum = previous.get("max")
+        previous_sampler_node = previous.get("sampler_node", previous.get("node"))
+        same_sampler = previous_maximum == maximum and previous_sampler_node == node
+        # Duplicate and out-of-order events must not regress the latest real
+        # measurement or erase its ETA/rate/timestamp. A new sampler node or
+        # maximum begins a distinct measured stream and resets the rate.
+        if same_sampler and _finite_real(previous_value) and value <= previous_value:
             return False
         ratio = max(0.0, min(1.0, value / maximum))
+        now = time.time()
+        eta = None
+        step_seconds = None
+        previous_at = previous.get("last_progress_at")
+        if value >= maximum:
+            eta = 0
+            step_seconds = previous.get("sampler_step_seconds") if same_sampler else None
+        elif (same_sampler and _finite_real(previous_value)
+              and value > previous_value and _finite_real(previous_at)
+              and now >= previous_at):
+            current_rate = (now - previous_at) / (value - previous_value)
+            old_rate = previous.get("sampler_step_seconds")
+            # Smooth later samples enough to avoid a jumping ETA while keeping
+            # the first observed interval fully measured and immediately useful.
+            if _finite_real(old_rate) and old_rate >= 0:
+                current_rate = old_rate * 0.65 + current_rate * 0.35
+            if _finite_real(current_rate) and current_rate >= 0:
+                # Keep the measured rate unrounded for both smoothing and ETA.
+                # Rounding a valid sub-millisecond rate to 0.000 would falsely
+                # report zero remaining time for a large sampler range.
+                step_seconds = current_rate
+                projected_eta = current_rate * max(0, maximum - value)
+                if _finite_real(projected_eta) and projected_eta >= 0:
+                    eta = round(projected_eta)
         update_job(job_id, status="running", comfy_status="running",
                    progress=_prog(job_id, "영상 생성 중", seg_done=seg_done,
                                   sampler_pct=ratio, node=data.get("node"),
+                                  sampler_node=data.get("node"),
                                   value=value, max=maximum,
-                                  last_progress_at=time.time()))
+                                  eta=eta,
+                                  sampler_step_seconds=step_seconds,
+                                  last_progress_at=now,
+                                  unavailable=False))
         return True
     if typ == "executing":
         # node=None signals completion, but history is still authoritative for
-        # output discovery.
+        # output discovery. Keep the last sampler measurement while only the
+        # current lifecycle node changes.
         update_job(job_id, status="running", comfy_status="running",
-                   progress=_prog(job_id, "영상 생성 중", seg_done=seg_done,
-                                  node=data.get("node")))
+                   progress=_running_lifecycle_progress(
+                       job_id, "영상 생성 중", seg_done=seg_done,
+                       node=data.get("node")
+                   ))
         return True
     if typ == "execution_error":
         raise RuntimeError("ComfyUI 실행 오류: " + json.dumps(data, ensure_ascii=False)[:700])
@@ -406,10 +492,13 @@ def reconcile_comfy_prompt(job_id, prompt_id, history, queue, seg_done=0,
         comfy_status, phase, result, job_status = "pending", "ComfyUI 대기 중", "pending", "queued"
     else:
         return "unknown"
+    progress_builder = _running_lifecycle_progress if result == "running" else _prog
     update_job(job_id, status=job_status, comfy_status=comfy_status,
-               progress=_prog(job_id, phase, seg_done=seg_done,
-                              queue_running=len(queue.get("queue_running", [])),
-                              queue_pending=len(queue.get("queue_pending", []))))
+               progress=progress_builder(
+                   job_id, phase, seg_done=seg_done,
+                   queue_running=len(queue.get("queue_running", [])),
+                   queue_pending=len(queue.get("queue_pending", []))
+               ))
     return result
 
 
@@ -1170,8 +1259,10 @@ def run_job(job_id, cfg):
                         ws, ws_retry_at = reconnect_comfy_ws(client_id, ws_retry_at)
                         if ws is not None:
                             update_job(job_id, comfy_status="connected",
-                                       progress=_prog(job_id, phase="ComfyUI 진행 정보 연결됨", seg_done=i,
-                                                      unavailable=False))
+                                       progress=_running_lifecycle_progress(
+                                           job_id, phase="ComfyUI 진행 정보 연결됨",
+                                           seg_done=i, unavailable=False
+                                       ))
                     if ws:
                         try:
                             event = recv_comfy_event(ws)

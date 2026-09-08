@@ -402,20 +402,182 @@ console.log(JSON.stringify({
         self.assertIsNone(progress["pct"])
         self.assertIsNone(progress["eta"])
 
-    def test_measured_sampler_progress_produces_a_measured_eta(self):
-        job = {"started": 100.0, "segment_started": 110.0, "segments": 1}
+    def test_measured_sampler_eta_uses_observed_step_rate_after_second_sample(self):
+        job = {"id": "job", "started": 100.0, "segment_started": 110.0,
+               "segments": 1, "status": "running"}
         with patch.dict(server.JOBS, {"job": job}, clear=True), \
-             patch.object(server.time, "time", return_value=120.0):
-            progress = server._prog("job", "generating", sampler_pct=0.25)
-        self.assertEqual(progress["pct"], 25)
-        self.assertEqual(progress["eta"], 30)
+             patch.object(server, "_save_job"), \
+             patch.object(server.time, "time", side_effect=[120.0, 120.0, 130.0, 130.0]):
+            server.apply_comfy_event("job", "ours", {
+                "type": "progress", "data": {
+                    "prompt_id": "ours", "value": 1, "max": 20, "node": "sampler"
+                }
+            })
+            self.assertEqual(job["progress"]["pct"], 5)
+            self.assertIsNone(job["progress"]["eta"])
 
-    def test_queued_ui_shows_server_estimated_total_without_fake_percent(self):
+            server.apply_comfy_event("job", "ours", {
+                "type": "progress", "data": {
+                    "prompt_id": "ours", "value": 2, "max": 20, "node": "sampler"
+                }
+            })
+        self.assertEqual(job["progress"]["pct"], 10)
+        self.assertEqual(job["progress"]["sampler_step_seconds"], 10.0)
+        self.assertEqual(job["progress"]["eta"], 180)
+
+    def test_duplicate_and_out_of_order_sampler_events_cannot_regress_progress(self):
+        job = {"id": "job", "started": 100.0, "segments": 1, "status": "running"}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), \
+             patch.object(server, "_save_job"), \
+             patch.object(server.time, "time", side_effect=[120.0, 120.0, 130.0, 130.0]):
+            self.assertTrue(server.apply_comfy_event("job", "ours", {
+                "type": "progress", "data": {
+                    "prompt_id": "ours", "value": 1, "max": 20, "node": "sampler"
+                }
+            }))
+            self.assertTrue(server.apply_comfy_event("job", "ours", {
+                "type": "progress", "data": {
+                    "prompt_id": "ours", "value": 2, "max": 20, "node": "sampler"
+                }
+            }))
+            stable = dict(job["progress"])
+            for stale_value in (2, 1):
+                self.assertFalse(server.apply_comfy_event("job", "ours", {
+                    "type": "progress", "data": {
+                        "prompt_id": "ours", "value": stale_value,
+                        "max": 20, "node": "sampler",
+                    }
+                }))
+                self.assertEqual(job["progress"], stable)
+
+    def test_sampler_progress_rejects_bool_negative_and_non_finite_numbers(self):
+        job = {"id": "job", "started": 100.0, "segments": 1,
+               "status": "running", "progress": {"pct": 25, "value": 5, "max": 20}}
+        invalid = [
+            (True, 20), (-1, 20), (float("nan"), 20), (float("inf"), 20),
+            (1, True), (1, 0), (1, float("nan")), (1, float("inf")),
+            (10 ** 310, 10 ** 311),
+        ]
+        with patch.dict(server.JOBS, {"job": job}, clear=True), patch.object(server, "_save_job"):
+            stable = dict(job["progress"])
+            for value, maximum in invalid:
+                accepted = server.apply_comfy_event("job", "ours", {
+                    "type": "progress", "data": {
+                        "prompt_id": "ours", "value": value,
+                        "max": maximum, "node": "sampler",
+                    }
+                })
+                self.assertFalse(accepted, (value, maximum))
+                self.assertEqual(job["progress"], stable)
+
+    def test_extreme_finite_sampler_values_never_overflow_derived_eta(self):
+        job = {"id": "job", "started": 100.0, "segments": 1,
+               "status": "running", "progress": {}}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), \
+             patch.object(server, "_save_job"), \
+             patch.object(server.time, "time", side_effect=[120.0, 120.0, 130.0, 130.0]):
+            self.assertTrue(server.apply_comfy_event("job", "ours", {
+                "type": "progress", "data": {
+                    "prompt_id": "ours", "value": 1, "max": 1e308, "node": "sampler"
+                }
+            }))
+            self.assertTrue(server.apply_comfy_event("job", "ours", {
+                "type": "progress", "data": {
+                    "prompt_id": "ours", "value": 2, "max": 1e308, "node": "sampler"
+                }
+            }))
+        self.assertEqual(job["progress"]["value"], 2)
+        self.assertEqual(job["progress"]["sampler_step_seconds"], 10.0)
+        self.assertIsNone(job["progress"]["eta"])
+
+    def test_tiny_positive_sampler_rate_is_not_rounded_to_zero_before_eta(self):
+        job = {"id": "job", "started": 100.0, "segments": 1,
+               "status": "running", "progress": {}}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), \
+             patch.object(server, "_save_job"), \
+             patch.object(server.time, "time", side_effect=[120.0, 120.0, 120.0001, 120.0001]):
+            for value in (1, 2):
+                self.assertTrue(server.apply_comfy_event("job", "ours", {
+                    "type": "progress", "data": {
+                        "prompt_id": "ours", "value": value,
+                        "max": 10_000_000_000, "node": "sampler",
+                    }
+                }))
+        self.assertGreater(job["progress"]["sampler_step_seconds"], 0)
+        self.assertEqual(job["progress"]["eta"], 1_000_000)
+
+    def test_unavailable_then_reconnect_keeps_raw_sampler_measurement(self):
+        measured = {
+            "phase": "영상 생성 중", "pct": 10, "eta": 900,
+            "value": 2, "max": 20, "node": "sampler", "sampler_node": "sampler",
+            "sampler_pct": 0.1, "updated_at": 120.0, "last_progress_at": 120.0,
+            "sampler_step_seconds": 50.0, "unavailable": False,
+        }
+        job = {"id": "job", "started": 1.0, "segments": 1,
+               "status": "running", "progress": dict(measured)}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), \
+             patch.object(server, "_save_job"), \
+             patch.object(server.time, "time", side_effect=[200.0, 201.0]):
+            update = server._prog("job", "ComfyUI 상태 확인 불가", unavailable=True)
+            server.update_job("job", progress=update)
+            reconnected = server._running_lifecycle_progress(
+                "job", "ComfyUI 진행 정보 연결됨", unavailable=False
+            )
+            server.update_job("job", progress=reconnected)
+        for key in (
+            "value", "max", "node", "sampler_node", "sampler_pct",
+            "last_progress_at", "sampler_step_seconds",
+        ):
+            self.assertEqual(job["progress"][key], measured[key])
+        self.assertIsNone(job["progress"]["pct"])
+        self.assertIsNone(job["progress"]["eta"])
+        self.assertFalse(job["progress"]["unavailable"])
+        with patch.dict(server.JOBS, {"job": job}, clear=True), \
+             patch.object(server, "_save_job"), \
+             patch.object(server.time, "time", side_effect=[211.0, 211.0]):
+            self.assertTrue(server.apply_comfy_event("job", "ours", {
+                "type": "progress", "data": {
+                    "prompt_id": "ours", "value": 3, "max": 20, "node": "sampler"
+                }
+            }))
+        self.assertEqual(job["progress"]["pct"], 15)
+        self.assertFalse(job["progress"]["unavailable"])
+        self.assertTrue(server._finite_real(job["progress"]["sampler_step_seconds"]))
+
+    def test_running_ui_validates_numeric_progress_and_honours_reduced_motion(self):
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        start = html.index("function finiteProgressNumber(value")
+        end = html.index("\n}", start) + 2
+        helper = html[start:end]
+        probe = helper + """
+const inputs=[null,undefined,'',true,false,NaN,Infinity,-1,0,25,100,101,'25'];
+console.log(JSON.stringify(inputs.map(v=>finiteProgressNumber(v,0,100))));
+"""
+        result = subprocess.run(["node", "-e", probe], check=True, capture_output=True, text=True)
+        self.assertEqual(json.loads(result.stdout), [
+            None, None, None, None, None, None, None, None,
+            0, 25, 100, None, 25,
+        ])
+        self.assertIn("@media(prefers-reduced-motion:reduce)", html)
+        self.assertIn(".track-progress.pending>i{animation:none!important", html)
+
+    def test_running_ui_uses_indeterminate_bar_until_real_progress_and_no_static_eta(self):
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        running = html[html.index("} else if(j.status==='running'"):
+                       html.index("} else if(j.status==='done')")]
+        self.assertIn("progress-pending", running)
+        self.assertIn("실측 속도 산정 중", running)
+        self.assertIn("measuredEta!==null", running)
+        self.assertNotIn("예상 총 '+fmtEta(est)", running)
+        self.assertIn(".progress-pending .bar i", html)
+        self.assertIn("@keyframes progressPending", html)
+
+    def test_queued_ui_waits_for_measured_runtime_instead_of_static_eta(self):
         html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
         queued = html[html.index("if(j.status==='queued')"):
                       html.index("} else if(j.status==='starting')")]
-        self.assertIn("fmtEta(j.estimated_seconds)", queued)
-        self.assertIn("예상 총 소요", queued)
+        self.assertNotIn("fmtEta(j.estimated_seconds)", queued)
+        self.assertIn("작업 시작 후 실측", queued)
         self.assertIn("$('#pct').textContent='—'", queued)
 
     def test_default_video_work_and_reference_paths_are_nas_backed(self):
@@ -545,6 +707,61 @@ Cached:          18874368 kB
             self.assertIsNone(job["progress"]["pct"])
             self.assertEqual(job["progress"]["phase"], "영상 생성 중")
 
+    def test_queue_poll_does_not_erase_latest_measured_sampler_progress(self):
+        measured = {
+            "phase": "영상 생성 중", "pct": 10, "eta": 900,
+            "value": 2, "max": 20, "node": "9", "sampler_node": "9",
+            "updated_at": 120.0, "last_progress_at": 120.0,
+            "sampler_step_seconds": 50.0,
+        }
+        job = {
+            "id": "job", "started": 1, "segments": 1,
+            "status": "running", "progress": dict(measured),
+        }
+        with patch.dict(server.JOBS, {"job": job}, clear=True), \
+             patch.object(server, "_save_job"), \
+             patch.object(server.time, "time", return_value=200.0):
+            state = server.reconcile_comfy_prompt("job", "ours", {}, {
+                "queue_running": [[0, "ours"]], "queue_pending": []
+            })
+        self.assertEqual(state, "running")
+        for key in (
+            "pct", "eta", "value", "max", "node", "sampler_node",
+            "last_progress_at", "sampler_step_seconds",
+        ):
+            self.assertEqual(job["progress"][key], measured[key])
+        self.assertEqual(job["progress"]["updated_at"], 200.0)
+        self.assertEqual(job["progress"]["queue_running"], 1)
+
+    def test_executing_event_keeps_sampler_measurement_but_uses_latest_lifecycle_node(self):
+        measured = {
+            "phase": "영상 생성 중", "pct": 10, "eta": 900,
+            "value": 2, "max": 20, "node": "old-sampler", "sampler_node": "old-sampler",
+            "updated_at": 120.0, "last_progress_at": 120.0,
+        }
+        job = {
+            "id": "job", "started": 1, "segments": 1,
+            "status": "running", "progress": dict(measured),
+        }
+        with patch.dict(server.JOBS, {"job": job}, clear=True), \
+             patch.object(server, "_save_job"), \
+             patch.object(server.time, "time", side_effect=[200.0, 201.0]):
+            self.assertTrue(server.apply_comfy_event("job", "ours", {
+                "type": "executing", "data": {"prompt_id": "ours", "node": "decoder"}
+            }))
+            self.assertEqual(job["progress"]["node"], "decoder")
+            self.assertEqual(job["progress"]["sampler_node"], "old-sampler")
+            self.assertEqual(job["progress"]["pct"], 10)
+            self.assertEqual(job["progress"]["updated_at"], 200.0)
+
+            self.assertTrue(server.apply_comfy_event("job", "ours", {
+                "type": "executing", "data": {"prompt_id": "ours", "node": None}
+            }))
+            self.assertIsNone(job["progress"]["node"])
+            self.assertEqual(job["progress"]["sampler_node"], "old-sampler")
+            self.assertEqual(job["progress"]["pct"], 10)
+            self.assertEqual(job["progress"]["updated_at"], 201.0)
+
     def test_completed_history_marks_final_job_complete(self):
         job = {"id": "job", "started": 1, "segments": 1, "status": "running"}
         history = {"ours": {"status": {"completed": True, "status_str": "success"}}}
@@ -571,6 +788,11 @@ Cached:          18874368 kB
             "ExecStartPre=/home/aski/h3-web/.venv/bin/python -c 'import websocket'",
             unit,
         )
+        reconnect = inspect.getsource(server.run_job)
+        reconnect_start = reconnect.index("if ws is None:")
+        reconnect = reconnect[reconnect_start:reconnect.index("if ws:", reconnect_start + 1)]
+        self.assertIn("_running_lifecycle_progress", reconnect)
+        self.assertNotIn("progress=_prog", reconnect)
 
         job = {"id": "job", "started": 1, "segments": 1, "status": "queued"}
         with patch.dict(server.JOBS, {"job": job}, clear=True), \
@@ -851,15 +1073,64 @@ Cached:          18874368 kB
         self.assertIn('function showJobTracking(j)', html)
         self.assertIn('data-track-job="${j.id}"', html)
 
-    def test_recent_jobs_are_managed_in_a_full_screen_modal(self):
-        """Recent work must not be trapped in the small inline dashboard card."""
+    def test_elapsed_time_uses_padded_hours_minutes_and_seconds(self):
+        """Elapsed time rejects missing values and floors exact HH/MM/SS boundaries."""
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        start = html.index("function fmtElapsed(s){")
+        end = html.index("\n}", start) + 2
+        function_source = html[start:end]
+        probe = function_source + """
+const inputs=[null,undefined,'',0,59.5,3599.5,3600,360001];
+console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
+"""
+        result = subprocess.run(
+            ["node", "-e", probe], check=True, capture_output=True, text=True
+        )
+        self.assertEqual(json.loads(result.stdout), [
+            "—", "—", "—", "00시간 00분 00초", "00시간 00분 59초",
+            "00시간 59분 59초", "01시간 00분 00초", "100시간 00분 01초",
+        ])
+        self.assertIn("trackValue('경과 시간',fmtElapsed(", html)
+        self.assertNotIn("trackValue('경과 시간',p.elapsed!=null?p.elapsed+'초'", html)
+        self.assertIn("'<b>'+fmtElapsed(p.elapsed)+'</b> 경과", html)
+        self.assertNotIn("fmtElapsed(p.elapsed||0)", html)
+
+    def test_mobile_tracking_modal_scrolls_body_without_clipping_rows(self):
+        """The iOS tracking sheet keeps its header visible and scrolls every detail row."""
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        self.assertIn('<div class="tracking-modal-head">', html)
+        self.assertIn('#trackingModal .tracking-modal{width:min(680px,100%);display:flex;flex-direction:column;overflow:hidden}', html)
+        self.assertIn('#trackingModalBody{min-height:0;overflow-y:auto;overscroll-behavior:contain', html)
+        self.assertIn('height:100dvh;max-height:100dvh;border-radius:0', html)
+
+    def test_recent_jobs_open_as_a_right_edge_swipe_drawer(self):
+        """Recent work is reachable without scrolling to the bottom of the page."""
         html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
         self.assertIn('id="recentModal"', html)
         self.assertIn('id="recentModalOpen"', html)
+        self.assertIn('class="recent-drawer-handle"', html)
         self.assertIn('id="recentModalClose"', html)
         self.assertIn('id="recentModalList"', html)
-        self.assertIn('function showRecentModal()', html)
-        self.assertIn('function closeRecentModal()', html)
+        self.assertNotIn('id="recentcard"', html)
+        self.assertIn('function bindRecentSwipeGestures()', html)
+        self.assertIn("function recentEdgeWidth()", html)
+        self.assertIn("edgeStartX>=window.innerWidth-recentEdgeWidth()", html)
+        self.assertIn("edgeDeltaX<=-56", html)
+        self.assertIn("drawerDeltaX>=70", html)
+        self.assertIn("touchmove", html)
+        self.assertIn("touchcancel", html)
+        self.assertIn("resetEdgeSwipe", html)
+        self.assertIn("resetDrawerSwipe", html)
+        self.assertIn("passive:false", html)
+        self.assertIn("setRecentBackgroundInert(true)", html)
+        self.assertIn("setRecentBackgroundInert(false)", html)
+        self.assertIn("function trapRecentFocus(event)", html)
+        self.assertIn("if(event.key==='Tab') trapRecentFocus(event);", html)
+        self.assertIn("setTimeout(()=>{ if(modal.classList.contains('show'))", html)
+        self.assertIn('.modal-overlay#recentModal{display:flex;visibility:hidden;pointer-events:none;justify-content:flex-end', html)
+        self.assertIn('transform:translateX(100%)', html)
+        self.assertIn('#recentModal.show .recent-modal{transform:translateX(0)', html)
+        self.assertIn('right:env(safe-area-inset-right,0px)', html)
         self.assertIn("fetch('/api/job/'+jid)", html)
         self.assertIn('ComfyUI 원본 측정값', html)
         self.assertIn('리얼리즘 LoRA', html)
@@ -879,7 +1150,7 @@ Cached:          18874368 kB
         root = Path(__file__).resolve().parents[1]
         html = (root / "index.html").read_text()
         css = (root / "apple-redesign.css").read_text()
-        self.assertIn('href="/apple-redesign.css?v=20260908-nas"', html)
+        self.assertIn('href="/apple-redesign.css?v=20260908-drawer1"', html)
         self.assertIn('id="videoStatus"', html)
         self.assertIn('id="modalPlaybackRate"', html)
         self.assertIn('id="modalPip"', html)
