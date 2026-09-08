@@ -489,14 +489,34 @@ Cached:          18874368 kB
         self.assertEqual(job["progress"]["pct"], 100)
 
     def test_progress_transport_is_installed_and_reconnects_after_socket_loss(self):
-        """A transient WebSocket loss must not make measured progress disappear forever."""
+        """The service installs WebSocket support and queue polling survives socket loss."""
         root = Path(__file__).resolve().parents[1]
         requirements = (root / "requirements.txt").read_text()
         source = (root / "server.py").read_text()
+        unit = (root / "h3-web-backend.service").read_text()
         self.assertIn("websocket-client", requirements)
         self.assertIn("ws_retry_at", source)
         self.assertIn("ws = _comfy_ws(client_id)", source)
-        self.assertIn('phase="ComfyUI 연결 복구 중"', source)
+        self.assertIn("poll_comfy_queue_state(", inspect.getsource(server.run_job))
+        self.assertIn(
+            "ExecStart=/home/aski/h3-web/.venv/bin/python /home/aski/h3-web/server.py",
+            unit,
+        )
+        self.assertIn(
+            "ExecStartPre=/home/aski/h3-web/.venv/bin/python -c 'import websocket'",
+            unit,
+        )
+
+        job = {"id": "job", "started": 1, "segments": 1, "status": "queued"}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), \
+             patch.object(server, "_save_job"), \
+             patch.object(server, "comfy_get", return_value={
+                 "queue_running": [], "queue_pending": [[0, "ours"]]
+             }):
+            state = server.poll_comfy_queue_state("job", "ours", 0, 1)
+        self.assertEqual(state, "pending")
+        self.assertEqual(job["progress"]["phase"], "ComfyUI 대기 중")
+        self.assertIsNone(job["progress"]["pct"])
 
     def test_comfy_socket_reconnect_honors_cooldown_and_reuses_client_identity(self):
         """A lost event socket reconnects on a bounded cadence for the same prompt client."""
@@ -625,7 +645,10 @@ Cached:          18874368 kB
         self.assertLess(api_index, fallback_index)
         self.assertLess(filesystem_index, fallback_index)
         unit = (root / "h3-web-backend.service").read_text(encoding="utf-8")
-        self.assertIn("ExecStart=/usr/bin/python3 /home/aski/h3-web/server.py", unit)
+        self.assertIn(
+            "ExecStart=/home/aski/h3-web/.venv/bin/python /home/aski/h3-web/server.py",
+            unit,
+        )
         self.assertNotIn("cloudflared", unit.lower())
         self.assertIn("Environment=H3_HOST=127.0.0.1", unit)
         self.assertIn("EnvironmentFile=/home/aski/h3-web/.env", unit)

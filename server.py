@@ -367,6 +367,19 @@ def reconcile_comfy_prompt(job_id, prompt_id, history, queue, seg_done=0,
     return result
 
 
+def poll_comfy_queue_state(job_id, prompt_id, seg_done=0, segments=1):
+    """Keep lifecycle state accurate while the sampler socket reconnects.
+
+    ComfyUI queue membership can prove waiting/running, but it cannot provide a
+    sampler percentage. Reconciliation therefore remains useful and honest even
+    when the optional WebSocket transport is unavailable.
+    """
+    queue = comfy_get("/queue", timeout=30)
+    return reconcile_comfy_prompt(
+        job_id, prompt_id, {}, queue, seg_done=seg_done, segments=segments
+    )
+
+
 def _comfy_ws(client_id):
     """Open a short-lived ComfyUI event socket, or return None if unavailable."""
     if websocket is None:
@@ -1107,11 +1120,7 @@ def run_job(job_id, cfg):
                 while True:
                     if ws is None:
                         ws, ws_retry_at = reconnect_comfy_ws(client_id, ws_retry_at)
-                        if ws is None:
-                            update_job(job_id, comfy_status="unavailable",
-                                       progress=_prog(job_id, phase="ComfyUI 연결 복구 중", seg_done=i,
-                                                      unavailable=True))
-                        else:
+                        if ws is not None:
                             update_job(job_id, comfy_status="connected",
                                        progress=_prog(job_id, phase="ComfyUI 진행 정보 연결됨", seg_done=i,
                                                       unavailable=False))
@@ -1172,23 +1181,14 @@ def run_job(job_id, cfg):
                         comfy_source_files.append(src)
                         log(f"  seg {i+1}/{segments} 완료 → {dst}")
                         break
-                    # Without the event stream a queue position cannot be
-                    # represented as generation progress. Remain fail-closed
-                    # even if the prompt is visible in /queue.
-                    if ws is None:
-                        # Connection recovery is attempted at the top of the next
-                        # iteration; never turn a queue position into fake progress.
-                        time.sleep(2)
-                        continue
                     try:
-                        q = comfy_get("/queue", timeout=30)
+                        poll_comfy_queue_state(job_id, pid, i, segments)
                     except Exception:
                         update_job(job_id, comfy_status="unavailable",
                                    progress=_prog(job_id, "ComfyUI 상태 확인 불가", seg_done=i,
                                                   unavailable=True))
                         time.sleep(2)
                         continue
-                    reconcile_comfy_prompt(job_id, pid, {}, q, i, segments)
                     time.sleep(2)
             finally:
                 if ws:
