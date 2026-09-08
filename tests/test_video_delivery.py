@@ -99,6 +99,55 @@ class VideoDeliveryTests(unittest.TestCase):
             self.assertTrue(server.LOCK.acquire(timeout=0.1))
             server.LOCK.release()
             save.assert_called_once_with("queued-job")
+
+    def test_active_worker_aborts_when_its_job_is_cancelled_or_deleted(self):
+        for jobs in ({"job": {"id": "job", "status": "cancelled"}}, {}):
+            with self.subTest(jobs=jobs), patch.dict(server.JOBS, jobs, clear=True):
+                with self.assertRaises(server.JobCancelled):
+                    server.assert_job_active("job")
+
+        source = inspect.getsource(server.run_job)
+        wait_loop = source[source.index("while True:"):source.index("finally:", source.index("while True:"))]
+        self.assertIn("assert_job_active(job_id)", wait_loop)
+
+    def test_prompt_missing_from_comfy_queue_and_history_is_bounded(self):
+        job = {"id": "job", "status": "queued"}
+        with patch.dict(server.JOBS, {"job": job}, clear=True):
+            unknown_since = server.guard_prompt_presence(
+                "job", "unknown", None, now=10.0, grace_seconds=5.0
+            )
+            self.assertEqual(unknown_since, 10.0)
+            self.assertEqual(
+                server.guard_prompt_presence(
+                    "job", "unknown", unknown_since, now=14.9, grace_seconds=5.0
+                ),
+                unknown_since,
+            )
+            with self.assertRaisesRegex(RuntimeError, "큐/기록에서 사라졌습니다"):
+                server.guard_prompt_presence(
+                    "job", "unknown", unknown_since, now=15.0, grace_seconds=5.0
+                )
+            self.assertIsNone(
+                server.guard_prompt_presence(
+                    "job", "running", unknown_since, now=16.0, grace_seconds=5.0
+                )
+            )
+
+    def test_progress_update_cannot_resurrect_a_cancelled_job(self):
+        job = {"id": "job", "status": "cancelled", "progress": {"phase": "중단됨"}}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), \
+             patch.object(server, "_save_job") as save:
+            server.update_job(
+                "job", status="running", comfy_status="running",
+                progress={"phase": "영상 생성 중", "pct": 20},
+            )
+            server.update_job(
+                "job", comfy_status="connected",
+                progress={"phase": "ComfyUI 진행 정보 연결됨", "pct": None},
+            )
+        self.assertEqual(job["status"], "cancelled")
+        self.assertEqual(job["progress"], {"phase": "중단됨"})
+        save.assert_not_called()
     def test_job_created_time_normalizes_seconds_milliseconds_and_iso(self):
         html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
         start = html.index("function normalizeTimestampMs")
@@ -352,6 +401,22 @@ console.log(JSON.stringify({
             progress = server._prog("job", "generating")
         self.assertIsNone(progress["pct"])
         self.assertIsNone(progress["eta"])
+
+    def test_measured_sampler_progress_produces_a_measured_eta(self):
+        job = {"started": 100.0, "segment_started": 110.0, "segments": 1}
+        with patch.dict(server.JOBS, {"job": job}, clear=True), \
+             patch.object(server.time, "time", return_value=120.0):
+            progress = server._prog("job", "generating", sampler_pct=0.25)
+        self.assertEqual(progress["pct"], 25)
+        self.assertEqual(progress["eta"], 30)
+
+    def test_queued_ui_shows_server_estimated_total_without_fake_percent(self):
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        queued = html[html.index("if(j.status==='queued')"):
+                      html.index("} else if(j.status==='starting')")]
+        self.assertIn("fmtEta(j.estimated_seconds)", queued)
+        self.assertIn("예상 총 소요", queued)
+        self.assertIn("$('#pct').textContent='—'", queued)
 
     def test_default_video_work_and_reference_paths_are_nas_backed(self):
         root = os.path.realpath(server.NAS_DIR) + os.sep

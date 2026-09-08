@@ -39,6 +39,9 @@ ORIGIN_HEADER = "X-H3-Origin-Token"
 ORIGIN_SECRET = os.environ.get("H3_ORIGIN_SECRET", "")
 COMFY = os.environ.get("COMFY_BASE", "http://127.0.0.1:8188")
 COMFY_WS_RETRY_SECONDS = 5.0
+COMFY_PROMPT_MISSING_GRACE_SECONDS = float(
+    os.environ.get("COMFY_PROMPT_MISSING_GRACE_SECONDS", "60")
+)
 ASUI = os.environ.get("ASUI", "aski")
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
 COMFY_OUT = "/home/aski/minimax-h3/output"
@@ -131,6 +134,10 @@ QUEUE_LOCK = threading.Lock()
 ACTIVE = [None]       # 실행 중인 job_id (동시 1개)
 
 
+class JobCancelled(RuntimeError):
+    """Stop a queue worker without turning an intentional cancellation into an error."""
+
+
 def host_memory_stats(meminfo_text=None):
     """Return kernel-measured host RAM, using MemAvailable when available."""
     if meminfo_text is None:
@@ -182,8 +189,38 @@ def update_job(jid, **kw):
         j = JOBS.get(jid)
         if not j:
             return
+        # A delayed WebSocket/HTTP response must never mutate a job after the
+        # user cancelled it. Otherwise the sole worker can remain trapped on an
+        # already-forgotten ComfyUI prompt and block every later job.
+        if j.get("status") == "cancelled":
+            return
         j.update(kw)
     _save_job(jid)
+
+
+def assert_job_active(job_id):
+    """Abort the worker when its durable job was cancelled or removed."""
+    with LOCK:
+        job = JOBS.get(job_id)
+        cancelled = not job or job.get("status") == "cancelled"
+    if cancelled:
+        raise JobCancelled(f"job {job_id} cancelled or removed")
+
+
+def guard_prompt_presence(job_id, state, unknown_since, now=None,
+                          grace_seconds=COMFY_PROMPT_MISSING_GRACE_SECONDS):
+    """Bound the time a submitted prompt may be absent from queue and history."""
+    assert_job_active(job_id)
+    if state != "unknown":
+        return None
+    now = time.monotonic() if now is None else now
+    if unknown_since is None:
+        return now
+    if now - unknown_since >= grace_seconds:
+        raise RuntimeError(
+            "ComfyUI 작업이 큐/기록에서 사라졌습니다 — 다시 생성해 주세요"
+        )
+    return unknown_since
 
 
 def _restore_jobs():
@@ -271,14 +308,23 @@ def _prog(job_id, phase, **extra):
     seg_done = min(segments, int(extra.get("seg_done", 0)))
     sampler_pct = extra.get("sampler_pct")
     pct = None
+    eta = None
     if sampler_pct is not None:
         # This is *only* the raw matching sampler event: 4/20 -> 20.
         # Do not blend segment count, elapsed time, or queue position into it.
-        pct = round(100 * max(0, min(1, float(sampler_pct))))
+        ratio = max(0, min(1, float(sampler_pct)))
+        pct = round(100 * ratio)
+        # ETA is derived only after a real sampler measurement arrives. It is
+        # the observed speed of the current segment, never elapsed-time theatre.
+        if ratio > 0:
+            segment_started = float(j.get("segment_started") or now)
+            segment_elapsed = max(0.0, now - segment_started)
+            eta = round(segment_elapsed * (1.0 - ratio) / ratio)
     if extra.get("completed"):
         pct = 100
+        eta = 0
     out = {"phase": phase, "elapsed": elapsed, "pct": pct,
-           "eta": None, "updated_at": now}
+           "eta": eta, "updated_at": now}
     out.update(extra)
     # A connectivity failure invalidates the displayed percentage, but must not
     # discard the last raw measurement received from the matching prompt.
@@ -1108,6 +1154,7 @@ def run_job(job_id, cfg):
                 err_msg = json.dumps(queued, ensure_ascii=False)
                 raise RuntimeError(err_msg[:600])
             pid = queued["prompt_id"]
+            unknown_since = None
             update_job(job_id, status="queued", comfy_prompt_id=pid, segment_started=time.time(),
                        comfy_status="pending",
                        progress=_prog(job_id, f"세그먼트 {i+1}/{segments} ComfyUI 대기 중" if segments > 1 else "ComfyUI 대기 중",
@@ -1118,6 +1165,7 @@ def run_job(job_id, cfg):
             # establish this prompt's lifecycle; neither can manufacture a pct.
             try:
                 while True:
+                    assert_job_active(job_id)
                     if ws is None:
                         ws, ws_retry_at = reconnect_comfy_ws(client_id, ws_retry_at)
                         if ws is not None:
@@ -1150,6 +1198,7 @@ def run_job(job_id, cfg):
                                                   unavailable=True))
                         time.sleep(2)
                         continue
+                    assert_job_active(job_id)
                     if pid in h:
                         result = h[pid]
                         status = result.get("status", {})
@@ -1182,13 +1231,18 @@ def run_job(job_id, cfg):
                         log(f"  seg {i+1}/{segments} 완료 → {dst}")
                         break
                     try:
-                        poll_comfy_queue_state(job_id, pid, i, segments)
+                        prompt_state = poll_comfy_queue_state(job_id, pid, i, segments)
+                    except JobCancelled:
+                        raise
                     except Exception:
                         update_job(job_id, comfy_status="unavailable",
                                    progress=_prog(job_id, "ComfyUI 상태 확인 불가", seg_done=i,
                                                   unavailable=True))
                         time.sleep(2)
                         continue
+                    unknown_since = guard_prompt_presence(
+                        job_id, prompt_state, unknown_since
+                    )
                     time.sleep(2)
             finally:
                 if ws:
@@ -1236,6 +1290,9 @@ def run_job(job_id, cfg):
             storage="nas",
         )
         log(f"job {job_id} done → {final_src} ({segments}seg, {total_seconds}s, 24fps, {fsize//1048576}MB, nas=OK)")
+        return
+    except JobCancelled:
+        log(f"job {job_id} 취소 확인 → worker 해제")
         return
     except Exception as e:
         update_job(job_id, status="error", error=str(e)[:800])

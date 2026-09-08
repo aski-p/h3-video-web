@@ -1587,12 +1587,14 @@ function setJobUI(j){
   const p=j.progress||{};
   if(j.status==='queued'){
     $('#stline').innerHTML='<span class="spin"></span><span class="st">작업 대기 중…</span>';
-    $('#bar').style.width='0%'; $('#pct').textContent='—'; $('#eta').textContent='진행 정보 수신 대기';
+    $('#bar').style.width='0%'; $('#pct').textContent='—';
+    $('#eta').textContent=j.estimated_seconds?('예상 총 소요 '+fmtEta(j.estimated_seconds)):'진행 정보 수신 대기';
     m.textContent='큐에 추가됨. ComfyUI 준비 중…';
     $('#stop').disabled=false;
   } else if(j.status==='starting'){
     $('#stline').innerHTML='<span class="spin"></span><span class="st">ComfyUI 기동 중…</span>';
-    $('#bar').style.width='0%'; $('#pct').textContent='—'; $('#eta').textContent='진행 정보 수신 대기';
+    $('#bar').style.width='0%'; $('#pct').textContent='—';
+    $('#eta').textContent=j.estimated_seconds?('예상 총 소요 '+fmtEta(j.estimated_seconds)):'진행 정보 수신 대기';
     m.textContent='ComfyUI 서비스 시작 대기 중…';
     $('#stop').disabled=false;
   } else if(j.status==='running'||j.status==='queued'&&p.phase){
