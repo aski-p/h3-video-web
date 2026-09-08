@@ -2104,7 +2104,6 @@ class Handler(BaseHTTPRequestHandler):
             video_name = ""
             image_source_path = ""
             video_source_path = ""
-            video_source_r2_key = ""
             image_source_name = ""
             video_source_name = ""
             image_source_sha256 = ""

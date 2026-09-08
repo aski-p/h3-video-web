@@ -1018,12 +1018,14 @@ Cached:          18874368 kB
 
     def test_completed_generation_archives_to_nas_before_marking_done(self):
         source = inspect.getsource(server.run_job)
+        full_source = (Path(__file__).resolve().parents[1] / "server.py").read_text()
         self.assertIn("archive_final_to_nas(", source)
         self.assertIn("job_id, final_local", source)
         self.assertIn('storage="nas"', source)
         self.assertIn('nas_saved=bool(archive.get("nas_saved"))', source)
-        self.assertNotIn("archive_final_to_r2(", source)
-        self.assertNotIn("r2_key=", source)
+        self.assertNotIn("archive_final_to_r2(", full_source)
+        self.assertNotIn("r2_key=", full_source)
+        self.assertNotIn("video_source_r2_key", full_source)
 
 
 if __name__ == "__main__":
