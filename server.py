@@ -484,7 +484,15 @@ def reconcile_comfy_prompt(job_id, prompt_id, history, queue, seg_done=0,
                if isinstance(row, (list, tuple)) and len(row) > 1}
     pending = {str(row[1]) for row in queue.get("queue_pending", [])
                if isinstance(row, (list, tuple)) and len(row) > 1}
+    with LOCK:
+        current_job = JOBS.get(job_id) or {}
+        already_running = current_job.get("status") == "running"
     if str(prompt_id) in running:
+        comfy_status, phase, result, job_status = "running", "영상 생성 중", "running", "running"
+    elif str(prompt_id) in pending and already_running:
+        # Queue/history are separate HTTP snapshots. A delayed pending snapshot
+        # must not rewind a prompt after an executing/progress event proved that
+        # it was already running, nor erase its measured sampler state.
         comfy_status, phase, result, job_status = "running", "영상 생성 중", "running", "running"
     elif str(prompt_id) in pending:
         # ComfyUI exposes queued and executing prompts separately.  Do not

@@ -733,6 +733,36 @@ Cached:          18874368 kB
         self.assertEqual(job["progress"]["updated_at"], 200.0)
         self.assertEqual(job["progress"]["queue_running"], 1)
 
+    def test_stale_pending_snapshot_cannot_regress_a_measured_running_prompt(self):
+        measured = {
+            "phase": "영상 생성 중", "pct": 40, "eta": 60,
+            "value": 8, "max": 20, "node": "sampler",
+            "sampler_node": "sampler", "sampler_pct": 0.4,
+            "updated_at": 120.0, "last_progress_at": 120.0,
+            "sampler_step_seconds": 5.0, "unavailable": False,
+        }
+        job = {
+            "id": "job", "started": 1, "segments": 1,
+            "status": "running", "comfy_status": "running",
+            "progress": dict(measured),
+        }
+        with patch.dict(server.JOBS, {"job": job}, clear=True), \
+             patch.object(server, "_save_job"), \
+             patch.object(server.time, "time", return_value=200.0):
+            state = server.reconcile_comfy_prompt("job", "ours", {}, {
+                "queue_running": [], "queue_pending": [[0, "ours"]]
+            })
+        self.assertEqual(state, "running")
+        self.assertEqual(job["status"], "running")
+        self.assertEqual(job["comfy_status"], "running")
+        for key in (
+            "pct", "eta", "value", "max", "node", "sampler_node",
+            "sampler_pct", "last_progress_at", "sampler_step_seconds",
+        ):
+            self.assertEqual(job["progress"][key], measured[key])
+        self.assertEqual(job["progress"]["updated_at"], 200.0)
+        self.assertEqual(job["progress"]["queue_pending"], 1)
+
     def test_executing_event_keeps_sampler_measurement_but_uses_latest_lifecycle_node(self):
         measured = {
             "phase": "영상 생성 중", "pct": 10, "eta": 900,
