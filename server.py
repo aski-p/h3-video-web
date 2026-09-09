@@ -27,6 +27,7 @@ import subprocess
 import urllib.request
 import urllib.error
 import uuid
+from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Any, TypeGuard
 
@@ -639,6 +640,7 @@ def complete_rtx5080_upload(jid, execution_id, lease_token, now=None):
                 status="done", file=os.path.basename(archive["src"]), src=archive["src"],
                 size=archive["size"], sha256=archive["sha256"], nas_saved=True,
                 storage="nas", elapsed=round(max(0.0, now - started), 1),
+                completed_at=commit_now,
                 progress=_prog(jid, "생성 완료", completed=True, eta=0),
                 completed_execution_id=execution_id, completed_lease_sha256=lease_hash,
                 lease_sha256=None, lease_expires_at=None, execution_id=None,
@@ -2051,6 +2053,7 @@ def run_job(job_id, cfg):
             nas_saved=bool(archive.get("nas_saved")),
             sha256=archive.get("sha256", ""),
             storage="nas",
+            completed_at=time.time(),
         )
         log(f"job {job_id} done → {final_src} ({segments}seg, {total_seconds}s, 24fps, {fsize//1048576}MB, nas=OK)")
         return
@@ -2303,6 +2306,44 @@ def parse_byte_range(header, size):
     if start >= size or end < start:
         raise ValueError("unsatisfiable range")
     return start, min(end, size - 1)
+
+
+def infer_completed_at_from_video(jid):
+    """Backfill legacy jobs once from the actual archived MP4 modification time."""
+    src, remote = _job_video_source(jid)
+    if not src:
+        return None
+    try:
+        if not remote:
+            return os.path.getmtime(src)
+        if not os.path.isfile(NAS_SSH_KEY):
+            return None
+        result = subprocess.run([
+            "ssh", "-i", NAS_SSH_KEY, "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=yes", NAS_SSH_HOST,
+            "stat", "-c", "%Y", "--", src,
+        ], capture_output=True, text=True, timeout=30)
+        value = result.stdout.strip()
+        return float(value) if result.returncode == 0 and value.isdigit() else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def count_completed_videos_today(jobs=None, now=None):
+    """Count completed MP4 records whose persisted completion time is today in KST."""
+    current = time.time() if now is None else float(now)
+    kst = timezone(timedelta(hours=9))
+    today = datetime.fromtimestamp(current, kst).date()
+    source = JOBS if jobs is None else jobs
+    count = 0
+    for job in source.values():
+        completed_at = job.get("completed_at")
+        if (job.get("status") != "done" or not _finite_real(completed_at)
+                or float(completed_at) < 0):
+            continue
+        if datetime.fromtimestamp(float(completed_at), kst).date() == today:
+            count += 1
+    return count
 
 
 def valid_job_id(jid):
@@ -2646,6 +2687,7 @@ class Handler(BaseHTTPRequestHandler):
             vram_total = device.get("vram_total", 0)
             send_json(self, {
                 "ok": True, "jobs": items,
+                "today_completed_count": count_completed_videos_today(jobs_snapshot),
                 "comfy_up": comfy_up(),
                 "comfy_info": {
                     "version": cstats.get("system", {}).get("comfyui_version", ""),
@@ -3426,14 +3468,25 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     _restore_jobs()
 
-    # 기존 done job에 size回填 (파일에서 감지)
+    # 기존 완료 job의 파일 메타를 실제 NAS 파일에서 한 번 backfill해 영구 저장한다.
     for jid, j in list(JOBS.items()):
-        if j.get("status") == "done" and not j.get("size") and j.get("src"):
+        if j.get("status") != "done":
+            continue
+        changed = False
+        src = j.get("src")
+        if not j.get("size") and src:
             try:
-                j["size"] = os.path.getsize(j["src"])
-                _save_job(jid)
+                j["size"] = os.path.getsize(src)
+                changed = True
             except OSError:
                 pass
+        if not _finite_real(j.get("completed_at")):
+            completed_at = infer_completed_at_from_video(jid)
+            if completed_at is not None:
+                j["completed_at"] = completed_at
+                changed = True
+        if changed:
+            _save_job(jid)
 
     # FIFO 큐 워커 시작 (동시 1개)
     threading.Thread(target=queue_worker, daemon=True, name="queue-worker").start()

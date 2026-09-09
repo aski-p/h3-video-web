@@ -598,7 +598,7 @@ footer{
   .dl{min-width:100px}
 }
 </style>
-<link rel="stylesheet" href="/apple-redesign.css?v=20260909-vertical3">
+<link rel="stylesheet" href="/apple-redesign.css?v=20260909-todaycount1">
 </head>
 <body>
 <a class="skip-link" href="#main-controls">생성 설정으로 바로가기</a>
@@ -890,7 +890,6 @@ footer{
     <path d="M24.7 25.7A13.15 13.15 0 0 1 16 29.2" opacity=".55"/>
     <circle cx="26.7" cy="8.1" r="1" fill="currentColor" stroke="none"/>
   </svg>
-  <span class="recent-handle-label">최근 작업</span>
   <span class="recent-count-badge" id="recentCountBadge" aria-hidden="true"></span>
 </button>
 
@@ -1698,37 +1697,30 @@ function shouldUseNativeShare(){
   const standalone=window.navigator.standalone===true || window.matchMedia?.('(display-mode: standalone)').matches;
   return appleMobile||standalone;
 }
-function triggerNativeDownload(url, filename){
+function triggerNativeDownload(url, filename, newContext=false){
   const link=document.createElement('a');
-  link.href=url; link.download=filename; link.rel='noopener'; link.style.display='none';
+  link.href=url; link.download=filename; link.rel='noopener noreferrer';
+  if(newContext) link.target='_blank';
+  link.style.position='fixed'; link.style.left='-9999px';
   document.body.appendChild(link); link.click(); link.remove();
 }
-async function saveVideo(url, filename, button){
-  if(!url){ setSaveStatus('저장할 영상을 찾지 못했어요.', 'error'); return; }
-  const original=button?.textContent||'저장';
-  if(button){ button.disabled=true; button.setAttribute('aria-busy','true'); button.textContent='저장 준비 중…'; }
-  setSaveStatus('파일을 준비하고 있어요…');
+function saveVideo(url, filename, button){
+  if(!url){ setSaveStatus('저장할 영상을 찾지 못했어요.', 'error'); return false; }
   try{
-    // Safari/iOS PWA는 download 속성을 무시한다. 파일을 받은 뒤 OS 공유/파일
-    // 저장 시트를 열면 사용자가 실제 저장 위치를 선택할 수 있다.
-    if(shouldUseNativeShare() && navigator.share && typeof File!=='undefined'){
-      const response=await fetch(url,{credentials:'same-origin'});
-      if(!response.ok) throw new Error(`다운로드 응답 ${response.status}`);
-      const blob=await response.blob();
-      if(!blob.size) throw new Error('빈 영상 응답');
-      const file=new File([blob],filename,{type:blob.type||'video/mp4'});
-      if(navigator.canShare && !navigator.canShare({files:[file]})) throw new Error('이 기기에서 파일 저장을 지원하지 않습니다');
-      await navigator.share({files:[file],title:filename,text:'생성한 MP4 영상'});
-      setSaveStatus('공유/파일 저장 시트를 열었어요. 원하는 위치에 저장해 주세요.','ok');
-    }else{
-      triggerNativeDownload(url,filename);
-      setSaveStatus('다운로드를 시작했어요. 브라우저의 다운로드 목록에서 확인해 주세요.','ok');
-    }
+    // MP4 전체를 JS blob으로 버퍼링하면 iOS의 사용자 활성화가 만료되고 큰
+    // 파일은 메모리/edge 오류에 취약하다. 검증된 attachment endpoint를 탭
+    // 순간 직접 열어 브라우저가 Range/resume 가능한 다운로드를 맡는다.
+    const appleDownload=shouldUseNativeShare();
+    triggerNativeDownload(url,filename,appleDownload);
+    setSaveStatus(appleDownload
+      ? 'MP4 다운로드 화면을 열었어요. 필요하면 공유 → 파일에 저장을 선택해 주세요.'
+      : 'MP4 다운로드를 시작했어요. 브라우저의 다운로드 목록에서 확인해 주세요.','ok');
+    return true;
   }catch(error){
-    if(error&&error.name==='AbortError') setSaveStatus('저장을 취소했어요.','');
-    else setSaveStatus('저장 실패: '+((error&&error.message)||'네트워크를 확인해 주세요.'),'error');
+    setSaveStatus('저장 실패: '+((error&&error.message)||'다운로드를 다시 눌러 주세요.'),'error');
+    return false;
   }finally{
-    if(button){ button.disabled=false; button.removeAttribute('aria-busy'); button.textContent=original; }
+    if(button){ button.disabled=false; button.removeAttribute('aria-busy'); }
   }
 }
 function setJobUI(j){
@@ -2273,13 +2265,16 @@ function fmtSize(b){
 }
 function loadRecent(){
   Promise.all([
-    fetch('/api/jobs').then(r=>r.json()),
+    fetch('/api/jobs').then(async r=>{const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'작업 목록 확인 실패');return d;}),
     fetch('/api/ref/status').then(r=>r.json()).catch(()=>({ok:false,ref:null})),
     fetch('/api/refv/status').then(r=>r.json()).catch(()=>({ok:false,ref:null}))
   ]).then(([d,refD,refvD])=>{
     const jobs=(d.jobs||[]).slice(0,10);
     const badge=$('#recentCountBadge');
-    if(badge) badge.textContent=jobs.length?String(Math.min(99,jobs.length)):'';
+    const todayCount=Number.isInteger(d.today_completed_count)&&d.today_completed_count>=0?d.today_completed_count:0;
+    if(badge) badge.textContent=todayCount>99?'99+':String(todayCount);
+    const handle=$('#recentModalOpen');
+    if(handle) handle.setAttribute('aria-label',`최근 작업 열기 · 오늘 생성 완료 ${todayCount}개`);
     const ref=refD.ref||null;
     const refv=refvD.refv||null;
     const list=$('#recentModalList');

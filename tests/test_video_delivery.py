@@ -15,6 +15,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
@@ -1726,18 +1727,40 @@ Cached:          18874368 kB
         self.assertIn("function showVideo", html)
         self.assertIn("st==='queued'){ stTxt='대기열'", html)
 
-    def test_save_buttons_use_explicit_mobile_safe_handler_and_visible_status(self):
-        """Save cannot rely on an anchor's download attribute in iOS/PWA."""
+    def test_save_buttons_use_direct_attachment_without_buffering_mp4_in_javascript(self):
+        """Saving must preserve the tap and let the attachment endpoint stream the MP4."""
         html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
         self.assertIn('<button class="dl" id="dl1" type="button">⬇ MP4 저장</button>', html)
         self.assertIn('id="saveStatus"', html)
-        self.assertIn('async function saveVideo(', html)
-        self.assertIn('navigator.share', html)
+        self.assertIn('function saveVideo(', html)
+        self.assertIn('const appleDownload=shouldUseNativeShare()', html)
+        self.assertIn('triggerNativeDownload(url,filename,appleDownload)', html)
+        self.assertNotIn('response.blob()', html)
+        self.assertNotIn('navigator.share', html)
         self.assertIn("saveCompletedVideo(j.id, j.id+'.mp4', $('#dl1'))", html)
         self.assertIn("saveCompletedVideo(j.id, j.id+'.mp4', saveB)", html)
         self.assertIn("return saveVideo(media.download,filename||jid+'.mp4',button);", html)
         self.assertNotIn('id="dl1" download', html)
-        self.assertNotIn('href="/api/download/${j.id}" download="${j.id}.mp4"', html)
+
+    def test_today_completed_count_uses_completed_at_in_kst_and_ignores_non_done_jobs(self):
+        kst = timezone(timedelta(hours=9))
+        now = datetime(2026, 9, 9, 18, 0, tzinfo=kst).timestamp()
+        jobs = {
+            "today": {"status": "done", "completed_at": datetime(2026, 9, 9, 0, 1, tzinfo=kst).timestamp()},
+            "old": {"status": "done", "completed_at": datetime(2026, 9, 8, 23, 59, tzinfo=kst).timestamp()},
+            "running": {"status": "running", "completed_at": datetime(2026, 9, 9, 12, 0, tzinfo=kst).timestamp()},
+            "missing": {"status": "done"},
+        }
+        self.assertEqual(server.count_completed_videos_today(jobs, now=now), 1)
+
+    def test_legacy_completed_job_backfills_from_actual_video_mtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "legacy.mp4"
+            video.write_bytes(b"mp4")
+            expected = 1_788_900_000
+            os.utime(video, (expected, expected))
+            with patch.object(server, "_job_video_source", return_value=(str(video), False)):
+                self.assertEqual(server.infer_completed_at_from_video("legacy"), expected)
 
     def test_remote_archive_stream_uses_block_ranges_and_keeps_exact_byte_windows(self):
         self.assertEqual(server.remote_range_dd_plan(0, 2), (0, 0, 1))
@@ -2072,7 +2095,10 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         handle = html[start:end]
         self.assertIn("<svg", handle)
         self.assertIn('id="recentCountBadge"', handle)
-        self.assertIn('<span class="recent-handle-label">최근 작업</span>', handle)
+        self.assertNotIn('recent-handle-label', handle)
+        self.assertIn("today_completed_count", html)
+        self.assertIn("if(!r.ok||!d.ok)throw", html)
+        self.assertNotIn("badge.textContent=jobs.length", html)
         render = html[html.index("function renderTracking(j)"):html.index("function showJobTracking", html.index("function renderTracking(j)"))]
         self.assertIn("track-identity", render)
         self.assertLess(render.index("track-identity"), render.index("track-status"))
@@ -2125,7 +2151,7 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         root = Path(__file__).resolve().parents[1]
         html = (root / "index.html").read_text()
         css = (root / "apple-redesign.css").read_text()
-        self.assertIn('href="/apple-redesign.css?v=20260909-vertical3"', html)
+        self.assertIn('href="/apple-redesign.css?v=20260909-todaycount1"', html)
         self.assertIn('id="videoStatus"', html)
         self.assertIn('id="modalPlaybackRate"', html)
         self.assertIn('id="modalPip"', html)
@@ -2183,16 +2209,16 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         start = html.index('<button class="recent-drawer-handle"')
         end = html.index('</button>', start)
         handle = html[start:end]
-        self.assertIn('<span class="recent-handle-label">최근 작업</span>', handle)
+        self.assertNotIn('recent-handle-label', handle)
         self.assertIn('aria-label="최근 작업 열기"', handle)
         self.assertIn('viewBox="0 0 32 32"', handle)
         handle_css = css[css.index(".recent-drawer-handle"):]
         self.assertIn("position:fixed", handle_css)
         self.assertIn("width:48px", handle_css)
-        self.assertIn("height:132px", handle_css)
-        self.assertIn("writing-mode:vertical-rl", handle_css)
+        self.assertIn("height:78px", handle_css)
+        self.assertNotIn("writing-mode:vertical-rl", handle_css)
         self.assertIn("vector-effect:non-scaling-stroke", handle_css)
-        self.assertIn("width:44px;min-width:0;height:124px", handle_css)
+        self.assertIn("width:44px;min-width:0;height:72px", handle_css)
 
     def test_header_uses_a_layered_inline_svg_app_icon(self):
         root = Path(__file__).resolve().parents[1]
