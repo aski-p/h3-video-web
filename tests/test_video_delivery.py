@@ -78,6 +78,17 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertEqual(json.loads(b"".join(result))["error"], "origin authentication unavailable")
         urlopen.assert_not_called()
 
+    def test_proxy_logs_only_the_upstream_exception_class_for_502_diagnosis(self):
+        started = []
+        env = {"REQUEST_METHOD": "GET", "PATH_INFO": "/api/jobs", "QUERY_STRING": "", "wsgi.input": None}
+        with patch.object(backend_proxy, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch("urllib.request.urlopen", side_effect=urllib.error.URLError("private detail")), \
+             patch("builtins.print") as logged:
+            result = backend_proxy.handler(env, lambda status, headers: started.extend([status, dict(headers)]))
+        self.assertEqual(started[0], "502")
+        self.assertEqual(json.loads(b"".join(result))["error"], "backend unavailable")
+        logged.assert_called_once_with("H3 upstream error: URLError", flush=True)
+
     def test_proxy_injects_server_side_origin_secret(self):
         seen = {}
 
