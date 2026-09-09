@@ -107,7 +107,7 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertEqual(started[0], "200")
         self.assertEqual(seen["secret"], self.ORIGIN_SECRET)
 
-    def test_proxy_authenticates_worker_bearer_and_injects_internal_header(self):
+    def test_proxy_authenticates_worker_bearer_and_uses_separate_upstream_secret(self):
         seen = {}
 
         class FakeResponse:
@@ -146,8 +146,21 @@ class VideoDeliveryTests(unittest.TestCase):
             self.assertEqual(b"".join(result), b'{"ok":true}')
         self.assertEqual(started[0], "200")
         self.assertEqual(seen["x-h3-origin-token"], self.ORIGIN_SECRET)
-        self.assertEqual(seen["x-h3-worker-token"], "worker-secret")
+        self.assertEqual(seen["x-h3-worker-token"], self.ORIGIN_SECRET)
+        self.assertNotEqual(seen["x-h3-worker-token"], "worker-secret")
         self.assertNotIn("authorization", seen)
+
+        class ProxyToServerRequest:
+            headers = {
+                server.ORIGIN_HEADER: seen["x-h3-origin-token"],
+                server.WORKER_HEADER: seen["x-h3-worker-token"],
+            }
+
+        request = ProxyToServerRequest()
+        with patch.object(server, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch.object(server, "WORKER_PROXY_SECRET", self.ORIGIN_SECRET):
+            self.assertTrue(server.Handler._origin_authorized(request))
+            self.assertTrue(server.Handler._worker_authorized(request))
 
     def test_rtx5080_worker_is_eligible_only_while_fresh_and_ready(self):
         heartbeat = {
@@ -526,7 +539,7 @@ class VideoDeliveryTests(unittest.TestCase):
             return response.status, data
 
         with patch.object(server, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
-             patch.object(server, "WORKER_SECRET", "worker-secret"), \
+             patch.object(server, "WORKER_PROXY_SECRET", "worker-secret"), \
              patch.dict(server.JOBS, {"remote": job}, clear=True), \
              patch.object(server, "QUEUE", ["remote"]), \
              patch.dict(server.WORKERS, {}, clear=True), \
@@ -1445,7 +1458,8 @@ Cached:          18874368 kB
             "ExecStartPre=/home/aski/h3-web/.venv/bin/python -c 'import websocket'",
             unit,
         )
-        self.assertIn("ExecStartPre=/bin/sh -c 'test -n \"$H3_WORKER_TOKEN\"'", unit)
+        self.assertNotIn("H3_WORKER_TOKEN", unit)
+        self.assertIn("H3_WORKER_PROXY_TOKEN", source)
         reconnect = inspect.getsource(server.run_job)
         reconnect_start = reconnect.index("if ws is None:")
         reconnect = reconnect[reconnect_start:reconnect.index("if ws:", reconnect_start + 1)]

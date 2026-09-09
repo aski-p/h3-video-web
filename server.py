@@ -144,7 +144,11 @@ ACTIVE = [None]       # 실행 중인 PGX job_id (동시 1개)
 WORKER_HEADER = "X-H3-Worker-Token"
 WORKER_EXECUTION_HEADER = "X-H3-Execution-Id"
 WORKER_LEASE_HEADER = "X-H3-Lease-Token"
-WORKER_SECRET = os.environ.get("H3_WORKER_TOKEN", "")
+# This authenticates only the trusted Vercel→PGX hop. Internet-facing
+# workers authenticate against Vercel's separate H3_WORKER_TOKEN, which is
+# never forwarded.  An explicit value permits independent rotation later;
+# the origin secret is the safe zero-configuration default shared by both hops.
+WORKER_PROXY_SECRET = os.environ.get("H3_WORKER_PROXY_TOKEN") or ORIGIN_SECRET
 WORKER_UPLOAD_CHUNK_MAX = 2 * 1024 * 1024
 REMOTE_UPLOAD_LOCK = threading.Lock()
 JOB_SAVE_LOCK = threading.Lock()
@@ -2359,10 +2363,10 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def _worker_authorized(self):
-        if not WORKER_SECRET:
+        if not WORKER_PROXY_SECRET:
             return False
         supplied = self.headers.get(WORKER_HEADER, "")
-        return hmac.compare_digest(supplied, WORKER_SECRET)
+        return hmac.compare_digest(supplied, WORKER_PROXY_SECRET)
 
     def _require_worker(self):
         if self._worker_authorized():

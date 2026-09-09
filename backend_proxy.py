@@ -93,7 +93,11 @@ def proxy(environ, start_response):
     headers = {"Content-Type": environ.get("CONTENT_TYPE", "application/json"),
                ORIGIN_HEADER: ORIGIN_SECRET}
     if is_worker:
-        headers[WORKER_HEADER] = WORKER_SECRET
+        # Authenticate the internet-facing worker with WORKER_SECRET above, then
+        # mint the separate Vercel→PGX credential.  The external bearer must
+        # never become the tailnet/backend credential; this also lets both legs
+        # rotate independently without exposing either secret to the browser.
+        headers[WORKER_HEADER] = ORIGIN_SECRET
         for source, target in (("HTTP_X_H3_EXECUTION_ID", "X-H3-Execution-Id"),
                                ("HTTP_X_H3_LEASE_TOKEN", "X-H3-Lease-Token")):
             if environ.get(source):
