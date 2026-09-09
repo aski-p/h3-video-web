@@ -1,13 +1,20 @@
 import http.client
+import base64
 import hashlib
+import importlib.util
 import inspect
 import json
+import math
 import os
+import re
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
+import urllib.request
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
@@ -17,6 +24,13 @@ import server
 
 class VideoDeliveryTests(unittest.TestCase):
     ORIGIN_SECRET = "unit-test-origin-secret"
+
+    def load_windows_worker(self):
+        path = Path(__file__).resolve().parents[1] / "windows-worker" / "h3_worker.py"
+        spec = importlib.util.spec_from_file_location("h3_worker_test", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
 
     def test_backend_rejects_direct_api_access_without_origin_secret(self):
         with patch.object(server, "ORIGIN_SECRET", self.ORIGIN_SECRET):
@@ -42,6 +56,16 @@ class VideoDeliveryTests(unittest.TestCase):
             finally:
                 httpd.shutdown()
                 httpd.server_close()
+
+    def test_proxy_uses_authoritative_stable_funnel_even_with_stale_environment_override(self):
+        proxy_path = Path(__file__).resolve().parents[1] / "backend_proxy.py"
+        spec = importlib.util.spec_from_file_location("backend_proxy_stale_env_probe", proxy_path)
+        self.assertIsNotNone(spec)
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(os.environ, {"H3_BACKEND": "https://retired-quick-tunnel.invalid"}):
+            assert spec.loader is not None
+            spec.loader.exec_module(module)
+        self.assertEqual(module.BACKEND, "https://thinkstationpgx-11d3.tailccac79.ts.net")
 
     def test_proxy_fails_closed_without_origin_secret(self):
         started = []
@@ -83,6 +107,565 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertEqual(started[0], "200")
         self.assertEqual(seen["secret"], self.ORIGIN_SECRET)
 
+    def test_proxy_authenticates_worker_bearer_and_injects_internal_header(self):
+        seen = {}
+
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+            def read(self, _size):
+                if getattr(self, "done", False):
+                    return b""
+                self.done = True
+                return b'{"ok":true}'
+            def close(self):
+                pass
+
+        def fake_open(request, timeout):
+            seen.update(dict((key.lower(), value) for key, value in request.header_items()))
+            return FakeResponse()
+
+        base = {"REQUEST_METHOD": "GET", "PATH_INFO": "/api/worker/input/job/image",
+                "QUERY_STRING": "", "wsgi.input": None,
+                "HTTP_X_H3_WORKER_TOKEN": "attacker-controlled"}
+        started = []
+        with patch.object(backend_proxy, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch.object(backend_proxy, "WORKER_SECRET", "worker-secret"), \
+             patch("urllib.request.urlopen") as urlopen:
+            result = backend_proxy.handler(base, lambda status, headers: started.extend([status, dict(headers)]))
+        self.assertEqual(started[0], "401")
+        self.assertFalse(json.loads(b"".join(result))["ok"])
+        urlopen.assert_not_called()
+
+        started = []
+        allowed = dict(base, HTTP_AUTHORIZATION="Bearer worker-secret")
+        with patch.object(backend_proxy, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch.object(backend_proxy, "WORKER_SECRET", "worker-secret"), \
+             patch("urllib.request.urlopen", fake_open):
+            result = backend_proxy.handler(allowed, lambda status, headers: started.extend([status, dict(headers)]))
+            self.assertEqual(b"".join(result), b'{"ok":true}')
+        self.assertEqual(started[0], "200")
+        self.assertEqual(seen["x-h3-origin-token"], self.ORIGIN_SECRET)
+        self.assertEqual(seen["x-h3-worker-token"], "worker-secret")
+        self.assertNotIn("authorization", seen)
+
+    def test_rtx5080_worker_is_eligible_only_while_fresh_and_ready(self):
+        heartbeat = {
+            "gpu": "NVIDIA GeForce RTX 5080",
+            "vram_mib": 16303,
+            "comfy_up": True,
+            "model_ready": True,
+            "generation_verified": True,
+            "busy": False,
+            "modes": ["t2v", "i2v"],
+            "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        with patch.dict(server.WORKERS, {}, clear=True):
+            public = server.record_worker_heartbeat(
+                server.RTX5080_WORKER_ID, heartbeat, now=100.0
+            )
+            self.assertTrue(public["online"])
+            self.assertTrue(public["eligible"])
+            self.assertTrue(public["generation_verified"])
+            self.assertNotIn("token", public)
+            unverified = dict(heartbeat, generation_verified=False)
+            public = server.record_worker_heartbeat(
+                server.RTX5080_WORKER_ID, unverified, now=101.0
+            )
+            self.assertTrue(public["online"])
+            self.assertFalse(public["eligible"])
+            server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=100.0)
+            self.assertTrue(server.rtx5080_worker_status(now=114.9)["eligible"])
+            self.assertFalse(server.rtx5080_worker_status(now=115.1)["online"])
+            self.assertFalse(server.rtx5080_worker_status(now=115.1)["eligible"])
+
+            not_ready = dict(heartbeat, comfy_up=False)
+            public = server.record_worker_heartbeat(
+                server.RTX5080_WORKER_ID, not_ready, now=200.0
+            )
+            self.assertTrue(public["online"])
+            self.assertFalse(public["eligible"])
+
+    def test_pgx_queue_skips_rtx5080_jobs_and_remote_claim_is_lease_fenced(self):
+        jobs = {
+            "remote": {"id": "remote", "status": "queued", "cfg": {"worker_target": "rtx5080", "mode": "t2v"}},
+            "pgx": {"id": "pgx", "status": "queued", "cfg": {"worker_target": "pgx", "mode": "t2v"}},
+        }
+        queue = ["remote", "pgx"]
+        self.assertEqual(server.pop_next_pgx_job(jobs, queue), "pgx")
+        self.assertEqual(queue, ["remote"])
+
+        heartbeat = {
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True, "busy": False,
+            "modes": ["t2v", "i2v"], "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        tokens = iter(["first-execution", "first-secret", "second-execution", "second-secret"])
+        with patch.dict(server.JOBS, {"remote": jobs["remote"]}, clear=True), \
+             patch.object(server, "QUEUE", ["remote"]), \
+             patch.dict(server.WORKERS, {}, clear=True), \
+             patch.object(server, "_save_job"):
+            server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=100.0)
+            first = server.claim_rtx5080_job(now=100.0, token_factory=lambda: next(tokens))
+            self.assertEqual(first["job"]["id"], "remote")
+            self.assertNotIn("lease_sha256", first["job"])
+            self.assertTrue(server.validate_rtx5080_lease(
+                "remote", first["execution_id"], first["lease_token"], now=114.0
+            ))
+            self.assertFalse(server.renew_rtx5080_lease(
+                "remote", first["execution_id"], first["lease_token"], now=161.0
+            ))
+
+            self.assertEqual(server.requeue_expired_rtx5080_jobs(now=161.0), ["remote"])
+            server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=162.0)
+            second = server.claim_rtx5080_job(now=162.0, token_factory=lambda: next(tokens))
+            self.assertFalse(server.validate_rtx5080_lease(
+                "remote", first["execution_id"], first["lease_token"], now=162.0
+            ))
+            self.assertTrue(server.validate_rtx5080_lease(
+                "remote", second["execution_id"], second["lease_token"], now=162.0
+            ))
+
+    def test_heartbeat_renews_lease_without_progress_and_worker_failure_retries_once(self):
+        heartbeat = {
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True, "busy": False,
+            "modes": ["t2v", "i2v"], "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        job = {"id": "remote", "status": "queued", "segments": 1,
+               "cfg": {"worker_target": "rtx5080", "mode": "t2v", "steps": 6}}
+        tokens = iter(["execution-1", "secret-1", "execution-2", "secret-2"])
+        with patch.dict(server.JOBS, {"remote": job}, clear=True), \
+             patch.object(server, "QUEUE", ["remote"]), \
+             patch.dict(server.WORKERS, {}, clear=True), \
+             patch.object(server, "_save_job"):
+            server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=10.0)
+            first = server.claim_rtx5080_job(now=10.0, token_factory=lambda: next(tokens))
+            server.update_rtx5080_progress(
+                "remote", first["execution_id"], first["lease_token"],
+                {"value": 2, "max": 6, "phase": "영상 생성 중", "segment_index": 0, "segments": 1},
+                now=20.0,
+            )
+            before = dict(server.JOBS["remote"]["progress"])
+            self.assertTrue(server.renew_rtx5080_lease(
+                "remote", first["execution_id"], first["lease_token"], now=50.0
+            ))
+            self.assertEqual(server.JOBS["remote"]["progress"], before)
+            self.assertTrue(server.validate_rtx5080_lease(
+                "remote", first["execution_id"], first["lease_token"], now=100.0
+            ))
+            retried = server.fail_rtx5080_job(
+                "remote", first["execution_id"], first["lease_token"], "first failure", now=51.0
+            )
+            self.assertTrue(retried["retrying"])
+            self.assertEqual(server.JOBS["remote"]["status"], "queued")
+            self.assertEqual(server.QUEUE, ["remote"])
+
+            server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=52.0)
+            second = server.claim_rtx5080_job(now=52.0, token_factory=lambda: next(tokens))
+            terminal = server.fail_rtx5080_job(
+                "remote", second["execution_id"], second["lease_token"], "second failure", now=53.0
+            )
+            self.assertFalse(terminal["retrying"])
+            self.assertEqual(server.JOBS["remote"]["status"], "error")
+            self.assertEqual(server.JOBS["remote"]["error"], "RTX 5080 worker generation failed")
+            self.assertEqual(server.QUEUE, [])
+
+    def test_live_server_lease_blocks_second_claim_even_if_heartbeat_reports_idle(self):
+        heartbeat = {
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True, "busy": False,
+            "modes": ["t2v", "i2v"], "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        jobs = {
+            "first": {"id": "first", "status": "queued", "cfg": {"worker_target": "rtx5080", "mode": "t2v"}},
+            "second": {"id": "second", "status": "queued", "cfg": {"worker_target": "rtx5080", "mode": "t2v"}},
+        }
+        tokens = iter(["exec1", "lease1", "exec2", "lease2"])
+        with patch.dict(server.WORKERS, {}, clear=True), patch.dict(server.JOBS, jobs, clear=True), \
+             patch.object(server, "QUEUE", ["first", "second"]), patch.object(server, "_save_job"):
+            server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=10.0)
+            first = server.claim_rtx5080_job(now=10.0, token_factory=lambda: next(tokens))
+            self.assertEqual(first["job"]["id"], "first")
+            server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=11.0)
+            self.assertIsNone(server.claim_rtx5080_job(now=11.0, token_factory=lambda: next(tokens)))
+            self.assertEqual(server.JOBS["second"]["status"], "queued")
+            self.assertEqual(server.QUEUE, ["second"])
+
+    def test_rtx_readiness_uses_same_vram_threshold_as_claim(self):
+        heartbeat = {
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 14999,
+            "comfy_up": True, "model_ready": True, "generation_verified": True, "busy": False,
+            "modes": ["t2v", "i2v"], "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        with patch.dict(server.WORKERS, {}, clear=True):
+            server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=10.0)
+            self.assertFalse(server.rtx5080_worker_status(now=10.1)["eligible"])
+            heartbeat["vram_mib"] = 15000
+            server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=11.0)
+            self.assertTrue(server.rtx5080_worker_status(now=11.1)["eligible"])
+
+    def test_non_expiring_lease_sweep_does_not_clear_worker_busy(self):
+        heartbeat = {
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True, "busy": True,
+            "modes": ["t2v", "i2v"], "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        running = {"id": "remote", "status": "running", "worker_id": server.RTX5080_WORKER_ID,
+                   "lease_expires_at": 100.0, "cfg": {"worker_target": "rtx5080"}}
+        with patch.dict(server.WORKERS, {}, clear=True), \
+             patch.dict(server.JOBS, {"remote": running}, clear=True):
+            server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=10.0)
+            self.assertEqual(server.requeue_expired_rtx5080_jobs(now=20.0), [])
+            self.assertTrue(server.WORKERS[server.RTX5080_WORKER_ID]["busy"])
+
+    def test_archive_failure_does_not_strand_remote_job_in_finalizing(self):
+        payload = b"valid bytes" * 200
+        digest = hashlib.sha256(payload).hexdigest()
+        heartbeat = {
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True, "busy": False,
+            "modes": ["t2v", "i2v"], "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        tokens = iter(["execution", "secret"])
+        with tempfile.TemporaryDirectory() as root:
+            nas = os.path.join(root, "nas")
+            out = os.path.join(nas, ".h3-web", "work")
+            os.makedirs(out)
+            job = {"id": "remote", "status": "queued", "cfg": {"worker_target": "rtx5080", "mode": "t2v"}}
+            with patch.object(server, "NAS_DIR", nas), patch.object(server, "OUT_DIR", out), \
+                 patch.dict(server.JOBS, {"remote": job}, clear=True), patch.object(server, "QUEUE", ["remote"]), \
+                 patch.dict(server.WORKERS, {}, clear=True), patch.object(server, "_save_job"), \
+                 patch.object(server, "_validate_remote_mp4"), \
+                 patch.object(server, "archive_final_to_nas", side_effect=RuntimeError("NAS unavailable")):
+                server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=10.0)
+                claim = server.claim_rtx5080_job(now=10.0, token_factory=lambda: next(tokens))
+                server.begin_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"], len(payload), digest, now=11.0)
+                server.append_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"], 0, payload, digest, now=12.0)
+                with self.assertRaisesRegex(RuntimeError, "NAS unavailable"):
+                    server.complete_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"], now=13.0)
+                self.assertEqual(server.JOBS["remote"]["status"], "running")
+                self.assertTrue(server.validate_rtx5080_lease("remote", claim["execution_id"], claim["lease_token"], now=14.0))
+
+    def test_remote_completion_retry_returns_existing_done_job(self):
+        payload = b"valid bytes" * 200
+        digest = hashlib.sha256(payload).hexdigest()
+        heartbeat = {
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True, "busy": False,
+            "modes": ["t2v", "i2v"], "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        tokens = iter(["execution", "secret"])
+        with tempfile.TemporaryDirectory() as root:
+            nas = os.path.join(root, "nas")
+            out = os.path.join(nas, ".h3-web", "work")
+            os.makedirs(out)
+            job = {"id": "remote", "status": "queued", "cfg": {"worker_target": "rtx5080", "mode": "t2v"}}
+            with patch.object(server, "NAS_DIR", nas), patch.object(server, "OUT_DIR", out), \
+                 patch.dict(server.JOBS, {"remote": job}, clear=True), patch.object(server, "QUEUE", ["remote"]), \
+                 patch.dict(server.WORKERS, {}, clear=True), patch.object(server, "_save_job"), \
+                 patch.object(server, "_validate_remote_mp4"):
+                server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=10.0)
+                claim = server.claim_rtx5080_job(now=10.0, token_factory=lambda: next(tokens))
+                server.begin_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"], len(payload), digest, now=11.0)
+                server.append_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"], 0, payload, digest, now=12.0)
+                first = server.complete_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"], now=13.0)
+                second = server.complete_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"], now=14.0)
+                self.assertEqual(second["status"], "done")
+                self.assertEqual(second["sha256"], first["sha256"])
+
+    def test_rtx_progress_is_monotonic_and_stale_lease_cannot_publish(self):
+        heartbeat = {
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True, "busy": False,
+            "modes": ["t2v", "i2v"], "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        job = {"id": "remote", "status": "queued", "segments": 1,
+               "cfg": {"worker_target": "rtx5080", "mode": "t2v", "steps": 6}}
+        tokens = iter(["execution", "secret"])
+        with patch.dict(server.JOBS, {"remote": job}, clear=True), \
+             patch.object(server, "QUEUE", ["remote"]), \
+             patch.dict(server.WORKERS, {}, clear=True), \
+             patch.object(server, "_save_job"):
+            server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=10.0)
+            claim = server.claim_rtx5080_job(now=10.0, token_factory=lambda: next(tokens))
+            updated = server.update_rtx5080_progress(
+                "remote", claim["execution_id"], claim["lease_token"],
+                {"value": 2, "max": 6, "phase": "영상 생성 중 <img onerror=alert(1)>", "segment_index": 0, "segments": 1},
+                now=20.0,
+            )
+            self.assertEqual(updated["progress"]["value"], 2)
+            self.assertNotIn("<", updated["progress"]["phase"])
+            self.assertNotIn(">", updated["progress"]["phase"])
+            with self.assertRaises(ValueError):
+                server.update_rtx5080_progress(
+                    "remote", claim["execution_id"], claim["lease_token"],
+                    {"value": 1, "max": 6, "phase": "영상 생성 중", "segment_index": 0, "segments": 1},
+                    now=21.0,
+                )
+            with self.assertRaises(PermissionError):
+                server.update_rtx5080_progress(
+                    "remote", "stale", "wrong",
+                    {"value": 3, "max": 6, "phase": "영상 생성 중", "segment_index": 0, "segments": 1},
+                    now=22.0,
+                )
+
+    def test_remote_mp4_validation_requires_probeable_fully_decodable_video(self):
+        with tempfile.TemporaryDirectory() as root:
+            valid = os.path.join(root, "valid.mp4")
+            subprocess.run(
+                ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.2:r=10",
+                 "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", valid],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+            )
+            server._validate_remote_mp4(valid)
+            junk = os.path.join(root, "junk.mp4")
+            Path(junk).write_bytes(b"not video" * 200)
+            with self.assertRaisesRegex(ValueError, "probing"):
+                server._validate_remote_mp4(junk)
+
+    def test_rtx_chunk_upload_is_idempotent_and_publishes_only_after_hash_check(self):
+        payload = b"verified remote mp4 bytes"
+        digest = hashlib.sha256(payload).hexdigest()
+        heartbeat = {
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True, "busy": False,
+            "modes": ["t2v", "i2v"], "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        tokens = iter(["execution", "secret"])
+        with tempfile.TemporaryDirectory() as root:
+            nas = os.path.join(root, "nas")
+            out = os.path.join(nas, ".h3-web", "work")
+            os.makedirs(out)
+            job = {"id": "remote", "status": "queued", "segments": 1,
+                   "total_seconds": 2, "cfg": {"worker_target": "rtx5080", "mode": "t2v"}}
+            with patch.object(server, "NAS_DIR", nas), patch.object(server, "OUT_DIR", out), \
+                 patch.dict(server.JOBS, {"remote": job}, clear=True), \
+                 patch.object(server, "QUEUE", ["remote"]), \
+                 patch.dict(server.WORKERS, {}, clear=True), \
+                 patch.object(server, "_save_job"), \
+                 patch.object(server, "_validate_remote_mp4") as validate_remote_mp4:
+                server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=10.0)
+                claim = server.claim_rtx5080_job(now=10.0, token_factory=lambda: next(tokens))
+                server.begin_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"],
+                                            len(payload), digest, now=11.0)
+                first = payload[:10]
+                server.append_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"],
+                                             0, first, hashlib.sha256(first).hexdigest(), now=12.0)
+                # Network retry of an already committed range is accepted but not appended twice.
+                server.append_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"],
+                                             0, first, hashlib.sha256(first).hexdigest(), now=13.0)
+                rest = payload[10:]
+                server.append_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"],
+                                             10, rest, hashlib.sha256(rest).hexdigest(), now=14.0)
+                done = server.complete_rtx5080_upload(
+                    "remote", claim["execution_id"], claim["lease_token"], now=15.0
+                )
+                validate_remote_mp4.assert_called_once()
+                self.assertEqual(done["status"], "done")
+                self.assertEqual(done["sha256"], digest)
+                self.assertEqual(Path(done["src"]).read_bytes(), payload)
+                self.assertEqual(Path(done["src"]).parent, Path(nas))
+
+    def test_expired_rtx_lease_cannot_append_and_requeue_removes_partial_upload(self):
+        payload = b"stale bytes"
+        heartbeat = {
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True, "busy": False,
+            "modes": ["t2v", "i2v"], "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        tokens = iter(["execution", "secret"])
+        with tempfile.TemporaryDirectory() as root:
+            nas = os.path.join(root, "nas")
+            out = os.path.join(nas, ".h3-web", "work")
+            os.makedirs(out)
+            job = {"id": "remote", "status": "queued", "segments": 1,
+                   "cfg": {"worker_target": "rtx5080", "mode": "t2v"}}
+            with patch.object(server, "NAS_DIR", nas), patch.object(server, "OUT_DIR", out), \
+                 patch.dict(server.JOBS, {"remote": job}, clear=True), \
+                 patch.object(server, "QUEUE", ["remote"]), \
+                 patch.dict(server.WORKERS, {}, clear=True), \
+                 patch.object(server, "_save_job"):
+                server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=10.0)
+                claim = server.claim_rtx5080_job(now=10.0, token_factory=lambda: next(tokens))
+                server.begin_rtx5080_upload(
+                    "remote", claim["execution_id"], claim["lease_token"],
+                    len(payload), hashlib.sha256(payload).hexdigest(), now=11.0,
+                )
+                part = Path(server.JOBS["remote"]["upload_path"])
+                self.assertTrue(part.exists())
+                with self.assertRaises(PermissionError):
+                    server.append_rtx5080_upload(
+                        "remote", claim["execution_id"], claim["lease_token"], 0,
+                        payload, hashlib.sha256(payload).hexdigest(), now=72.0,
+                    )
+                self.assertEqual(part.stat().st_size, 0)
+                self.assertEqual(server.requeue_expired_rtx5080_jobs(now=72.0), ["remote"])
+                self.assertFalse(part.exists())
+                self.assertIsNone(server.JOBS["remote"]["upload_path"])
+
+    def test_worker_http_api_requires_both_origin_and_worker_secrets(self):
+        heartbeat = {
+            "worker_id": server.RTX5080_WORKER_ID,
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True, "busy": False,
+            "modes": ["t2v", "i2v"], "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        job = {"id": "remote", "status": "queued", "created": 1,
+               "cfg": {"worker_target": "rtx5080", "mode": "t2v"}}
+
+        def post(port, path, body, include_worker):
+            headers = {"Content-Type": "application/json", server.ORIGIN_HEADER: self.ORIGIN_SECRET}
+            if include_worker:
+                headers[server.WORKER_HEADER] = "worker-secret"
+            conn = http.client.HTTPConnection("127.0.0.1", port)
+            conn.request("POST", path, body=json.dumps(body).encode(), headers=headers)
+            response = conn.getresponse()
+            data = json.loads(response.read())
+            conn.close()
+            return response.status, data
+
+        with patch.object(server, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch.object(server, "WORKER_SECRET", "worker-secret"), \
+             patch.dict(server.JOBS, {"remote": job}, clear=True), \
+             patch.object(server, "QUEUE", ["remote"]), \
+             patch.dict(server.WORKERS, {}, clear=True), \
+             patch.object(server, "_save_job"):
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            try:
+                status, denied = post(httpd.server_port, "/api/worker/heartbeat", heartbeat, False)
+                self.assertEqual(status, 401)
+                self.assertFalse(denied["ok"])
+
+                status, ready = post(httpd.server_port, "/api/worker/heartbeat", heartbeat, True)
+                self.assertEqual(status, 200)
+                self.assertTrue(ready["worker"]["eligible"])
+                self.assertNotIn("token", json.dumps(ready).lower())
+
+                status, claimed = post(httpd.server_port, "/api/worker/claim", {}, True)
+                self.assertEqual(status, 200)
+                self.assertEqual(claimed["job"]["id"], "remote")
+                self.assertIn("lease_token", claimed)
+                self.assertNotIn("lease_sha256", json.dumps(claimed))
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=2)
+
+    def test_full_queue_rejection_removes_new_job_input_snapshot(self):
+        with tempfile.TemporaryDirectory() as root:
+            upload = Path(root) / "upload.png"
+            upload.write_bytes(b"private reference bytes")
+            existing = {
+                f"q{i}": {"id": f"q{i}", "status": "queued", "cfg": {"worker_target": "pgx"}}
+                for i in range(server.MAX_PENDING_JOBS)
+            }
+            queue = list(existing)
+            body = json.dumps({
+                "prompt": "queue snapshot cleanup test", "mode": "i2v", "seconds": 2,
+                "worker_target": "pgx", "image": "nonce",
+                "image_size": upload.stat().st_size,
+                "image_sha256": hashlib.sha256(upload.read_bytes()).hexdigest(),
+            }).encode()
+            with patch.object(server, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+                 patch.object(server, "NAS_DIR", root), \
+                 patch.dict(server.JOBS, existing, clear=True), \
+                 patch.object(server, "QUEUE", queue), \
+                 patch.dict(server.UPLOADED, {"nonce": {"path": str(upload), "name": "upload.png"}}, clear=True), \
+                 patch.object(server, "_save_job"):
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    conn = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+                    conn.request("POST", "/api/generate", body=body, headers={
+                        "Content-Type": "application/json", server.ORIGIN_HEADER: self.ORIGIN_SECRET,
+                    })
+                    response = conn.getresponse()
+                    payload = json.loads(response.read())
+                    conn.close()
+                    self.assertEqual(response.status, 429)
+                    self.assertEqual(payload["code"], "QUEUE_FULL")
+                    inputs = Path(root) / ".h3-web" / "inputs"
+                    self.assertEqual(list(inputs.glob("*")) if inputs.exists() else [], [])
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+                    thread.join(timeout=2)
+
+    def test_generate_routes_one_job_to_selected_worker_and_rejects_offline_rtx(self):
+        def post(port, worker_target):
+            body = json.dumps({
+                "prompt": "worker routing test prompt",
+                "mode": "t2v",
+                "seconds": 2,
+                "worker_target": worker_target,
+            }).encode()
+            conn = http.client.HTTPConnection("127.0.0.1", port)
+            conn.request("POST", "/api/generate", body=body, headers={
+                "Content-Type": "application/json",
+                server.ORIGIN_HEADER: self.ORIGIN_SECRET,
+            })
+            response = conn.getresponse()
+            payload = json.loads(response.read())
+            conn.close()
+            return response.status, payload
+
+        with patch.object(server, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch.dict(server.JOBS, {}, clear=True), \
+             patch.object(server, "QUEUE", []), \
+             patch.object(server, "QUEUE_RESERVATIONS", {"pgx": 0, "rtx5080": 0}), \
+             patch.dict(server.WORKERS, {}, clear=True), \
+             patch.object(server, "_save_job"):
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            try:
+                status, pgx = post(httpd.server_port, "pgx")
+                self.assertEqual(status, 200)
+                self.assertEqual(server.JOBS[pgx["job"]]["cfg"]["worker_target"], "pgx")
+                self.assertEqual(len(server.JOBS), 1)
+
+                status, offline = post(httpd.server_port, "rtx5080")
+                self.assertEqual(status, 409)
+                self.assertEqual(offline["code"], "RTX5080_OFFLINE")
+                self.assertEqual(len(server.JOBS), 1)
+
+                server.record_worker_heartbeat(server.RTX5080_WORKER_ID, {
+                    "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+                    "comfy_up": True, "model_ready": True, "generation_verified": True, "busy": False,
+                    "modes": ["t2v", "i2v"],
+                    "model_profile": "minimax-h3-pgx-exact-v1",
+                })
+                status, rtx = post(httpd.server_port, "rtx5080")
+                self.assertEqual(status, 200)
+                self.assertEqual(server.JOBS[rtx["job"]]["cfg"]["worker_target"], "rtx5080")
+                self.assertEqual(len(server.JOBS), 2)
+                self.assertNotEqual(pgx["job"], rtx["job"])
+
+                for index in range(4):
+                    jid = f"pgx-fill-{index}"
+                    server.JOBS[jid] = {
+                        "id": jid, "status": "queued",
+                        "cfg": {"worker_target": "pgx", "mode": "t2v"},
+                    }
+                    server.QUEUE.append(jid)
+                status, full = post(httpd.server_port, "pgx")
+                self.assertEqual(status, 429)
+                self.assertEqual(full["code"], "QUEUE_FULL")
+                self.assertEqual(full["worker_target"], "pgx")
+
+                status, independent = post(httpd.server_port, "rtx5080")
+                self.assertEqual(status, 200)
+                self.assertEqual(server.JOBS[independent["job"]]["cfg"]["worker_target"], "rtx5080")
+                self.assertEqual(len(server.JOBS), 7)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=2)
+
     def test_comfy_recovery_never_starts_failed_duplicate_user_unit(self):
         source = inspect.getsource(server.ensure_comfyui)
         self.assertIn("systemctl start comfyui-minimax-h3.service", source)
@@ -99,6 +682,50 @@ class VideoDeliveryTests(unittest.TestCase):
             self.assertTrue(server.LOCK.acquire(timeout=0.1))
             server.LOCK.release()
             save.assert_called_once_with("queued-job")
+
+    def test_concurrent_job_saves_never_overwrite_newer_snapshot(self):
+        with tempfile.TemporaryDirectory() as root, \
+             patch.object(server, "JOBS_DIR", root), \
+             patch.dict(server.JOBS, {"race": {"id": "race", "status": "old"}}, clear=True):
+            old_blocked = threading.Event()
+            release_old = threading.Event()
+            original_dump = json.dump
+
+            def controlled_dump(value, stream, *args, **kwargs):
+                if value.get("status") == "old":
+                    old_blocked.set()
+                    self.assertTrue(release_old.wait(timeout=2))
+                return original_dump(value, stream, *args, **kwargs)
+
+            with patch.object(server.json, "dump", side_effect=controlled_dump), \
+                 patch.object(server, "log") as save_log:
+                old_thread = threading.Thread(target=server._save_job, args=("race",))
+                old_thread.start()
+                self.assertTrue(old_blocked.wait(timeout=2))
+                with server.LOCK:
+                    server.JOBS["race"]["status"] = "new"
+                new_thread = threading.Thread(target=server._save_job, args=("race",))
+                new_thread.start()
+                release_old.set()
+                old_thread.join(timeout=3)
+                new_thread.join(timeout=3)
+            self.assertFalse(old_thread.is_alive())
+            self.assertFalse(new_thread.is_alive())
+            self.assertFalse(any("저장 실패" in str(call) for call in save_log.call_args_list))
+            saved = json.loads(Path(server._job_file("race")).read_text())
+            self.assertEqual(saved["status"], "new")
+            self.assertEqual(list(Path(root).glob("*.tmp*")), [])
+
+    def test_pgx_start_transition_cannot_resurrect_cancelled_job(self):
+        with patch.dict(server.JOBS, {
+            "cancelled": {"id": "cancelled", "status": "cancelled", "cfg": {"worker_target": "pgx"}},
+            "queued": {"id": "queued", "status": "queued", "cfg": {"worker_target": "pgx"}},
+        }, clear=True), patch.object(server, "ACTIVE", [None]):
+            self.assertIsNone(server.begin_pgx_job("cancelled", now=10.0))
+            cfg = server.begin_pgx_job("queued", now=11.0)
+            self.assertEqual(cfg["worker_target"], "pgx")
+            self.assertEqual(server.JOBS["queued"]["status"], "starting")
+            self.assertEqual(server.ACTIVE[0], "queued")
 
     def test_active_worker_aborts_when_its_job_is_cancelled_or_deleted(self):
         for jobs in ({"job": {"id": "job", "status": "cancelled"}}, {}):
@@ -818,6 +1445,7 @@ Cached:          18874368 kB
             "ExecStartPre=/home/aski/h3-web/.venv/bin/python -c 'import websocket'",
             unit,
         )
+        self.assertIn("ExecStartPre=/bin/sh -c 'test -n \"$H3_WORKER_TOKEN\"'", unit)
         reconnect = inspect.getsource(server.run_job)
         reconnect_start = reconnect.index("if ws is None:")
         reconnect = reconnect[reconnect_start:reconnect.index("if ws:", reconnect_start + 1)]
@@ -863,7 +1491,10 @@ Cached:          18874368 kB
         root = Path(__file__).resolve().parents[1]
         html = (root / "index.html").read_text()
         css = (root / "apple-redesign.css").read_text()
-        self.assertIn("wrap.insertBefore(job,workspace)", html)
+        workspace = html[html.index("(function buildAppleWorkspace()") : html.index("})();", html.index("(function buildAppleWorkspace()"))]
+        self.assertIn("wrap.insertBefore(job,workspace)", workspace)
+        self.assertIn("if(!wrap||!tabs||!job) return;", workspace)
+        self.assertNotIn("||!footer", workspace)
         self.assertNotIn("output.appendChild(job)", html)
         self.assertIn("live-job-card", html)
         self.assertIn(".live-job-card", css)
@@ -1133,6 +1764,262 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertIn('#trackingModalBody{min-height:0;overflow-y:auto;overscroll-behavior:contain', html)
         self.assertIn('height:100dvh;max-height:100dvh;border-radius:0', html)
 
+    def test_windows_installer_uses_dpapi_acl_and_staged_upgrade(self):
+        root = Path(__file__).resolve().parents[1] / "windows-worker"
+        installer = (root / "Install-H3Worker.ps1").read_text()
+        source = (root / "h3_worker.py").read_text()
+        config = json.loads((root / "config.example.json").read_text())
+        self.assertIn("ProtectedData]::Protect", installer)
+        self.assertIn("DataProtectionScope]::CurrentUser", installer)
+        self.assertIn("icacls", installer)
+        self.assertIn("WindowsIdentity]::GetCurrent().User.Value", installer)
+        self.assertIn("$StageRoot", installer)
+        self.assertIn("$BackupRoot", installer)
+        self.assertIn("Stop-InstalledWorker", installer)
+        self.assertIn("Uninstall-H3Worker.ps1", installer)
+        self.assertIn("Remove-Item -LiteralPath $tokenFile", installer)
+        self.assertNotIn("worker_token = $token", installer)
+        self.assertIn("worker_token_dpapi", config)
+        self.assertNotIn("worker_token", config)
+        self.assertIn("CryptUnprotectData", source)
+        self.assertIn("load_worker_token", source)
+
+    def test_windows_worker_comfy_runtime_requires_active_5080_and_all_nodes(self):
+        worker = self.load_windows_worker()
+        client = worker.ComfyClient("http://127.0.0.1:8188")
+        complete = {name: {} for name in worker.REQUIRED_COMFY_CLASSES}
+        with patch.object(client, "json", side_effect=[
+            {"devices": [{"name": "cuda:0 NVIDIA GeForce RTX 5080"}]}, complete,
+        ]):
+            client.assert_runtime()
+        with patch.object(client, "json", return_value={"devices": [{"name": "cuda:0 RTX 4090"}]}):
+            with self.assertRaises(RuntimeError):
+                client.assert_runtime()
+        missing = dict(complete)
+        missing.pop("MiniMaxH3ImageToVideo")
+        with patch.object(client, "json", side_effect=[
+            {"devices": [{"name": "cuda:0 NVIDIA GeForce RTX 5080"}]}, missing,
+        ]):
+            with self.assertRaises(RuntimeError):
+                client.assert_runtime()
+
+    def test_windows_worker_manifest_roles_paths_and_hashes_are_code_anchored(self):
+        worker = self.load_windows_worker()
+        manifest = json.loads(worker.MANIFEST_PATH.read_text())
+        manifest["models"][0]["role"] = "attacker_substitute"
+        with tempfile.TemporaryDirectory() as root:
+            tampered = Path(root) / "model-manifest.json"
+            tampered.write_text(json.dumps(manifest))
+            with patch.object(worker, "MANIFEST_PATH", tampered):
+                with self.assertRaises(RuntimeError):
+                    worker.validate_package()
+
+    def test_shared_segment_plan_preserves_requested_duration_within_h3_frame_grid(self):
+        for seconds in (5, 8, 10, 12, 14, 15, 20, 30, 60):
+            for segment_seconds in (6, 8, 10):
+                frames = server.segment_frame_plan(seconds, segment_seconds, server.STRATEGY_SPLIT)
+                self.assertGreaterEqual(len(frames), 1)
+                self.assertLessEqual(len(frames), math.ceil(seconds / segment_seconds))
+                self.assertTrue(all(frame >= 124 and (frame - 5) % 17 == 0 for frame in frames))
+                self.assertLessEqual(abs(sum(frames) - round(seconds * 24)), 9)
+        self.assertEqual(server.segment_frame_plan(5, 8, server.STRATEGY_SINGLE),
+                         [server.snap_len(5)])
+        source = (Path(__file__).resolve().parents[1] / "windows-worker" / "h3_worker.py").read_text()
+        self.assertIn("server.segment_frame_plan", source)
+
+    def test_exact_worker_workflow_never_silently_omits_requested_loras(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(RuntimeError):
+                server.build_workflow("p", "", 768, 432, 25, 4, 1,
+                                      lora_dirs=[root], strict_loras=True)
+            Path(root, server.H3_LORA).write_bytes(b"x")
+            server.build_workflow("p", "", 768, 432, 25, 4, 1,
+                                  lora_dirs=[root], strict_loras=True)
+            with self.assertRaises(RuntimeError):
+                server.build_workflow("p", "", 768, 432, 25, 4, 1,
+                                      realism_lora=True, lora_dirs=[root], strict_loras=True)
+            with self.assertRaises(RuntimeError):
+                server.build_workflow("p", "", 768, 432, 25, 4, 1,
+                                      cam_motion="1000", lora_dirs=[root], strict_loras=True)
+        source = (Path(__file__).resolve().parents[1] / "windows-worker" / "h3_worker.py").read_text()
+        self.assertIn("strict_loras=True", source)
+
+    def test_windows_worker_concat_manifest_uses_safe_relative_generated_names(self):
+        worker = self.load_windows_worker()
+        with tempfile.TemporaryDirectory(prefix="o'brien-") as root:
+            directory = Path(root)
+            segments = [directory / "segment_00.mp4", directory / "segment_01.mp4"]
+            for segment in segments:
+                segment.write_bytes(b"x")
+            output = directory / "final.mp4"
+            calls, manifests = [], []
+
+            def fake_ffmpeg(arguments, timeout=600, cwd=None):
+                calls.append((arguments, cwd))
+                if "concat" in arguments:
+                    manifest = Path(cwd) / arguments[arguments.index("-i") + 1]
+                    manifests.append(manifest.read_text())
+                target = Path(arguments[-1])
+                if not target.is_absolute():
+                    target = Path(cwd) / target
+                target.write_bytes(b"video")
+
+            with patch.object(worker, "run_ffmpeg", side_effect=fake_ffmpeg):
+                worker.finish_segments(segments, output)
+            self.assertEqual(manifests, ["file 'segment_00.mp4'\nfile 'segment_01.mp4'\n"])
+            self.assertEqual(calls[0][1], str(directory))
+            self.assertIn("1", calls[0][0][calls[0][0].index("-safe") + 1:calls[0][0].index("-safe") + 2])
+
+    def test_windows_worker_rejects_invalid_upload_acknowledgements(self):
+        worker = self.load_windows_worker()
+        claim = {"job": {"id": "deadbeef"}, "execution_id": "exec", "lease_token": "lease"}
+        with tempfile.TemporaryDirectory() as root:
+            video = Path(root) / "result.mp4"
+            video.write_bytes(b"x" * 64)
+
+            class FakeApi:
+                def __init__(self, initial, chunk_ack):
+                    self.initial, self.chunk_ack, self.completed, self.chunks = initial, chunk_ack, False, 0
+                def request(self, path, payload, timeout=60):
+                    if path.endswith("/init"):
+                        return {"received": self.initial, "chunk_max": 16}
+                    if path.endswith("/chunk"):
+                        self.chunks += 1
+                        if self.chunks > 1:
+                            raise AssertionError("worker retried a non-advancing upload acknowledgement")
+                        return {"received": self.chunk_ack}
+                    self.completed = True
+                    return {"ok": True}
+
+            for initial, chunk_ack in ((65, 65), (0, 999), (0, 0)):
+                api = FakeApi(initial, chunk_ack)
+                with self.assertRaises(RuntimeError):
+                    worker.upload_final(api, claim, video)
+                self.assertFalse(api.completed)
+
+            class ValidApi:
+                def __init__(self):
+                    self.received = 0
+                def request(self, path, payload, timeout=60):
+                    if path.endswith("/init"):
+                        return {"received": 0, "chunk_max": 16}
+                    if path.endswith("/chunk"):
+                        self.assert_offset = payload["offset"]
+                        self.received += len(base64.b64decode(payload["data"]))
+                        return {"received": self.received}
+                    return {"job": {"status": "done"}}
+
+            valid = ValidApi()
+            worker.upload_final(valid, claim, video)
+            self.assertEqual(valid.received, 64)
+
+    def test_windows_worker_rejects_unsafe_ids_urls_redirects_and_comfy_overrides(self):
+        worker = self.load_windows_worker()
+        self.assertTrue(worker.valid_job_id("deadbeef"))
+        for value in ("", "abc", "../escape", "deadbeef/../../x", "g0000000", "deadbeef00"):
+            self.assertFalse(worker.valid_job_id(value), value)
+        self.assertEqual(worker.validate_api_base("https://h3-video-web.vercel.app"),
+                         "https://h3-video-web.vercel.app")
+        for value in ("http://h3-video-web.vercel.app", "https://x.test/path", "https://x.test/?q=1"):
+            with self.assertRaises(RuntimeError):
+                worker.validate_api_base(value)
+        self.assertEqual(worker.validate_comfy_url("http://127.0.0.1:8188"),
+                         "http://127.0.0.1:8188")
+        for value in ("http://0.0.0.0:8188", "http://localhost:8188", "https://127.0.0.1:8188", "http://127.0.0.1:9999"):
+            with self.assertRaises(RuntimeError):
+                worker.validate_comfy_url(value)
+        self.assertEqual(worker.validate_comfy_args(["--lowvram", "--reserve-vram", "1.5"]),
+                         ["--lowvram", "--reserve-vram", "1.5"])
+        for args in (["--listen", "0.0.0.0"], ["--port", "9999"], ["--cuda-device", "1"], ["--reserve-vram", "oops"]):
+            with self.assertRaises(RuntimeError):
+                worker.validate_comfy_args(args)
+        with self.assertRaises(urllib.error.HTTPError):
+            worker.NoRedirectHandler().redirect_request(
+                urllib.request.Request("https://origin.test"), None, 307,
+                "redirect", {}, "https://other.test"
+            )
+
+    def test_windows_worker_package_is_exact_outbound_and_non_admin(self):
+        root = Path(__file__).resolve().parents[1]
+        worker = root / "windows-worker"
+        result = subprocess.run(
+            [sys.executable, str(worker / "h3_worker.py"), "--validate-package"],
+            cwd=root, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PACKAGE VALID", result.stdout)
+        manifest = json.loads((worker / "model-manifest.json").read_text())
+        self.assertEqual(manifest["profile"], "minimax-h3-pgx-exact-v1")
+        self.assertEqual(len(manifest["models"]), 8)
+        self.assertTrue(all(item["required"] for item in manifest["models"]))
+        self.assertTrue(all(len(item["sha256"]) == 64 for item in manifest["models"]))
+        source = (worker / "h3_worker.py").read_text()
+        installer = (worker / "Install-H3Worker.ps1").read_text()
+        self.assertIn('http://127.0.0.1:8188', source)
+        self.assertNotIn('--listen", "0.0.0.0', source)
+        self.assertIn("HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", installer)
+        self.assertIn("--lowvram", installer)
+        self.assertIn("--reserve-vram", installer)
+        self.assertIn("System.Text.UTF8Encoding($false)", installer)
+        self.assertNotIn("Set-Content -LiteralPath (Join-Path $InstallRoot 'config.json')", installer)
+        self.assertIn("run_local_generation_smoke", source)
+        self.assertIn("generation_marker_valid", source)
+        self.assertIn("for path in (MANIFEST_PATH, shared_server_path(), Path(__file__).resolve()):", source)
+        self.assertIn('"generation_verified": generation_verified', source)
+        self.assertIn("server.segment_frame_plan", source)
+        self.assertNotIn("RunAs", installer)
+        self.assertFalse((worker / "worker-token.txt").exists())
+
+    def test_worker_ui_escapes_phase_preserves_selection_and_single_job_has_queue_position(self):
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        self.assertIn("esc(p.phase||'영상 생성 중…')", html)
+        self.assertNotIn("if(!rtx.eligible&&WORKER_TARGET==='rtx5080') WORKER_TARGET='pgx'", html)
+        self.assertNotIn("WORKER_TARGET='pgx';\n    $('#workerToggle').disabled=true", html)
+
+        job = {"id": "deadbeef", "status": "queued", "cfg": {"worker_target": "rtx5080"}}
+        with patch.object(server, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch.dict(server.JOBS, {"deadbeef": job}, clear=True), \
+             patch.object(server, "QUEUE", ["deadbeef"]):
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+                conn.request("GET", "/api/job/deadbeef", headers={server.ORIGIN_HEADER: self.ORIGIN_SECRET})
+                response = conn.getresponse()
+                payload = json.loads(response.read())
+                conn.close()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(payload["job"]["queue_position"], 1)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=2)
+
+    def test_worker_toggle_routes_one_target_and_surfaces_independent_queues(self):
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        self.assertIn('id="workerToggle"', html)
+        self.assertIn("let WORKER_TARGET='pgx'", html)
+        self.assertIn("body.worker_target=WORKER_TARGET;", html)
+        self.assertIn("workerToggle.disabled=!rtx.eligible", html)
+        self.assertIn("RTX 5080 실제 H3 생성 검증 대기", html)
+        self.assertIn("const workerLabel=", html)
+        self.assertIn("j.queue_position", html)
+        self.assertNotIn("fanout", html.lower())
+
+    def test_recent_handle_is_svg_icon_and_tracking_identity_is_first(self):
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        start = html.index('<button class="recent-drawer-handle"')
+        end = html.index('</button>', start)
+        handle = html[start:end]
+        self.assertIn("<svg", handle)
+        self.assertIn('id="recentCountBadge"', handle)
+        self.assertIn('<span class="recent-handle-label">최근 작업</span>', handle)
+        render = html[html.index("function renderTracking(j)"):html.index("function showJobTracking", html.index("function renderTracking(j)"))]
+        self.assertIn("track-identity", render)
+        self.assertLess(render.index("track-identity"), render.index("track-status"))
+        self.assertNotIn("trackValue('작업 ID'", render)
+
     def test_recent_jobs_open_as_a_right_edge_swipe_drawer(self):
         """Recent work is reachable without scrolling to the bottom of the page."""
         html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
@@ -1168,7 +2055,7 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
     def test_completed_video_ui_uses_same_origin_nas_range_routes(self):
         html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
         self.assertIn("function completedMedia(jid)", html)
-        self.assertIn("return {view:'/api/view/'+encoded,download:'/api/download/'+encoded};", html)
+        self.assertIn("return {view:'/api/view/'+encoded+'?v='+MEDIA_STREAM_VERSION,download:'/api/download/'+encoded};", html)
         self.assertIn("async function openCompletedVideo", html)
         self.assertIn("async function saveCompletedVideo", html)
         self.assertNotIn("/api/media-url/", html)
@@ -1180,7 +2067,7 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         root = Path(__file__).resolve().parents[1]
         html = (root / "index.html").read_text()
         css = (root / "apple-redesign.css").read_text()
-        self.assertIn('href="/apple-redesign.css?v=20260908-drawer1"', html)
+        self.assertIn('href="/apple-redesign.css?v=20260909-playback2"', html)
         self.assertIn('id="videoStatus"', html)
         self.assertIn('id="modalPlaybackRate"', html)
         self.assertIn('id="modalPip"', html)
@@ -1191,6 +2078,58 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertIn("'stalled'", html)
         self.assertIn('.video-watch', css)
         self.assertIn('.watch-actions', css)
+
+    def test_completed_video_stream_is_uncached_versioned_and_reloaded_for_ios(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "index.html").read_text()
+        self.assertEqual(backend_proxy.PUBLIC_VIDEO_CACHE_CONTROL, "private, no-store")
+        self.assertIn('("Vary", "Range")', (root / "backend_proxy.py").read_text())
+        self.assertIn('("CDN-Cache-Control", "no-store")', (root / "backend_proxy.py").read_text())
+        self.assertIn('("Vercel-CDN-Cache-Control", "no-store")', (root / "backend_proxy.py").read_text())
+        self.assertIn("const MEDIA_STREAM_VERSION='20260909-playback2';", html)
+        self.assertIn("view:'/api/view/'+encoded+'?v='+MEDIA_STREAM_VERSION", html)
+        open_video = html[html.index("async function openCompletedVideo"):html.index("async function saveCompletedVideo")]
+        self.assertIn("if($('#recentModal').classList.contains('show')) closeRecentModal();", open_video)
+        self.assertLess(open_video.index("closeRecentModal()"), open_video.index("showVideo("))
+        self.assertIn('id="player" controls playsinline preload="metadata"', html)
+        done = html[html.index("} else if(j.status==='done')"):html.index("} else if(j.status==='error')")]
+        self.assertIn("resultPlayer.poster='/api/thumbnail/'+encodeURIComponent(j.id);", done)
+        self.assertIn("resultPlayer.load();", done)
+
+    def test_top_progress_card_uses_many_job_stable_running_and_completion_characters(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "index.html").read_text()
+        css = (root / "apple-redesign.css").read_text()
+        self.assertIn("wrap.insertBefore(job,workspace)", html)
+        self.assertIn('id="progressCharacter"', html)
+        self.assertIn("function progressCharacterForJob", html)
+        self.assertIn("function setProgressCharacter", html)
+        running_match = re.search(r"const RUNNING_CHARACTERS=(\[[^;]+\]);", html)
+        complete_match = re.search(r"const COMPLETE_CHARACTERS=(\[[^;]+\]);", html)
+        self.assertIsNotNone(running_match)
+        self.assertIsNotNone(complete_match)
+        running = json.loads(running_match.group(1))
+        complete = json.loads(complete_match.group(1))
+        self.assertGreaterEqual(len(running), 32)
+        self.assertGreaterEqual(len(complete), 16)
+        self.assertTrue(set(running).isdisjoint(set(complete)))
+        self.assertIn("setProgressCharacter(j.id,'running',measuredPct)", html)
+        self.assertIn("setProgressCharacter(j.id,'complete',100)", html)
+        self.assertIn(".progress-character", css)
+        self.assertIn("@keyframes characterRun", css)
+
+    def test_recent_work_handle_has_visible_korean_label_and_polished_pill_surface(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "index.html").read_text()
+        css = (root / "apple-redesign.css").read_text()
+        start = html.index('<button class="recent-drawer-handle"')
+        end = html.index('</button>', start)
+        handle = html[start:end]
+        self.assertIn('<span class="recent-handle-label">최근 작업</span>', handle)
+        self.assertIn('aria-label="최근 작업 열기"', handle)
+        self.assertIn(".recent-handle-label", css)
+        self.assertIn("linear-gradient", css[css.index(".recent-drawer-handle"):])
+        self.assertIn("box-shadow", css[css.index(".recent-drawer-handle"):])
 
     def test_sampling_steps_max_at_twenty_in_ui_and_api(self):
         html = (Path(__file__).resolve().parents[1] / "index.html").read_text()

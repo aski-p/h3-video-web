@@ -1,0 +1,8 @@
+{
+  "api_base": "https://h3-video-web.vercel.app",
+  "worker_token_dpapi": "REPLACE_WITH_INSTALLER_GENERATED_DPAPI_BASE64",
+  "comfy_url": "http://127.0.0.1:8188",
+  "comfy_dir": "",
+  "models_dir": "",
+  "comfy_args": ["--lowvram", "--reserve-vram", "1.5"]
+}

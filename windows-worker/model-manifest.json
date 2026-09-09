@@ -1,0 +1,61 @@
+{
+  "profile": "minimax-h3-pgx-exact-v1",
+  "models": [
+    {
+      "role": "diffusion_model",
+      "relative_path": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "size": 25917088864,
+      "sha256": "96eb49aed36a069f97bc77efe0152a534da3d3b162861e977cd213c04a4fe481",
+      "required": true
+    },
+    {
+      "role": "text_encoder",
+      "relative_path": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "size": 16581939878,
+      "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6",
+      "required": true
+    },
+    {
+      "role": "video_vae",
+      "relative_path": "vae/minimax_h3_video_vae_fp16.safetensors",
+      "size": 321163714,
+      "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+      "required": true
+    },
+    {
+      "role": "audio_vae",
+      "relative_path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+      "size": 312969256,
+      "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+      "required": true
+    },
+    {
+      "role": "turbo_lora",
+      "relative_path": "loras/minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors",
+      "size": 2214042872,
+      "sha256": "7098acf3ee75028fd9fcd948f50fcc8d995057fabb76f86bd3ca2c0ffc58e409",
+      "required": true
+    },
+    {
+      "role": "realism_lora",
+      "relative_path": "loras/h3-realism-people-t2v-i2v-r2v.safetensors",
+      "size": 2213172336,
+      "sha256": "acc529601d2da117fb81179e76c56e488a3beab1171659d305f04fa3655b787e",
+      "required": true
+    },
+    {
+      "role": "camera_motion_1000",
+      "relative_path": "loras/cam_motion_1000.safetensors",
+      "size": 2214042672,
+      "sha256": "c126738c887804ace3a4be4a3156fcca70517613c7a7ece4e5938d372419186b",
+      "required": true
+    },
+    {
+      "role": "camera_motion_3000",
+      "relative_path": "loras/cam_motion_3000.safetensors",
+      "size": 2214042672,
+      "sha256": "9d7d98d7377f56efed3aa7d507f767936112d208906f49908ec9a8ae912be88b",
+      "required": true
+    }
+  ]
+}

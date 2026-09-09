@@ -316,6 +316,16 @@ button:disabled{opacity:.35;cursor:not-allowed}
 }
 @keyframes sp{to{transform:rotate(360deg)}}
 
+/* ── Worker routing switch ── */
+.worker-route{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.worker-route-copy{min-width:0}.worker-route-copy h2{margin-bottom:4px}.worker-route-copy strong{display:block;color:var(--tx);font-size:14px}.worker-route-copy small{display:block;color:var(--tx4);font-size:11px;margin-top:3px}
+.worker-switch{position:relative;flex:0 0 54px;width:54px;height:32px;padding:0;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid var(--line);transition:.2s}
+.worker-switch span{position:absolute;left:3px;top:3px;width:24px;height:24px;border-radius:50%;background:var(--tx);box-shadow:0 2px 6px rgba(0,0,0,.35);transition:transform .2s}
+.worker-switch[aria-checked="true"]{background:var(--acc-bg);border-color:var(--acc)}
+.worker-switch[aria-checked="true"] span{transform:translateX(22px)}
+.worker-switch:disabled{opacity:.35}
+.worker-queues{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.worker-pill{font:500 10.5px var(--mono);color:var(--tx3);border:1px solid var(--line-subtle);border-radius:999px;padding:5px 9px}.worker-pill.on{color:var(--ok);border-color:rgba(39,166,68,.25)}
+
 /* ── Mode tabs ── */
 .mtabs{display:flex;gap:8px;margin-bottom:16px}
 .mtab{
@@ -475,6 +485,8 @@ button:disabled{opacity:.35;cursor:not-allowed}
 #trackingModal .tracking-modal{max-height:calc(100vh - 40px);max-height:calc(100dvh - 40px)}
 .tracking-modal-head{position:relative;flex:0 0 auto;padding-right:42px}
 #trackingModalBody{min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:2px 2px max(12px,env(safe-area-inset-bottom)) 0}
+.track-identity{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;margin-bottom:14px;padding:10px;border:1px solid var(--line);border-radius:var(--r-md);background:rgba(113,112,255,.06)}
+.track-identity div{min-width:0}.track-identity small{display:block;color:var(--tx4);font-size:9px;text-transform:uppercase;letter-spacing:.06em}.track-identity strong{display:block;color:var(--tx);font:500 12px var(--mono);overflow-wrap:anywhere}.track-worker{align-self:center;color:var(--acc);font-size:11px;font-weight:590;white-space:nowrap}
 .track-status{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:10px}
 .track-status b{font-size:16px;color:var(--tx)}
 .track-progress{height:9px;border-radius:999px;background:rgba(255,255,255,.07);overflow:hidden;margin:8px 0 6px}
@@ -486,8 +498,9 @@ button:disabled{opacity:.35;cursor:not-allowed}
 @media(max-width:480px){.modal-overlay#trackingModal{padding:0;align-items:stretch}#trackingModal .tracking-modal{width:100%;height:100dvh;max-height:100dvh;border-radius:0;padding:max(16px,env(safe-area-inset-top)) 16px max(16px,env(safe-area-inset-bottom))}.track-grid{grid-template-columns:1fr}.track-status{align-items:flex-start;flex-direction:column;gap:3px}}
 
 /* 최근 작업은 오른쪽 엣지 스와이프 드로어에서 관리한다. */
-.recent-drawer-handle{position:fixed;z-index:70;right:env(safe-area-inset-right,0px);top:46%;width:42px;min-height:116px;padding:10px 7px;border-radius:16px 0 0 16px;background:var(--surface);border:1px solid var(--line);border-right:0;color:var(--tx2);box-shadow:0 8px 28px rgba(0,0,0,.16);writing-mode:vertical-rl;display:flex;align-items:center;justify-content:center;gap:7px;touch-action:pan-y}
-.recent-drawer-handle span{color:var(--acc);font-size:18px;line-height:1}
+.recent-drawer-handle{position:fixed;z-index:70;right:env(safe-area-inset-right,0px);margin-right:10px;top:46%;width:48px;height:48px;padding:0;border-radius:50%;background:var(--surface);border:1px solid var(--line);color:var(--tx2);box-shadow:0 8px 28px rgba(0,0,0,.16);display:flex;align-items:center;justify-content:center;touch-action:pan-y}
+.recent-drawer-handle svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.recent-count-badge{position:absolute;right:-4px;top:-5px;min-width:18px;height:18px;padding:0 4px;border-radius:999px;background:var(--acc-bg);color:#fff;font:600 10px/18px var(--font);text-align:center}.recent-count-badge:empty{display:none}
 .modal-overlay#recentModal{display:flex;visibility:hidden;pointer-events:none;justify-content:flex-end;align-items:stretch;padding:0;background:rgba(0,0,0,0);transition:background .22s ease}
 #recentModal.show{visibility:visible;pointer-events:auto;background:rgba(0,0,0,.28)}
 #recentModal .recent-modal{width:min(480px,calc(100vw - 24px));height:100vh;height:100dvh;max-width:none;max-height:none;margin:0;padding:max(18px,env(safe-area-inset-top)) max(18px,env(safe-area-inset-right)) max(18px,env(safe-area-inset-bottom)) 18px;border-radius:24px 0 0 24px;display:flex;flex-direction:column;overflow:hidden;animation:none;transform:translateX(100%);transition:transform .28s cubic-bezier(.22,.8,.24,1);will-change:transform}
@@ -496,7 +509,7 @@ button:disabled{opacity:.35;cursor:not-allowed}
 .recent-modal-head p{margin:0;color:var(--tx4);font-size:12px}
 .recent-modal .recent{max-height:none;min-height:0;flex:1;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:2px 4px 12px 0}
 html.recent-drawer-open,html.recent-drawer-open body{overflow:hidden}
-@media(max-width:480px){.recent-drawer-handle{top:42%;min-height:104px}.recent-modal-head{align-items:flex-start;flex-direction:column;gap:4px}.recent-modal .recent{padding-right:0}}
+@media(max-width:480px){.recent-drawer-handle{top:42%;width:46px;height:46px}.recent-modal-head{align-items:flex-start;flex-direction:column;gap:4px}.recent-modal .recent{padding-right:0}}
 @media(prefers-reduced-motion:reduce){#jobbox.progress-pending .bar i{animation:none!important;transform:translateX(178%)}.track-progress.pending>i{animation:none!important;transform:translateX(178%)}#recentModal .recent-modal{transition:none}}
 
 /* ── Recent jobs ── */
@@ -585,7 +598,7 @@ footer{
   .dl{min-width:100px}
 }
 </style>
-<link rel="stylesheet" href="/apple-redesign.css?v=20260908-drawer1">
+<link rel="stylesheet" href="/apple-redesign.css?v=20260909-playback2">
 </head>
 <body>
 <a class="skip-link" href="#main-controls">생성 설정으로 바로가기</a>
@@ -603,6 +616,22 @@ footer{
   <div class="mtabs">
     <div class="mtab on" data-mode="t2v">문자 → 영상<span class="msub">T2V · 텍스트만으로 생성</span></div>
     <div class="mtab" data-mode="i2v">이미지 → 영상<span class="msub">I2V · 첫 프레임 지정</span></div>
+  </div>
+
+  <!-- 신규 작업 라우팅: OFF=PGX, ON=RTX. 기존 양쪽 큐는 서로 독립 실행된다. -->
+  <div class="card" id="workerRouteCard">
+    <div class="worker-route">
+      <div class="worker-route-copy">
+        <h2>생성 장비</h2>
+        <strong id="workerTargetLabel">PGX Spark</strong>
+        <small id="workerStateText">RTX 5080 연결 상태 확인 중…</small>
+      </div>
+      <button class="worker-switch" id="workerToggle" type="button" role="switch" aria-checked="false" aria-label="RTX 5080에서 생성" disabled><span aria-hidden="true"></span></button>
+    </div>
+    <div class="worker-queues" aria-live="polite">
+      <span class="worker-pill" id="pgxQueueState">PGX · 확인 중</span>
+      <span class="worker-pill" id="rtxQueueState">RTX 5080 · 확인 중</span>
+    </div>
   </div>
 
   <!-- 프롬프트 (입력값이 채워져 있으면 본문만 버튼+팝업으로 노출) -->
@@ -802,7 +831,10 @@ footer{
   <!-- job 상태 -->
   <div class="card" id="jobbox">
     <div class="statusline" id="stline"><span class="ready-icon" aria-hidden="true">✓</span><span class="st" id="sttext">생성 준비</span></div>
-    <div class="bar"><i id="bar"></i></div>
+    <div class="progress-journey" aria-label="영상 생성 진행">
+      <div class="bar"><i id="bar"></i></div>
+      <span class="progress-character" id="progressCharacter" aria-hidden="true">🏃🏻‍♀️</span>
+    </div>
     <div class="jobstats">
       <span class="js">ID <b id="jobid">—</b></span>
       <span class="js">SEED <b id="seedv">—</b></span>
@@ -814,7 +846,7 @@ footer{
     <button class="dl dldel" id="cleanError" style="display:none">오류 영상 정리</button>
     <div class="result" id="result" style="display:none">
       <div class="i2v-stage" id="i2vstage">
-        <video id="player" controls playsinline></video>
+        <video id="player" controls playsinline preload="metadata"></video>
         <div class="i2v-frame" id="i2vframe" style="display:none"></div>
       </div>
       <div class="dlrow">
@@ -834,7 +866,11 @@ footer{
 </div>
 
 <!-- 오른쪽 가장자리 탭 또는 왼쪽 스와이프로 최근 작업 드로어를 연다. -->
-<button class="recent-drawer-handle" id="recentModalOpen" type="button" aria-controls="recentModal" aria-expanded="false" aria-label="최근 작업 열기"><span aria-hidden="true">‹</span>최근 작업</button>
+<button class="recent-drawer-handle" id="recentModalOpen" type="button" aria-controls="recentModal" aria-expanded="false" aria-label="최근 작업 열기">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>
+  <span class="recent-handle-label">최근 작업</span>
+  <span class="recent-count-badge" id="recentCountBadge" aria-hidden="true"></span>
+</button>
 
 <!-- 최근 작업 오른쪽 드로어 -->
 <div class="modal-overlay" id="recentModal" aria-hidden="true">
@@ -902,8 +938,7 @@ footer{
   const wrap=document.querySelector('.wrap');
   const tabs=wrap&&wrap.querySelector(':scope > .mtabs');
   const job=document.getElementById('jobbox');
-  const footer=wrap&&wrap.querySelector(':scope > footer');
-  if(!wrap||!tabs||!job||!footer) return;
+  if(!wrap||!tabs||!job) return;
 
   const children=[...wrap.children];
   const first=children.indexOf(tabs);
@@ -936,7 +971,36 @@ footer{
 const $=s=>document.querySelector(s);
 let W=1344,H=768,S=5,currentJob=null;
 let pollTimer=null,pollDelay=4000;
+let WORKER_TARGET='pgx', WORKER_STATUS=null;
 let STRATEGY='single', SEG_SECONDS=4, STEPS=6, REALISM_LORA=false, CAM_MOTION='', REALISM_STRENGTH=1.0, CAM_STRENGTH=1.0;
+const MEDIA_STREAM_VERSION='20260909-playback2';
+const RUNNING_CHARACTERS=["🏃🏻","🏃🏼","🏃🏽","🏃🏾","🏃🏿","🏃🏻‍♀️","🏃🏼‍♀️","🏃🏽‍♀️","🏃🏾‍♀️","🏃🏿‍♀️","🏃🏻‍♂️","🏃🏼‍♂️","🏃🏽‍♂️","🏃🏾‍♂️","🏃🏿‍♂️","🐕","🐈","🐇","🦊","🐼","🐻","🐨","🐯","🦁","🐸","🐵","🐧","🐥","🦄","🐝","🦋","🐿️","🦖","🤖","👻","👽","🥷","🧚","🧜‍♀️","🦸‍♀️","🦸‍♂️"];
+const COMPLETE_CHARACTERS=["🥳","🎉","🎊","🏆","🥇","🌟","✨","💫","🙌","👏","💖","💎","🎬","🍿","🪄","🚀","🌈","✅","🫶","🎁"];
+
+function characterIndexForJob(jid, poolLength){
+  let hash=2166136261;
+  for(const ch of String(jid||'ready')){
+    hash^=ch.codePointAt(0);
+    hash=Math.imul(hash,16777619);
+  }
+  return (hash>>>0)%poolLength;
+}
+function progressCharacterForJob(jid,state='running'){
+  if(state==='idle') return '🎬';
+  if(state==='error') return '😵‍💫';
+  const pool=state==='complete'?COMPLETE_CHARACTERS:RUNNING_CHARACTERS;
+  return pool[characterIndexForJob(String(jid)+(state==='complete'?'|완료':''),pool.length)];
+}
+function setProgressCharacter(jid,state='running',pct=null){
+  const node=$('#progressCharacter');
+  if(!node) return;
+  const measured=finiteProgressNumber(pct,0,100);
+  node.textContent=progressCharacterForJob(jid,state);
+  node.dataset.state=state;
+  node.classList.toggle('pending',state==='running'&&measured===null);
+  node.style.left=state==='idle'?'14px':`clamp(14px, ${measured===null?0:measured}%, calc(100% - 14px))`;
+}
+setProgressCharacter('ready','idle',0);
 
 async function fetchJsonWithTimeout(url, options={}, timeoutMs=15000){
   const controller=new AbortController();
@@ -955,15 +1019,55 @@ async function fetchJsonWithTimeout(url, options={}, timeoutMs=15000){
   }finally{clearTimeout(timeout);}
 }
 
+async function refreshWorkerStatus(){
+  try{
+    const data=await fetchJsonWithTimeout('/api/jobs',{},10000);
+    WORKER_STATUS=data;
+    const workers=data.workers||{}, queues=data.queues||{};
+    const rtx=workers.rtx5080||{online:false,eligible:false,generation_verified:false};
+    const rtxVerificationPending=rtx.online&&!rtx.generation_verified;
+    const workerToggle=$('#workerToggle');
+    workerToggle.disabled=!rtx.eligible&&WORKER_TARGET==='pgx';
+    workerToggle.setAttribute('aria-checked',WORKER_TARGET==='rtx5080'?'true':'false');
+    $('#workerTargetLabel').textContent=WORKER_TARGET==='rtx5080'?'RTX 5080':'PGX Spark';
+    $('#workerStateText').textContent=rtx.eligible
+      ?(WORKER_TARGET==='rtx5080'?'새 작업은 RTX 5080 전용 큐로 전송':'RTX 5080 준비됨 · switch를 켜면 전환')
+      :(rtxVerificationPending?'RTX 5080 실제 H3 생성 검증 대기':(rtx.online?'RTX 5080 모델/ComfyUI 준비 안 됨':'RTX 5080 오프라인 · PGX만 사용 가능'));
+    const pgxQ=queues.pgx||{}, rtxQ=queues.rtx5080||{};
+    $('#pgxQueueState').textContent=`PGX · ${pgxQ.active_job?'생성 중':'대기'} · 큐 ${pgxQ.pending||0}`;
+    $('#rtxQueueState').textContent=`RTX 5080 · ${rtxQ.active_job?'생성 중':(rtx.eligible?'준비됨':(rtxVerificationPending?'검증 대기':'오프라인'))} · 큐 ${rtxQ.pending||0}`;
+    $('#pgxQueueState').classList.toggle('on',!!pgxQ.active_job);
+    $('#rtxQueueState').classList.toggle('on',!!rtxQ.active_job||!!rtx.eligible);
+  }catch(_){
+    const selectedRtx=WORKER_TARGET==='rtx5080';
+    $('#workerToggle').disabled=!selectedRtx;
+    $('#workerToggle').setAttribute('aria-checked',selectedRtx?'true':'false');
+    $('#workerTargetLabel').textContent=selectedRtx?'RTX 5080':'PGX Spark';
+    $('#workerStateText').textContent='장비 상태 확인 실패 · 현재 선택 유지';
+  }
+}
+$('#workerToggle').onclick=()=>{
+  const workerToggle=$('#workerToggle');
+  if(workerToggle.disabled)return;
+  WORKER_TARGET=WORKER_TARGET==='rtx5080'?'pgx':'rtx5080';
+  workerToggle.setAttribute('aria-checked',WORKER_TARGET==='rtx5080'?'true':'false');
+  $('#workerTargetLabel').textContent=WORKER_TARGET==='rtx5080'?'RTX 5080':'PGX Spark';
+  refreshWorkerStatus();
+};
+
 // Completed video bytes remain on NAS and are streamed only through the
 // same-origin Vercel API proxy.  This preserves Range/seek and iOS save behavior
 // without exposing a second public media origin.
 function completedMedia(jid){
   const encoded=encodeURIComponent(jid);
-  return {view:'/api/view/'+encoded,download:'/api/download/'+encoded};
+  return {view:'/api/view/'+encoded+'?v='+MEDIA_STREAM_VERSION,download:'/api/download/'+encoded};
 }
 async function openCompletedVideo(jid, title){
   const media=completedMedia(jid);
+  // The drawer makes every background surface inert. Close it first so iOS
+  // can receive real taps on the native video controls in the preview modal.
+  if($('#recentModal').classList.contains('show')) closeRecentModal();
+  $('#modalPlayer').poster='/api/thumbnail/'+encodeURIComponent(jid);
   showVideo(media.view,title||jid+'.mp4',media.download);
 }
 async function saveCompletedVideo(jid, filename, button){
@@ -1613,21 +1717,25 @@ function setJobUI(j){
   $('#cleanError').style.display='none';
   const m=$('#metatext');
   const p=j.progress||{};
+  const c=j.cfg||{};
+  const activeWorker=(c.worker_target||j.worker_target)==='rtx5080'?'RTX 5080':'PGX Spark';
   $('#jobbox').classList.remove('progress-pending');
   if(j.status==='queued'){
     $('#stline').innerHTML='<span class="spin"></span><span class="st">작업 대기 중…</span>';
     $('#bar').style.width='0%'; $('#pct').textContent='—';
     $('#eta').textContent='작업 시작 후 실측';
-    m.textContent='큐에 추가됨. ComfyUI 준비 중…';
+    m.textContent=activeWorker+' 전용 큐'+(j.queue_position?' '+j.queue_position+'번':'')+' · 작업 시작 대기 중';
+    setProgressCharacter(j.id,'running',null);
     $('#stop').disabled=false;
   } else if(j.status==='starting'){
     $('#stline').innerHTML='<span class="spin"></span><span class="st">ComfyUI 기동 중…</span>';
     $('#bar').style.width='0%'; $('#pct').textContent='—';
     $('#eta').textContent='작업 시작 후 실측';
-    m.textContent='ComfyUI 서비스 시작 대기 중…';
+    m.textContent=activeWorker+' · ComfyUI 서비스 시작 대기 중…';
+    setProgressCharacter(j.id,'running',null);
     $('#stop').disabled=false;
   } else if(j.status==='running'||j.status==='queued'&&p.phase){
-    $('#stline').innerHTML='<span class="spin"></span><span class="st">'+(p.phase||'영상 생성 중…')+'</span>';
+    $('#stline').innerHTML='<span class="spin"></span><span class="st">'+esc(p.phase||'영상 생성 중…')+'</span>';
     // A percentage is shown only when ComfyUI has reported measured progress.
     // Before that, an indeterminate bar shows that the running job is alive
     // without fabricating a numeric percentage or completion estimate.
@@ -1635,6 +1743,7 @@ function setJobUI(j){
     const measuredEta=finiteProgressNumber(p.eta,0);
     const hasMeasuredProgress=measuredPct!==null && !p.unavailable;
     const unavailable=p.unavailable===true || j.comfy_status==='unavailable';
+    setProgressCharacter(j.id,'running',measuredPct);
     $('#jobbox').classList.toggle('progress-pending',!hasMeasuredProgress&&!unavailable);
     $('#bar').style.width=hasMeasuredProgress?measuredPct+'%':'0%';
     $('#pct').textContent=hasMeasuredProgress?Math.round(measuredPct)+'%':(unavailable?'—':'측정 중');
@@ -1645,6 +1754,7 @@ function setJobUI(j){
     m.innerHTML='<b>'+fmtElapsed(p.elapsed)+'</b> 경과 · '+
       (hasMeasuredProgress?'실측 '+Math.round(measuredPct)+'%':'샘플러 준비 중')+'<br>'+
       stratLine+
+      activeWorker+' · '+
       (j.total_seconds?j.total_seconds+'초 · ':'')+
       '24fps 출력';
     if(p.queue_running!=null) m.innerHTML+=' · 대기열 '+p.queue_running;
@@ -1654,6 +1764,7 @@ function setJobUI(j){
     $('#bar').style.width='100%';
     $('#pct').textContent='100%';
     $('#eta').textContent='완료';
+    setProgressCharacter(j.id,'complete',100);
     $('#jobid').textContent=j.id;
     $('#seedv').textContent=(j.seed!=null&&j.seed>=0)?j.seed:(j.cfg&&j.cfg.seed!=null?j.cfg.seed:'랜덤');
     const media=completedMedia(j.id);
@@ -1661,11 +1772,13 @@ function setJobUI(j){
     const view=media.view;
     const nasWarn=(j.nas_saved===false)?'<br><span style="color:var(--warn)">NAS 저장 실패 — 로컬에만 저장됨</span>':'';
     const stratLine=(j.strategy==='single')?'단일생성 · ':'세그먼트 '+(j.segments||1)+'개 ('+(j.cfg&&j.cfg.seg_seconds?j.cfg.seg_seconds:SEG_SECONDS)+'초/개) · ';
-    m.innerHTML='소요 '+fmtElapsed(j.elapsed)+' · '+stratLine+(j.total_seconds||S)+'초 · 24fps<br>'+
+    m.innerHTML='소요 '+fmtElapsed(j.elapsed)+' · '+activeWorker+' · '+stratLine+(j.total_seconds||S)+'초 · 24fps<br>'+
       (j.nas_saved===false?'NAS 저장 실패 · ':'NAS 저장 완료 · ')+'파일: '+(j.file||'')+nasWarn;
     const resultPlayer=$('#player');
     resultPlayer.dataset.jobId=j.id;
+    resultPlayer.poster='/api/thumbnail/'+encodeURIComponent(j.id);
     resultPlayer.src=view;
+    resultPlayer.load();
     $('#result').style.display='block';
     // I2V 모드: 원본 이미지를 2.5초간 보여준 후 자동으로 비디오로 전환
     if(j.mode==='i2v' && window.__imgBlob){
@@ -1703,11 +1816,13 @@ function setJobUI(j){
     $('#errmsg').textContent=j.error||'알 수 없는 오류'; $('#errmsg').style.display='block';
     $('#cleanError').style.display='inline-flex';
     $('#cleanError').onclick=()=>cleanupError(j.id);
+    setProgressCharacter(j.id,'error',100);
     $('#stop').disabled=true; clearActiveJob();
   } else if(j.status==='cancelled'){
     $('#stline').innerHTML='<span class="st" style="color:var(--warn)">■ 중단됨</span>';
     $('#cleanError').style.display='inline-flex';
     $('#cleanError').onclick=()=>cleanupError(j.id);
+    setProgressCharacter(j.id,'error',100);
     $('#stop').disabled=true; clearActiveJob();
   }
 }
@@ -1728,8 +1843,10 @@ $('#go').onclick=async()=>{
   $('#jobbox').style.display='block';
   $('#stline').innerHTML='<span class="spin"></span><span class="st">요청 중…</span>';
   $('#bar').style.width='0%'; $('#pct').textContent='—'; $('#eta').textContent='진행 정보 수신 대기';
+  setProgressCharacter('request-'+Date.now(),'running',null);
 
   const body={prompt, negative, width:W, height:H, seconds:S, steps:STEPS, strategy:STRATEGY, seg_seconds:SEG_SECONDS, seed, mode:MODE, filename:fname, realism_lora:REALISM_LORA, cam_motion:CAM_MOTION};
+  body.worker_target=WORKER_TARGET;
   if(REALISM_LORA) body.realism_strength=REALISM_STRENGTH;
   if(CAM_MOTION) body.cam_strength=CAM_STRENGTH;
   if(MODE==='i2v'){
@@ -1764,13 +1881,17 @@ $('#go').onclick=async()=>{
 // 중단
 $('#stop').onclick=async()=>{
   if(!currentJob) return;
-  const jobs=await (await fetch('/api/jobs')).json();
-  const j=jobs.jobs.find(x=>x.status==='queued'||x.status==='starting');
-  if(j){ await fetch('/api/cancel/'+j.id,{method:'POST'}); setJobUI({...j,status:'cancelled'}); }
+  const response=await fetch('/api/job/'+encodeURIComponent(currentJob));
+  const data=await response.json();
+  const j=data.job;
+  if(j&&(j.status==='queued'||j.status==='starting')){
+    await fetch('/api/cancel/'+encodeURIComponent(currentJob),{method:'POST'});
+    setJobUI({...j,status:'cancelled'});
+  }
 };
 
 // 스크립트 팝업 (Modal)
-function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 function showPrompt(j){
   if(!j||!j.prompt) return;
   const c=j.cfg||{};
@@ -1930,11 +2051,12 @@ function renderTracking(j){
   const phase=p.phase||(p.unavailable?'ComfyUI 상태 확인 불가':'진행 정보 수신 대기');
   const seed=j.seed!=null&&j.seed>=0?j.seed:(c.seed!=null&&c.seed>=0?c.seed:'랜덤');
   const strategy=c.strategy==='single'?'단일 생성':'세그먼트 분할';
-  let h='<div class="track-status"><b>'+esc(status)+'</b><span class="phint">'+esc(phase)+'</span></div>';
+  const workerLabel=(c.worker_target||j.worker_target)==='rtx5080'?'RTX 5080':'PGX Spark';
+  let h='<div class="track-identity"><div><small>작업 ID</small><strong>'+esc(j.id)+'</strong></div><div><small>Seed</small><strong>'+esc(seed)+'</strong></div><span class="track-worker">'+esc(workerLabel)+'</span></div>';
+  h+='<div class="track-status"><b>'+esc(status)+'</b><span class="phint">'+esc(phase)+'</span></div>';
   h+='<div class="track-progress'+(pct==null&&!p.unavailable?' pending':'')+'" aria-label="진행률"><i style="width:'+(pct==null?0:pct)+'%"></i></div>';
   h+='<div class="phint" style="margin-bottom:14px">'+(pct==null?(p.unavailable?'ComfyUI 진행 정보 확인 불가':'샘플러 준비 중 · 실측 진행률 수신 즉시 표시'):'실측 진행률: '+pct+'%')+(measuredEta!==null?' · 남은 시간 '+fmtEta(measuredEta):(pct!=null?' · 실측 속도 산정 중':''))+'</div>';
   h+='<div class="track-grid">';
-  h+=trackValue('작업 ID',j.id);
   h+=trackValue('ComfyUI Prompt ID',j.comfy_prompt_id);
   h+=trackValue('상태',j.comfy_status||j.status);
   h+=trackValue('경과 시간',fmtElapsed(p.elapsed!=null?p.elapsed:j.elapsed));
@@ -2134,6 +2256,8 @@ function loadRecent(){
     fetch('/api/refv/status').then(r=>r.json()).catch(()=>({ok:false,ref:null}))
   ]).then(([d,refD,refvD])=>{
     const jobs=(d.jobs||[]).slice(0,10);
+    const badge=$('#recentCountBadge');
+    if(badge) badge.textContent=jobs.length?String(Math.min(99,jobs.length)):'';
     const ref=refD.ref||null;
     const refv=refvD.refv||null;
     const list=$('#recentModalList');
@@ -2147,7 +2271,7 @@ function loadRecent(){
         <div class="rmeta">
           <div class="rprompt">고정 참조 (인물 고정)</div>
           <div class="rsub">
-            <span class="ok">등록됨</span> · ${ref.name||'인물'} · ${(ref.size/1048576).toFixed(1)}MB
+            <span class="ok">등록됨</span> · ${esc(ref.name||'인물')} · ${(ref.size/1048576).toFixed(1)}MB
           </div>
         </div>
         <button class="rbtn del" data-refdel="img">삭제</button>
@@ -2164,7 +2288,7 @@ function loadRecent(){
         <div class="rmeta">
           <div class="rprompt">고정 동영상 참조 (인물 동영상)</div>
           <div class="rsub">
-            <span class="ok">등록됨</span> · ${refv.name||'동영상'} · ${(refv.size/1048576).toFixed(1)}MB · ${refv.duration_s?refv.duration_s+'s':''}
+            <span class="ok">등록됨</span> · ${esc(refv.name||'동영상')} · ${(refv.size/1048576).toFixed(1)}MB · ${refv.duration_s?refv.duration_s+'s':''}
           </div>
         </div>
         <button class="rbtn del" data-refvdel="vid">삭제</button>
@@ -2186,6 +2310,8 @@ function loadRecent(){
       const c=j.cfg||{};
       const res=c.width&&c.height?`${c.width}×${c.height}`:'';
       const mode=j.mode==='i2v'?'I2V':'T2V';
+      const cardWorkerLabel=(c.worker_target||j.worker_target)==='rtx5080'?'RTX 5080':'PGX';
+      const queueLabel=j.status==='queued'&&j.queue_position?` · ${cardWorkerLabel} 큐 ${j.queue_position}번`:` · ${cardWorkerLabel}`;
       // Queued/error records do not have an MP4.  Avoid requesting their
       // video endpoint: a browser media error there makes real open/save
       // controls appear unreliable even though completed videos are available.
@@ -2199,9 +2325,9 @@ function loadRecent(){
       item.innerHTML=`
         ${thumb}
         <div class="rmeta">
-          <div class="rprompt" title="${(j.prompt||'').replace(/"/g,'&quot;')}">${j.prompt||j.id}</div>
+          <div class="rprompt" title="${esc(j.prompt||'')}">${esc(j.prompt||j.id)}</div>
           <div class="rsub">
-            <span class="${stCls}">${stTxt}</span> · ${fmtCreatedAt(j.created)}
+            <span class="${stCls}">${stTxt}</span>${queueLabel} · ${fmtCreatedAt(j.created)}
             ${j.status==='running'||j.status==='starting'||j.status==='queued'
               ?` · <b>${(finiteProgressNumber(j.progress&&j.progress.pct,0,100)!==null&&!j.progress.unavailable?Math.round(finiteProgressNumber(j.progress.pct,0,100))+'%':'—')}</b>`
               :''}
@@ -2240,6 +2366,7 @@ function loadRecent(){
   }).catch(()=>{});
 }
 loadRecent(); setInterval(loadRecent, 15000);
+refreshWorkerStatus(); setInterval(refreshWorkerStatus, 5000);
 
 // 고정 이미지와 동영상을 모두 복원한다.
 refreshReferenceState().then(renderSelectedReference);

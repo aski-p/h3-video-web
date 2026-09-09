@@ -1,19 +1,22 @@
 """Vercel 백엔드 프록시 — API 요청을 실제 서버로 전달."""
 import json
+import hmac
 import os
 import urllib.request
 import urllib.error
 
-# 실제 백엔드 URL (네트워크 접근이 필요한 경우 환경변수로 지정)
-# Tailscale MagicDNS: PGX 머신의 Tailscale IP (영구적, 터널 불필요)
-BACKEND = os.environ.get("H3_BACKEND", "https://thinkstationpgx-11d3.tailccac79.ts.net")
+# NAS-only production data plane: the stable Tailscale Funnel is authoritative.
+# Do not allow a stale deployment environment variable to revive a retired tunnel.
+BACKEND = "https://thinkstationpgx-11d3.tailccac79.ts.net"
 ORIGIN_HEADER = "X-H3-Origin-Token"
 ORIGIN_SECRET = os.environ.get("H3_ORIGIN_SECRET", "")
+WORKER_HEADER = "X-H3-Worker-Token"
+WORKER_SECRET = os.environ.get("H3_WORKER_TOKEN", "")
 
-# Completed MP4s are immutable per job ID. Keep a small shared-cache window so
-# repeated playback/seek does not reopen a NAS/CIFS path, while delete requests
-# cannot remain visible for a long time without an explicit CDN purge.
-PUBLIC_VIDEO_CACHE_CONTROL = "public, max-age=0, s-maxage=600, stale-while-revalidate=60"
+# Byte ranges must never enter Vercel's shared cache. The CDN can replay a
+# cached partial body as ``200 + Content-Range`` instead of the upstream 206,
+# which WebKit correctly rejects as an invalid media response.
+PUBLIC_VIDEO_CACHE_CONTROL = "private, no-store"
 PUBLIC_THUMBNAIL_CACHE_CONTROL = "public, max-age=31536000, immutable"
 PRIVATE_CACHE_CONTROL = "private, no-store"
 
@@ -32,6 +35,9 @@ def _proxy_response(r, start_response, is_video=False, cache_control=PRIVATE_CAC
                ("Access-Control-Allow-Origin", "*"),
                ("Cache-Control", cache_control)]
     if is_video:
+        headers.extend([("Vary", "Range"),
+                        ("CDN-Cache-Control", "no-store"),
+                        ("Vercel-CDN-Cache-Control", "no-store")])
         for name in ("Content-Disposition", "Content-Length", "Content-Range", "Accept-Ranges"):
             value = r.headers.get(name)
             if value:
@@ -62,13 +68,23 @@ def proxy(environ, start_response):
         return [err]
     path = environ.get("PATH_INFO", "/")
     method = environ.get("REQUEST_METHOD", "GET")
+    is_worker = path.startswith("/api/worker/")
+    if is_worker:
+        supplied = environ.get("HTTP_AUTHORIZATION", "")
+        expected = f"Bearer {WORKER_SECRET}" if WORKER_SECRET else ""
+        if not expected or not hmac.compare_digest(supplied, expected):
+            err = json.dumps({"ok": False, "error": "unauthorized worker"}).encode()
+            start_response("401", [("Content-Type", "application/json"),
+                                   ("Cache-Control", PRIVATE_CACHE_CONTROL)])
+            return [err]
     body = b""
     if environ.get("CONTENT_LENGTH"):
         n = int(environ["CONTENT_LENGTH"])
         body = environ.get("wsgi.input", b"").read(n)
 
     # Playback and download must retain range semantics through Vercel.
-    is_video = path.startswith("/api/download/") or path.startswith("/api/view/") or path == "/api/refv"
+    is_video = (path.startswith("/api/download/") or path.startswith("/api/view/")
+                or path.startswith("/api/worker/input/") or path == "/api/refv")
     cache_control = _cache_control_for_path(path)
     query = environ.get("QUERY_STRING", "")
     url = BACKEND + path + (("?" + query) if query else "")
@@ -76,6 +92,12 @@ def proxy(environ, start_response):
     # a browser-provided header with the same name.
     headers = {"Content-Type": environ.get("CONTENT_TYPE", "application/json"),
                ORIGIN_HEADER: ORIGIN_SECRET}
+    if is_worker:
+        headers[WORKER_HEADER] = WORKER_SECRET
+        for source, target in (("HTTP_X_H3_EXECUTION_ID", "X-H3-Execution-Id"),
+                               ("HTTP_X_H3_LEASE_TOKEN", "X-H3-Lease-Token")):
+            if environ.get(source):
+                headers[target] = environ[source]
     if environ.get("HTTP_RANGE"):
         headers["Range"] = environ["HTTP_RANGE"]
     req = urllib.request.Request(url, data=body if method == "POST" else None,

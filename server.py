@@ -11,6 +11,8 @@
 - 생성 방식: 연속 단일 생성 / 세그먼트 분할 선택
 """
 import json
+import base64
+import copy
 import hashlib
 import hmac
 import math
@@ -26,6 +28,7 @@ import urllib.request
 import urllib.error
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from typing import Any, TypeGuard
 
 
 try:
@@ -130,9 +133,544 @@ LOCK = threading.Lock()
 JOBS_DIR = os.path.join(os.path.expanduser("~"), "h3-web", "jobs")
 QUEUE = []            # FIFO: 대기 중인 job_id
 MAX_PENDING_JOBS = 5  # 실행 중 작업은 제외하고, 대기열만 최대 5개
-QUEUE_RESERVATIONS = 0  # 요청 처리 중인 admission slot; 동시 요청 우회 방지
+QUEUE_RESERVATIONS = {"pgx": 0, "rtx5080": 0}  # worker별 admission slot
 QUEUE_LOCK = threading.Lock()
-ACTIVE = [None]       # 실행 중인 job_id (동시 1개)
+ACTIVE = [None]       # 실행 중인 PGX job_id (동시 1개)
+
+# Optional Windows RTX 5080 outbound worker.  The worker never exposes
+# ComfyUI/SSH inbound; it polls the public coordinator and is eligible only
+# while server-observed heartbeats prove that both ComfyUI and the pinned model
+# are ready.
+WORKER_HEADER = "X-H3-Worker-Token"
+WORKER_EXECUTION_HEADER = "X-H3-Execution-Id"
+WORKER_LEASE_HEADER = "X-H3-Lease-Token"
+WORKER_SECRET = os.environ.get("H3_WORKER_TOKEN", "")
+WORKER_UPLOAD_CHUNK_MAX = 2 * 1024 * 1024
+REMOTE_UPLOAD_LOCK = threading.Lock()
+JOB_SAVE_LOCK = threading.Lock()
+RTX5080_WORKER_ID = "desktop-rtx5080"
+RTX5080_MODEL_PROFILE = "minimax-h3-pgx-exact-v1"
+WORKER_HEARTBEAT_TTL_SECONDS = 15.0
+RTX5080_LEASE_SECONDS = 60.0
+RTX5080_MAX_ATTEMPTS = 2
+WORKERS = {}
+
+
+def rtx5080_worker_status(now=None):
+    now = time.time() if now is None else float(now)
+    with LOCK:
+        record = dict(WORKERS.get(RTX5080_WORKER_ID) or {})
+    last_seen = record.get("last_seen")
+    age = None if last_seen is None else max(0.0, now - float(last_seen))
+    online = age is not None and age <= WORKER_HEARTBEAT_TTL_SECONDS
+    eligible = bool(
+        online
+        and record.get("gpu") == "NVIDIA GeForce RTX 5080"
+        and int(record.get("vram_mib") or 0) >= 15000
+        and record.get("comfy_up") is True
+        and record.get("model_ready") is True
+        and record.get("generation_verified") is True
+        and record.get("model_profile") == RTX5080_MODEL_PROFILE
+        and {"t2v", "i2v"}.issubset(set(record.get("modes") or ()))
+    )
+    return {
+        "id": RTX5080_WORKER_ID,
+        "label": "RTX 5080 · MiniMax H3",
+        "online": online,
+        "eligible": eligible,
+        "busy": bool(record.get("busy")) if online else False,
+        "gpu": record.get("gpu") or "NVIDIA GeForce RTX 5080",
+        "vram_mib": record.get("vram_mib"),
+        "generation_verified": bool(record.get("generation_verified")),
+        "model_profile": RTX5080_MODEL_PROFILE,
+        "modes": list(record.get("modes") or ()),
+        "last_seen_age_seconds": round(age, 1) if age is not None else None,
+    }
+
+
+def record_worker_heartbeat(worker_id, payload, now=None):
+    if worker_id != RTX5080_WORKER_ID or not isinstance(payload, dict):
+        raise ValueError("unknown worker")
+    gpu = payload.get("gpu")
+    profile = payload.get("model_profile")
+    modes = payload.get("modes")
+    if gpu != "NVIDIA GeForce RTX 5080" or profile != RTX5080_MODEL_PROFILE:
+        raise ValueError("worker capability mismatch")
+    if not isinstance(modes, list) or any(mode not in ("t2v", "i2v") for mode in modes):
+        raise ValueError("invalid worker modes")
+    if (payload.get("comfy_up") not in (True, False)
+            or payload.get("model_ready") not in (True, False)
+            or payload.get("generation_verified") not in (True, False)):
+        raise ValueError("invalid worker readiness")
+    if payload.get("busy") not in (True, False):
+        raise ValueError("invalid worker busy state")
+    vram_mib = payload.get("vram_mib")
+    if isinstance(vram_mib, bool) or not isinstance(vram_mib, int) or not 8192 <= vram_mib <= 65536:
+        raise ValueError("invalid worker VRAM")
+    record = {
+        "last_seen": time.time() if now is None else float(now),
+        "gpu": gpu,
+        "vram_mib": vram_mib,
+        "comfy_up": payload["comfy_up"],
+        "model_ready": payload["model_ready"],
+        "generation_verified": payload["generation_verified"],
+        "busy": payload["busy"],
+        "modes": sorted(set(modes)),
+        "model_profile": profile,
+    }
+    with LOCK:
+        WORKERS[worker_id] = record
+    return rtx5080_worker_status(now=record["last_seen"])
+
+
+def pop_next_pgx_job(jobs, queue):
+    """Remove the oldest queued PGX job while leaving RTX work untouched."""
+    for index, jid in enumerate(tuple(queue)):
+        job = jobs.get(jid) or {}
+        if job.get("status") != "queued":
+            continue
+        if (job.get("cfg") or {}).get("worker_target", "pgx") == "pgx":
+            queue.pop(index)
+            return jid
+    return None
+
+
+def queued_jobs_for_target(jobs, queue, worker_target):
+    return sum(
+        1 for jid in queue
+        if (jobs.get(jid) or {}).get("status") == "queued"
+        and (jobs.get(jid, {}).get("cfg") or {}).get("worker_target", "pgx") == worker_target
+    )
+
+
+def worker_queue_snapshot(jobs=None, queue=None):
+    jobs = JOBS if jobs is None else jobs
+    if queue is None:
+        with QUEUE_LOCK:
+            queue = tuple(QUEUE)
+    else:
+        queue = tuple(queue)
+    counters = {"pgx": 0, "rtx5080": 0}
+    positions = {}
+    for jid in queue:
+        job = jobs.get(jid) or {}
+        target = (job.get("cfg") or {}).get("worker_target", "pgx")
+        if target not in counters or job.get("status") != "queued":
+            continue
+        counters[target] += 1
+        positions[jid] = counters[target]
+    rtx_active = next((
+        jid for jid, job in jobs.items()
+        if job.get("status") == "running"
+        and (job.get("cfg") or {}).get("worker_target") == "rtx5080"
+    ), None)
+    return {
+        "positions": positions,
+        "pgx": {"pending": counters["pgx"], "active_job": ACTIVE[0]},
+        "rtx5080": {"pending": counters["rtx5080"], "active_job": rtx_active},
+    }
+
+
+def _rtx5080_lease_hash(token):
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+def _public_rtx5080_claim(job):
+    private_keys = {
+        "lease_sha256", "lease_expires_at", "execution_id",
+        "completed_execution_id", "completed_lease_sha256", "_persist_version",
+        "upload_path", "upload_expected_sha256", "upload_expected_size",
+        "upload_received", "upload_started_at",
+    }
+    public = {k: v for k, v in job.items() if k not in private_keys}
+    cfg = dict(public.get("cfg") or {})
+    for key in tuple(cfg):
+        if key.endswith("_source_path"):
+            cfg.pop(key, None)
+    public["cfg"] = cfg
+    return public
+
+
+def _active_rtx5080_lease_locked(now):
+    return next((
+        job for job in JOBS.values()
+        if job.get("status") == "running"
+        and job.get("worker_id") == RTX5080_WORKER_ID
+        and float(job.get("lease_expires_at") or 0) >= now
+    ), None)
+
+
+def claim_rtx5080_job(now=None, token_factory=None):
+    """Atomically claim one RTX job only when no live server lease exists."""
+    now = time.time() if now is None else float(now)
+    token_factory = token_factory or (lambda: uuid.uuid4().hex + uuid.uuid4().hex)
+    execution_id = token_factory()
+    lease_token = token_factory()
+    with QUEUE_LOCK:
+        with LOCK:
+            worker = WORKERS.get(RTX5080_WORKER_ID) or {}
+            fresh = now - float(worker.get("last_seen", 0)) <= WORKER_HEARTBEAT_TTL_SECONDS
+            ready = (
+                fresh and not worker.get("busy")
+                and _active_rtx5080_lease_locked(now) is None
+                and worker.get("gpu") == "NVIDIA GeForce RTX 5080"
+                and int(worker.get("vram_mib") or 0) >= 15000
+                and worker.get("comfy_up") is True
+                and worker.get("model_ready") is True
+                and worker.get("generation_verified") is True
+                and worker.get("model_profile") == RTX5080_MODEL_PROFILE
+                and set(worker.get("modes") or ()) >= {"t2v", "i2v"}
+            )
+            if not ready:
+                return None
+            candidate_index = None
+            jid = None
+            for index, candidate in enumerate(QUEUE):
+                job = JOBS.get(candidate) or {}
+                if (job.get("status") == "queued"
+                        and (job.get("cfg") or {}).get("worker_target") == "rtx5080"):
+                    candidate_index, jid = index, candidate
+                    break
+            if jid is None:
+                return None
+            assert candidate_index is not None
+            job = JOBS[jid]
+            job.update({
+                "status": "running",
+                "worker_id": RTX5080_WORKER_ID,
+                "execution_id": execution_id,
+                "lease_sha256": _rtx5080_lease_hash(lease_token),
+                "lease_expires_at": now + RTX5080_LEASE_SECONDS,
+                "attempts": int(job.get("attempts") or 0) + 1,
+                "started": now,
+            })
+            QUEUE.pop(candidate_index)
+            worker["busy"] = True
+            public_job = _public_rtx5080_claim(job)
+    _save_job(jid)
+    return {"job": public_job, "execution_id": execution_id, "lease_token": lease_token}
+
+
+def _valid_rtx5080_lease_locked(job, execution_id, lease_token, now):
+    expected = str((job or {}).get("lease_sha256") or "")
+    return bool(
+        expected and job.get("status") == "running"
+        and job.get("worker_id") == RTX5080_WORKER_ID
+        and job.get("execution_id") == execution_id
+        and hmac.compare_digest(expected, _rtx5080_lease_hash(lease_token))
+        and float(job.get("lease_expires_at") or 0) >= now
+    )
+
+
+def validate_rtx5080_lease(jid, execution_id, lease_token, now=None):
+    now = time.time() if now is None else float(now)
+    with LOCK:
+        return _valid_rtx5080_lease_locked(
+            JOBS.get(jid) or {}, execution_id, lease_token, now
+        )
+
+
+def renew_rtx5080_lease(jid, execution_id, lease_token, now=None):
+    now = time.time() if now is None else float(now)
+    with LOCK:
+        job = JOBS.get(jid) or {}
+        if not _valid_rtx5080_lease_locked(job, execution_id, lease_token, now):
+            return False
+        job["lease_expires_at"] = now + RTX5080_LEASE_SECONDS
+    _save_job(jid)
+    return True
+
+
+def update_rtx5080_progress(jid, execution_id, lease_token, payload, now=None):
+    now = time.time() if now is None else float(now)
+    if not validate_rtx5080_lease(jid, execution_id, lease_token, now=now):
+        raise PermissionError("stale or invalid RTX 5080 lease")
+    if not isinstance(payload, dict):
+        raise ValueError("invalid progress payload")
+    value, maximum = payload.get("value"), payload.get("max")
+    segment_index = payload.get("segment_index", 0)
+    segments = payload.get("segments", 1)
+    if (not _finite_real(value) or not _finite_real(maximum)
+            or float(maximum) <= 0 or float(value) < 0 or float(value) > float(maximum)):
+        raise ValueError("invalid sampler measurement")
+    if (isinstance(segment_index, bool) or not isinstance(segment_index, int)
+            or isinstance(segments, bool) or not isinstance(segments, int)
+            or segments < 1 or not 0 <= segment_index < segments):
+        raise ValueError("invalid segment measurement")
+    value, maximum = float(value), float(maximum)
+    overall = ((segment_index + value / maximum) / segments) * 100.0
+    with LOCK:
+        job = JOBS.get(jid) or {}
+        if not _valid_rtx5080_lease_locked(job, execution_id, lease_token, now):
+            raise PermissionError("stale RTX 5080 execution")
+        previous = job.get("progress") or {}
+        previous_segment = int(previous.get("segment_index") or 0)
+        previous_value = previous.get("value")
+        if segment_index < previous_segment or (
+            segment_index == previous_segment and _finite_real(previous_value)
+            and value < float(previous_value)
+        ):
+            raise ValueError("sampler progress cannot regress")
+        started = float(job.get("started") or now)
+        phase = re.sub(r"[^0-9A-Za-z가-힣\s./:_()\-]", "", str(payload.get("phase") or ""))[:80].strip()
+        job["progress"] = _prog(
+            jid, phase or "영상 생성 중",
+            pct=round(overall, 2), value=value, max=maximum,
+            segment_index=segment_index, segments=segments,
+            elapsed=max(0.0, now - started), last_progress_at=now,
+        )
+        job["lease_expires_at"] = now + RTX5080_LEASE_SECONDS
+        public = _public_rtx5080_claim(job)
+    _save_job(jid)
+    return public
+
+
+def _rtx5080_upload_path(jid):
+    if not valid_job_id(jid):
+        raise ValueError("invalid job id")
+    path = os.path.join(OUT_DIR, jid, f"{jid}.remote.part")
+    if not _is_under_nas(path):
+        raise RuntimeError("remote upload path is outside NAS")
+    return path
+
+
+def begin_rtx5080_upload(jid, execution_id, lease_token, size, sha256, now=None):
+    now = time.time() if now is None else float(now)
+    if not validate_rtx5080_lease(jid, execution_id, lease_token, now=now):
+        raise PermissionError("stale or invalid RTX 5080 lease")
+    if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= 8 * 1024 ** 3:
+        raise ValueError("invalid upload size")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(sha256 or "")):
+        raise ValueError("invalid upload sha256")
+    path = _rtx5080_upload_path(jid)
+    with REMOTE_UPLOAD_LOCK:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with LOCK:
+            job = JOBS.get(jid) or {}
+            if not _valid_rtx5080_lease_locked(job, execution_id, lease_token, now):
+                raise PermissionError("stale RTX 5080 execution")
+            with open(path, "wb"):
+                pass
+            job.update(upload_path=path, upload_expected_size=size,
+                       upload_expected_sha256=sha256, upload_received=0,
+                       lease_expires_at=now + RTX5080_LEASE_SECONDS)
+        _save_job(jid)
+    return {"received": 0, "chunk_max": WORKER_UPLOAD_CHUNK_MAX}
+
+
+def append_rtx5080_upload(jid, execution_id, lease_token, offset, data, chunk_sha256, now=None):
+    fixed_now = now is not None
+    now = time.time() if now is None else float(now)
+    if not validate_rtx5080_lease(jid, execution_id, lease_token, now=now):
+        raise PermissionError("stale or invalid RTX 5080 lease")
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("invalid upload offset")
+    if not isinstance(data, bytes) or not data or len(data) > WORKER_UPLOAD_CHUNK_MAX:
+        raise ValueError("invalid upload chunk")
+    if not hmac.compare_digest(hashlib.sha256(data).hexdigest(), str(chunk_sha256 or "")):
+        raise ValueError("upload chunk sha256 mismatch")
+    with REMOTE_UPLOAD_LOCK:
+        with LOCK:
+            job = JOBS.get(jid) or {}
+            if not _valid_rtx5080_lease_locked(job, execution_id, lease_token, now):
+                raise PermissionError("stale RTX 5080 execution")
+            path = job.get("upload_path")
+            received = int(job.get("upload_received") or 0)
+            expected_size = int(job.get("upload_expected_size") or 0)
+        if not path or not _is_under_nas(path) or offset > received or offset + len(data) > expected_size:
+            raise ValueError("invalid upload range")
+        if offset < received:
+            if offset + len(data) > received:
+                raise ValueError("overlapping upload retry")
+            with open(path, "rb") as existing:
+                existing.seek(offset)
+                if existing.read(len(data)) != data:
+                    raise ValueError("upload retry bytes mismatch")
+            return {"received": received}
+        with open(path, "ab") as target:
+            target.write(data)
+            target.flush()
+            os.fsync(target.fileno())
+        received += len(data)
+        commit_now = now if fixed_now else time.time()
+        with LOCK:
+            job = JOBS.get(jid) or {}
+            if not _valid_rtx5080_lease_locked(job, execution_id, lease_token, commit_now):
+                raise PermissionError("stale RTX 5080 execution")
+            job["upload_received"] = received
+            job["lease_expires_at"] = commit_now + RTX5080_LEASE_SECONDS
+        _save_job(jid)
+    return {"received": received}
+
+
+def _validate_remote_mp4(path):
+    if not os.path.isfile(path) or os.path.getsize(path) < 1024:
+        raise ValueError("remote result is not a valid MP4")
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=codec_name,width,height:format=duration",
+         "-of", "json", path],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    if probe.returncode != 0:
+        raise ValueError("remote result failed MP4 probing")
+    try:
+        metadata = json.loads(probe.stdout or "{}")
+        stream = (metadata.get("streams") or [])[0]
+        duration = float((metadata.get("format") or {}).get("duration") or 0)
+        if not stream.get("codec_name") or int(stream.get("width") or 0) <= 0 or int(stream.get("height") or 0) <= 0 or duration <= 0:
+            raise ValueError
+    except (IndexError, KeyError, TypeError, ValueError):
+        raise ValueError("remote result has invalid video metadata") from None
+    decode = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", path, "-f", "null", "-"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        timeout=600, check=False,
+    )
+    if decode.returncode != 0:
+        raise ValueError("remote result failed full video decode")
+
+
+def complete_rtx5080_upload(jid, execution_id, lease_token, now=None):
+    fixed_now = now is not None
+    now = time.time() if now is None else float(now)
+    lease_hash = _rtx5080_lease_hash(lease_token)
+    with LOCK:
+        existing = JOBS.get(jid) or {}
+        if (existing.get("status") == "done"
+                and existing.get("completed_execution_id") == execution_id
+                and hmac.compare_digest(str(existing.get("completed_lease_sha256") or ""), lease_hash)):
+            return _public_rtx5080_claim(existing)
+    if not validate_rtx5080_lease(jid, execution_id, lease_token, now=now):
+        raise PermissionError("stale or invalid RTX 5080 lease")
+    with REMOTE_UPLOAD_LOCK:
+        with LOCK:
+            job = JOBS.get(jid) or {}
+            if (job.get("status") == "done"
+                    and job.get("completed_execution_id") == execution_id
+                    and hmac.compare_digest(str(job.get("completed_lease_sha256") or ""), lease_hash)):
+                return _public_rtx5080_claim(job)
+            if not _valid_rtx5080_lease_locked(job, execution_id, lease_token, now):
+                raise PermissionError("stale RTX 5080 execution")
+            path = job.get("upload_path")
+            expected_size = int(job.get("upload_expected_size") or 0)
+            expected_hash = str(job.get("upload_expected_sha256") or "")
+            received = int(job.get("upload_received") or 0)
+            started = float(job.get("started") or now)
+        if (not path or not os.path.isfile(path) or received != expected_size
+                or os.path.getsize(path) != expected_size or file_sha256(path) != expected_hash):
+            raise ValueError("remote upload final verification failed")
+        _validate_remote_mp4(path)
+        commit_now = now if fixed_now else time.time()
+        with LOCK:
+            job = JOBS.get(jid) or {}
+            if not _valid_rtx5080_lease_locked(job, execution_id, lease_token, commit_now):
+                raise PermissionError("stale RTX 5080 execution")
+        archive = archive_final_to_nas(jid, path)
+        with LOCK:
+            job = JOBS[jid]
+            job.update(
+                status="done", file=os.path.basename(archive["src"]), src=archive["src"],
+                size=archive["size"], sha256=archive["sha256"], nas_saved=True,
+                storage="nas", elapsed=round(max(0.0, now - started), 1),
+                progress=_prog(jid, "생성 완료", completed=True, eta=0),
+                completed_execution_id=execution_id, completed_lease_sha256=lease_hash,
+                lease_sha256=None, lease_expires_at=None, execution_id=None,
+                upload_path=None, upload_expected_sha256=None,
+                upload_expected_size=None, upload_received=None,
+            )
+            worker = WORKERS.get(RTX5080_WORKER_ID)
+            if worker:
+                worker["busy"] = False
+            public = _public_rtx5080_claim(job)
+        _save_job(jid)
+    return public
+
+
+def fail_rtx5080_job(jid, execution_id, lease_token, error, retryable=True, now=None):
+    now = time.time() if now is None else float(now)
+    if not validate_rtx5080_lease(jid, execution_id, lease_token, now=now):
+        raise PermissionError("stale or invalid RTX 5080 lease")
+    message = "RTX 5080 worker generation failed"
+    with LOCK:
+        job = JOBS.get(jid) or {}
+        if not _valid_rtx5080_lease_locked(job, execution_id, lease_token, now):
+            raise PermissionError("stale RTX 5080 execution")
+        upload_path = job.get("upload_path")
+        should_retry = bool(retryable) and int(job.get("attempts") or 0) < RTX5080_MAX_ATTEMPTS
+        job.update(
+            status="queued" if should_retry else "error",
+            error=None if should_retry else message,
+            progress=_prog(jid, "RTX 5080 재시도 대기" if should_retry else "RTX 5080 생성 오류"),
+            lease_sha256=None, lease_expires_at=None, execution_id=None,
+            upload_path=None, upload_expected_sha256=None,
+            upload_expected_size=None, upload_received=None,
+        )
+        worker = WORKERS.get(RTX5080_WORKER_ID)
+        if worker:
+            worker["busy"] = False
+    if upload_path:
+        with REMOTE_UPLOAD_LOCK:
+            if _is_under_nas(upload_path):
+                try:
+                    os.remove(upload_path)
+                except FileNotFoundError:
+                    pass
+    if should_retry:
+        with QUEUE_LOCK:
+            if jid not in QUEUE:
+                QUEUE.append(jid)
+    _save_job(jid)
+    return {"retrying": should_retry, "job": _public_rtx5080_claim(job)}
+
+
+def requeue_expired_rtx5080_jobs(now=None):
+    now = time.time() if now is None else float(now)
+    requeued = []
+    terminal = []
+    expired_paths = []
+    with LOCK:
+        for jid, job in JOBS.items():
+            if (job.get("status") != "running"
+                    or job.get("worker_id") != RTX5080_WORKER_ID
+                    or float(job.get("lease_expires_at") or 0) >= now):
+                continue
+            if job.get("upload_path"):
+                expired_paths.append(job["upload_path"])
+            is_terminal = int(job.get("attempts") or 0) >= RTX5080_MAX_ATTEMPTS
+            job.update(
+                status="error" if is_terminal else "queued",
+                error="RTX 5080 worker 연결이 만료됐습니다" if is_terminal else None,
+                worker_id=None, execution_id=None, lease_sha256=None, lease_expires_at=None,
+                upload_path=None, upload_expected_sha256=None,
+                upload_expected_size=None, upload_received=None,
+            )
+            (terminal if is_terminal else requeued).append(jid)
+        if requeued or terminal:
+            worker = WORKERS.get(RTX5080_WORKER_ID)
+            if worker:
+                worker["busy"] = any(
+                    other.get("status") == "running"
+                    and other.get("worker_id") == RTX5080_WORKER_ID
+                    and float(other.get("lease_expires_at") or 0) >= now
+                    for other in JOBS.values()
+                )
+    if expired_paths:
+        with REMOTE_UPLOAD_LOCK:
+            for path in expired_paths:
+                if _is_under_nas(path):
+                    try:
+                        os.remove(path)
+                    except FileNotFoundError:
+                        pass
+    if requeued:
+        with QUEUE_LOCK:
+            for jid in requeued:
+                if jid not in QUEUE:
+                    QUEUE.append(jid)
+    for jid in requeued + terminal:
+        _save_job(jid)
+    return requeued
 
 
 class JobCancelled(RuntimeError):
@@ -168,20 +706,43 @@ def _job_file(jid):
 
 
 def _save_job(jid):
-    """job 상태를 JSON 파일에 적음 (LOCK 밖에서 호출)."""
-    with LOCK:
-        j = JOBS.get(jid)
-        if not j:
-            return
-        snapshot = dict(j)
+    """Persist only the newest version; stale concurrent writers discard themselves."""
+    tmp = None
     try:
+        with LOCK:
+            job = JOBS.get(jid)
+            if not job:
+                return
+            version = int(job.get("_persist_version") or 0) + 1
+            job["_persist_version"] = version
+            snapshot = copy.deepcopy(job)
         os.makedirs(JOBS_DIR, exist_ok=True)
-        tmp = _job_file(jid) + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(snapshot, f, ensure_ascii=False)
-        os.replace(tmp, _job_file(jid))
-    except Exception as e:
-        log(f"  job 파일 저장 실패: {e}")
+        tmp = _job_file(jid) + f".{uuid.uuid4().hex}.tmp"
+        with open(tmp, "x", encoding="utf-8") as stream:
+            json.dump(snapshot, stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        with JOB_SAVE_LOCK:
+            with LOCK:
+                current = JOBS.get(jid)
+                is_current = bool(
+                    current
+                    and int(current.get("_persist_version") or 0) == version
+                    and current == snapshot
+                )
+            if not is_current:
+                os.remove(tmp)
+                return
+            os.replace(tmp, _job_file(jid))
+            tmp = None
+    except Exception as exc:
+        log(f"  job 파일 저장 실패: {exc}")
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except FileNotFoundError:
+                pass
 
 
 def update_job(jid, **kw):
@@ -256,28 +817,33 @@ def _restore_jobs():
     log(f"  job {len(JOBS)}개 복원 ({JOBS_DIR})")
 
 
+def begin_pgx_job(jid, now=None):
+    now = time.time() if now is None else float(now)
+    with LOCK:
+        job = JOBS.get(jid)
+        if not job or job.get("status") != "queued":
+            return None
+        cfg = dict(job["cfg"])
+        ACTIVE[0] = jid
+        job["started"] = now
+        job["status"] = "starting"
+        return cfg
+
+
 def queue_worker():
-    """FIFO 워커: 대기열에서 하나 꺼내 실행 (동시 1개)."""
+    """FIFO PGX 워커: RTX 작업을 건드리지 않고 PGX 작업만 실행."""
     while True:
         with QUEUE_LOCK:
-            jid = QUEUE.pop(0) if QUEUE else None
+            jid = pop_next_pgx_job(JOBS, QUEUE)
         if jid is None:
             with LOCK:
                 ACTIVE[0] = None
             time.sleep(0.5)
             continue
-        with LOCK:
-            # Cancellation may win just after the worker popped the queue item.
-            # Never resurrect that job as `starting`.
-            if JOBS.get(jid, {}).get("status") == "cancelled":
-                continue
-            ACTIVE[0] = jid
+        cfg = begin_pgx_job(jid)
+        if cfg is None:
+            continue
         try:
-            with LOCK:
-                cfg = dict(JOBS[jid]["cfg"])
-                started = time.time()
-                JOBS[jid]["started"] = started
-                JOBS[jid]["status"] = "starting"
             _save_job(jid)
             log(f"job {jid} 실행 시작 (worker)")
             run_job(jid, cfg)
@@ -295,7 +861,7 @@ def log(msg):
     print(time.strftime("[%H:%M:%S] ") + msg, flush=True)
 
 
-def _finite_real(value):
+def _finite_real(value: Any) -> TypeGuard[int | float]:
     """Accept bounded JSON numbers; bool and overflow/non-finite values fail closed."""
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return False
@@ -305,7 +871,7 @@ def _finite_real(value):
         return False
 
 
-def _prog(job_id, phase, **extra):
+def _prog(job_id: str, phase: str, **extra: Any) -> dict[str, Any]:
     """Build an honest progress payload; never estimate percentage from time/queue.
 
     ``sampler_pct`` is accepted only when it originated in the matching
@@ -339,7 +905,8 @@ def _prog(job_id, phase, **extra):
     # Keeping it makes the unavailable state auditable without turning old data
     # into a current progress estimate.
     if extra.get("unavailable"):
-        previous = j.get("progress") if isinstance(j.get("progress"), dict) else {}
+        raw_previous = j.get("progress")
+        previous: dict[str, Any] = raw_previous if isinstance(raw_previous, dict) else {}
         for key in (
             "value", "max", "node", "sampler_node", "last_progress_at",
             "sampler_pct", "sampler_step_seconds",
@@ -349,13 +916,13 @@ def _prog(job_id, phase, **extra):
     return out
 
 
-def _running_lifecycle_progress(job_id, phase, **extra):
+def _running_lifecycle_progress(job_id: str, phase: str, **extra: Any) -> dict[str, Any]:
     """Refresh lifecycle metadata without erasing the last sampler sample."""
     progress = _prog(job_id, phase, **extra)
     with LOCK:
         job = JOBS.get(job_id) or {}
-        previous = job.get("progress") if isinstance(job.get("progress"), dict) else {}
-        previous = dict(previous)
+        raw_previous = job.get("progress")
+        previous: dict[str, Any] = dict(raw_previous) if isinstance(raw_previous, dict) else {}
     # Raw sampler observations remain auditable across an unavailable state and
     # provide the baseline for the next real WebSocket progress event. They do
     # not by themselves revive the display percentage or ETA.
@@ -379,7 +946,7 @@ def _running_lifecycle_progress(job_id, phase, **extra):
     return progress
 
 
-def apply_comfy_event(job_id, prompt_id, event, seg_done=0, segments=1):
+def apply_comfy_event(job_id: str, prompt_id: str, event: Any, seg_done: int = 0, segments: int = 1) -> bool:
     """Apply one ComfyUI WebSocket event only when it belongs to ``prompt_id``.
 
     ComfyUI broadcasts events for all clients. Prompt-id equality is the sole
@@ -387,7 +954,8 @@ def apply_comfy_event(job_id, prompt_id, event, seg_done=0, segments=1):
     """
     if not isinstance(event, dict):
         return False
-    data = event.get("data") or {}
+    raw_data = event.get("data")
+    data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
     if str(data.get("prompt_id") or "") != str(prompt_id):
         return False
     typ = event.get("type")
@@ -399,8 +967,8 @@ def apply_comfy_event(job_id, prompt_id, event, seg_done=0, segments=1):
         node = data.get("node")
         with LOCK:
             job = JOBS.get(job_id) or {}
-            previous = job.get("progress") if isinstance(job.get("progress"), dict) else {}
-            previous = dict(previous)
+            raw_previous = job.get("progress")
+            previous: dict[str, Any] = dict(raw_previous) if isinstance(raw_previous, dict) else {}
         previous_value = previous.get("value")
         previous_maximum = previous.get("max")
         previous_sampler_node = previous.get("sampler_node", previous.get("node"))
@@ -562,6 +1130,25 @@ def snap_len(seconds):
     """seconds를 17k+5 프레임 그리드에 스냅 (24fps 기준)."""
     raw = max(124, round(seconds * 24))
     return raw + (5 - (raw % 17)) % 17
+
+
+def segment_frame_plan(total_seconds, segment_seconds, strategy):
+    """Choose H3-compatible segment frames while minimizing duration and split overflow."""
+    if strategy == STRATEGY_SINGLE:
+        return [snap_len(total_seconds)]
+    target = max(1, round(float(total_seconds) * 24))
+    maximum_segments = max(1, math.ceil(float(total_seconds) / max(1, float(segment_seconds))))
+    segment_cap = snap_len(segment_seconds)
+    candidates = []
+    for count in range(1, maximum_segments + 1):
+        minimum_units = 7 * count  # 5 + 17*7 == 124, the H3 minimum.
+        units = max(minimum_units, round((target - 5 * count) / 17))
+        base, extra = divmod(units, count)
+        frames = [5 + 17 * (base + (1 if index < extra else 0)) for index in range(count)]
+        duration_error = abs(sum(frames) - target)
+        overflow = sum(max(0, frame - segment_cap) for frame in frames)
+        candidates.append((duration_error > 9, duration_error + overflow, duration_error, -count, frames))
+    return min(candidates, key=lambda item: item[:4])[4]
 
 
 def estimate_seconds(total_seconds, seg_seconds, strategy, steps):
@@ -779,7 +1366,7 @@ CAM_LORA_3000 = "cam_motion_3000.safetensors"
 CAM_LORA_STRENGTH = 1.0
 
 
-def build_workflow(text, negative, width, height, length, steps, seed, image_name=None, prefix="h3", video_name=None, realism_lora=False, cam_motion="", realism_strength=None, cam_strength=None):
+def build_workflow(text, negative, width, height, length, steps, seed, image_name=None, prefix="h3", video_name=None, realism_lora=False, cam_motion="", realism_strength=None, cam_strength=None, lora_dirs=None, strict_loras=False):
     """T2V/I2V 워크플로우 — H3 전용. Wan 폴백 제거 (사용자 지정).
     video_name: LoadVideo 노드를 통한 참조 동영상 (인물 동영상 모드)
     realism_strength/cam_strength: None이면 기본값, 실수면 0.0~2.0으로 클램프"""
@@ -808,13 +1395,18 @@ def build_workflow(text, negative, width, height, length, steps, seed, image_nam
         full_prompt = f"{REFERENCE_TO_VIDEO_INSTRUCTION}\n\n{full_prompt}"
 
     # 기본 Turbo 뒤에, 사용자가 토글을 켠 경우에만 리얼리즘 LoRA를 누적한다.
-    lora_dirs = ["/home/aski/ComfyUI/models/loras",
-                 "/home/aski/ComfyUI/models/loras/split_files/loras"]
+    if lora_dirs is None:
+        lora_dirs = ["/home/aski/ComfyUI/models/loras",
+                     "/home/aski/ComfyUI/models/loras/split_files/loras"]
     lora_avail = any(os.path.exists(os.path.join(d, H3_LORA)) for d in lora_dirs)
     realism_lora = realism_lora is True  # 문자열 "false" 등 truthy 값은 허용하지 않음
     realism_avail = realism_lora and any(
         os.path.exists(os.path.join(d, REALISM_LORA)) for d in lora_dirs
     )
+    if strict_loras and not lora_avail:
+        raise RuntimeError(f"exact H3 Turbo LoRA missing: {H3_LORA}")
+    if strict_loras and realism_lora and not realism_avail:
+        raise RuntimeError(f"requested realism LoRA missing: {REALISM_LORA}")
     model_ref = ["1b", 0] if realism_avail else (["1a", 0] if lora_avail else ["1", 0])
     wf = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": H3_UNET, "weight_dtype": "default"}},
@@ -866,6 +1458,8 @@ def build_workflow(text, negative, width, height, length, steps, seed, image_nam
         cam_lo = CAM_LORA_3000
     if cam_lo:
         cam_avail = any(os.path.exists(os.path.join(d, cam_lo)) for d in lora_dirs)
+        if strict_loras and not cam_avail:
+            raise RuntimeError(f"requested camera LoRA missing: {cam_lo}")
         if cam_avail:
             wf["1c"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
                 "model": model_ref, "lora_name": cam_lo, "strength_model": c_strength,
@@ -1059,6 +1653,16 @@ def job_input_path(job_id, suffix):
     return path
 
 
+def cleanup_job_input_snapshots(*paths):
+    for path in paths:
+        if not path or not _is_under_nas(path):
+            continue
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+
 def archive_final_to_nas(job_id, final_path, cleanup_paths=()):
     """Atomically publish a finished MP4 within NAS before dropping NAS work files."""
     if not valid_job_id(job_id):
@@ -1200,26 +1804,20 @@ def run_job(job_id, cfg):
         total_seconds = min(cfg["seconds"], MAX_SECONDS)
         strategy = cfg.get("strategy", STRATEGY_SPLIT)
         seg_seconds = int(cfg.get("seg_seconds", SEG_SECONDS))
-        if strategy == STRATEGY_SINGLE:
-            # 연속 단일 생성: 길이 그대로 1회 생성 (정확한 길이)
-            segments = 1
-            seg_len = total_seconds
-        else:
-            # 세그먼트 분할: seg_seconds씩 분할 (세그먼트 경계에서 스티치)
-            segments = max(1, round(total_seconds / seg_seconds))
-            seg_len = seg_seconds
-        seg_frames = snap_len(seg_len)
-        total_frames = seg_frames * segments
+        segment_frames = segment_frame_plan(total_seconds, seg_seconds, strategy)
+        segments = len(segment_frames)
+        total_frames = sum(segment_frames)
         est = estimate_seconds(total_seconds, seg_seconds, strategy, cfg["steps"])
         update_job(job_id, segments=segments, total_seconds=total_seconds,
                    estimated_seconds=est)
         log(f"job {job_id}: {total_seconds}s [{strategy}] {segments}개 세그먼트 "
-            f"(각 {seg_len}s, {seg_frames}프레임) steps={cfg['steps']} 예상 {est}초")
+            f"(프레임 {segment_frames}) steps={cfg['steps']} 예상 {est}초")
 
         # 각 세그먼트 생성
         seg_files = []
         comfy_source_files = []
         for i in range(segments):
+            seg_frames = segment_frames[i]
             update_job(job_id, progress=_prog(job_id,
                 f"세그먼트 {i+1}/{segments} 생성 중" if segments > 1 else "영상 생성 중",
                 seg_done=i))
@@ -1515,7 +2113,7 @@ def _refv_video_path():
     return os.path.join(REFV_DIR, "ref_video.mp4")
 
 
-def _read_refv_meta():
+def _read_refv_meta() -> dict[str, Any] | None:
     try:
         with open(REFV_META, encoding="utf-8") as f:
             data = json.load(f)
@@ -1524,7 +2122,7 @@ def _read_refv_meta():
         return None
 
 
-def _load_refv():
+def _load_refv() -> dict[str, Any] | None:
     """Return fixed-video metadata only when its private NAS MP4 is present."""
     if not os.path.isfile(_refv_video_path()) or not os.path.isfile(_refv_path()):
         return None
@@ -1533,6 +2131,8 @@ def _load_refv():
         return None
     expected_size = m.get("size")
     expected_hash = str(m.get("sha256") or "")
+    if expected_size is None:
+        return None
     try:
         if int(expected_size) != os.path.getsize(_refv_video_path()):
             return None
@@ -1738,8 +2338,8 @@ def cancel_queued_job(jid):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
-        log(fmt % args)
+    def log_message(self, format: str, *args: Any) -> None:
+        log(format % args)
 
     def _origin_authorized(self):
         """Require the Vercel-only secret whenever production configured one.
@@ -1756,6 +2356,18 @@ class Handler(BaseHTTPRequestHandler):
         if self._origin_authorized():
             return True
         send_json(self, {"ok": False, "error": "unauthorized origin"}, 401)
+        return False
+
+    def _worker_authorized(self):
+        if not WORKER_SECRET:
+            return False
+        supplied = self.headers.get(WORKER_HEADER, "")
+        return hmac.compare_digest(supplied, WORKER_SECRET)
+
+    def _require_worker(self):
+        if self._worker_authorized():
+            return True
+        send_json(self, {"ok": False, "error": "unauthorized worker"}, 401)
         return False
 
     def _cors(self):
@@ -1884,14 +2496,83 @@ class Handler(BaseHTTPRequestHandler):
         p = u.path
         if p.startswith("/api/") and not self._require_origin():
             return
+        if p.startswith("/api/worker/") and not self._require_worker():
+            return
+        if p.startswith("/api/worker/input/"):
+            parts = p.split("/")
+            if len(parts) != 6 or parts[5] not in ("image", "video"):
+                send_json(self, {"ok": False, "error": "invalid worker input route"}, 404)
+                return
+            jid, kind = parts[4], parts[5]
+            execution_id = self.headers.get(WORKER_EXECUTION_HEADER, "")
+            lease_token = self.headers.get(WORKER_LEASE_HEADER, "")
+            now = time.time()
+            if not validate_rtx5080_lease(jid, execution_id, lease_token, now=now):
+                send_json(self, {"ok": False, "error": "stale or invalid RTX 5080 lease"}, 409)
+                return
+            key = "image_source_path" if kind == "image" else "video_source_path"
+            size_key = "image_source_size" if kind == "image" else "video_source_size"
+            hash_key = "image_source_sha256" if kind == "image" else "video_source_sha256"
+            with LOCK:
+                job = JOBS.get(jid) or {}
+                cfg = job.get("cfg") or {}
+                source = cfg.get(key)
+                expected_size = cfg.get(size_key)
+                expected_hash = cfg.get(hash_key)
+                if job.get("execution_id") == execution_id:
+                    job["lease_expires_at"] = now + RTX5080_LEASE_SECONDS
+            if not source or not os.path.isfile(source) or not _is_under_nas(source):
+                send_json(self, {"ok": False, "error": "worker input not found"}, 404)
+                return
+            size = os.path.getsize(source)
+            if expected_size is not None and int(expected_size) != size:
+                send_json(self, {"ok": False, "error": "worker input size mismatch"}, 409)
+                return
+            try:
+                byte_range = parse_byte_range(self.headers.get("Range"), size)
+            except ValueError:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            start, end = byte_range if byte_range else (0, size - 1)
+            length = end - start + 1
+            self.send_response(206 if byte_range else 200)
+            self.send_header("Content-Type", "image/png" if kind == "image" else "video/mp4")
+            self.send_header("Content-Length", str(length))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "private, no-store")
+            if expected_hash:
+                self.send_header("X-Content-SHA256", expected_hash)
+            if byte_range:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            if self.command != "HEAD":
+                with open(source, "rb") as payload:
+                    payload.seek(start)
+                    remaining = length
+                    while remaining:
+                        chunk = payload.read(min(256 * 1024, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            _save_job(jid)
+            return
         if p == "/api/jobs":
+            requeue_expired_rtx5080_jobs()
             with LOCK:
-                items = [dict(j, prompt=j.get("prompt", "")) for j in JOBS.values()]
+                items = [_public_rtx5080_claim(dict(j, prompt=j.get("prompt", ""))) for j in JOBS.values()]
+                jobs_snapshot = {jid: dict(job) for jid, job in JOBS.items()}
             items.sort(key=lambda x: x.get("created", 0), reverse=True)
-            with QUEUE_LOCK:
-                q_len = len(QUEUE)
-            with LOCK:
-                active_id = ACTIVE[0]
+            queues = worker_queue_snapshot(jobs_snapshot)
+            for item in items:
+                target = item.get("worker_target") or (item.get("cfg") or {}).get("worker_target", "pgx")
+                item["worker_target"] = target
+                item.setdefault("worker_label", "RTX 5080" if target == "rtx5080" else "PGX Spark")
+                item["queue_position"] = queues["positions"].get(item.get("id"))
+            q_len = queues["pgx"]["pending"] + queues["rtx5080"]["pending"]
+            active_id = queues["pgx"]["active_job"]
             # 상세 상태: ComfyUI 버전/GPU, NAS, 활성 job
             cstats = comfy_get("/system_stats", timeout=3) if comfy_up() else {}
             device = (cstats.get("devices") or [{}])[0]
@@ -1911,11 +2592,41 @@ class Handler(BaseHTTPRequestHandler):
                 "nas_ok": nas_ok(),
                 "queue_len": q_len,
                 "active_job": active_id,
+                "queues": {"pgx": queues["pgx"], "rtx5080": queues["rtx5080"]},
+                "workers": {
+                    "pgx": {"id": "pgx", "label": "PGX Spark", "online": comfy_up(),
+                            "eligible": comfy_up(), "busy": bool(active_id)},
+                    "rtx5080": rtx5080_worker_status(),
+                },
+            })
+        elif p == "/api/workers":
+            with LOCK:
+                jobs_snapshot = {jid: dict(job) for jid, job in JOBS.items()}
+            queues = worker_queue_snapshot(jobs_snapshot)
+            pgx_online = comfy_up()
+            send_json(self, {
+                "ok": True,
+                "workers": {
+                    "pgx": {"id": "pgx", "label": "PGX Spark", "online": pgx_online,
+                            "eligible": pgx_online, "busy": bool(queues["pgx"]["active_job"]),
+                            **queues["pgx"]},
+                    "rtx5080": {**rtx5080_worker_status(), **queues["rtx5080"]},
+                },
             })
         elif p.startswith("/api/job/"):
             jid = p.split("/")[3]
-            with LOCK:
-                j = dict(JOBS.get(jid)) if JOBS.get(jid) else None
+            if not valid_job_id(jid):
+                send_json(self, {"ok": False, "error": "invalid job id"}, 400)
+                return
+            with QUEUE_LOCK:
+                queue_snapshot = tuple(QUEUE)
+                with LOCK:
+                    jobs_snapshot = {job_id: dict(job) for job_id, job in JOBS.items()}
+            source = jobs_snapshot.get(jid)
+            j = _public_rtx5080_claim(source) if source else None
+            if j:
+                queues = worker_queue_snapshot(jobs_snapshot, queue_snapshot)
+                j["queue_position"] = queues["positions"].get(jid)
             send_json(self, {"ok": True, "job": j}, code=200 if j else 404)
         elif p.startswith("/api/ref/status"):
             # GET /api/ref/status — 고정 참조 메타데이터만
@@ -2087,6 +2798,8 @@ class Handler(BaseHTTPRequestHandler):
         p = u.path
         if p.startswith("/api/") and not self._require_origin():
             return
+        if p.startswith("/api/worker/") and not self._require_worker():
+            return
         if p == "/api/ref/set":
             # 고정 참조 등록 (multipart/form-data: file=이미지)
             ctype = self.headers.get("Content-Type", "")
@@ -2244,6 +2957,72 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             send_json(self, {"ok": False, "error": f"bad request: {e}"}, 400)
             return
+        if p.startswith("/api/worker/"):
+            try:
+                if p == "/api/worker/heartbeat":
+                    worker_id = str(data.get("worker_id") or "")
+                    lease_job = str(data.get("job_id") or "")
+                    lease_execution = str(data.get("execution_id") or "")
+                    lease_token = str(data.get("lease_token") or "")
+                    private = {"worker_id", "job_id", "execution_id", "lease_token"}
+                    payload = {k: v for k, v in data.items() if k not in private}
+                    worker = record_worker_heartbeat(worker_id, payload)
+                    renewed = bool(lease_job and renew_rtx5080_lease(
+                        lease_job, lease_execution, lease_token
+                    ))
+                    send_json(self, {"ok": True, "worker": worker, "lease_renewed": renewed})
+                    return
+                if p == "/api/worker/claim":
+                    requeue_expired_rtx5080_jobs()
+                    claimed = claim_rtx5080_job()
+                    send_json(self, {"ok": True, **(claimed or {"job": None})})
+                    return
+                jid = str(data.get("job_id") or "")
+                execution_id = str(data.get("execution_id") or "")
+                lease_token = str(data.get("lease_token") or "")
+                if p == "/api/worker/progress":
+                    progress = data.get("progress")
+                    job = update_rtx5080_progress(jid, execution_id, lease_token, progress)
+                    send_json(self, {"ok": True, "job": job})
+                    return
+                if p == "/api/worker/upload/init":
+                    result = begin_rtx5080_upload(
+                        jid, execution_id, lease_token, data.get("size"),
+                        str(data.get("sha256") or "").lower(),
+                    )
+                    send_json(self, {"ok": True, **result})
+                    return
+                if p == "/api/worker/upload/chunk":
+                    try:
+                        chunk = base64.b64decode(str(data.get("data") or ""), validate=True)
+                    except Exception as exc:
+                        raise ValueError("invalid base64 chunk") from exc
+                    result = append_rtx5080_upload(
+                        jid, execution_id, lease_token, data.get("offset"), chunk,
+                        str(data.get("chunk_sha256") or "").lower(),
+                    )
+                    send_json(self, {"ok": True, **result})
+                    return
+                if p == "/api/worker/upload/complete":
+                    job = complete_rtx5080_upload(jid, execution_id, lease_token)
+                    send_json(self, {"ok": True, "job": job})
+                    return
+                if p == "/api/worker/fail":
+                    result = fail_rtx5080_job(
+                        jid, execution_id, lease_token, data.get("error"),
+                        retryable=data.get("retryable", True),
+                    )
+                    send_json(self, {"ok": True, **result})
+                    return
+                send_json(self, {"ok": False, "error": "worker route not found"}, 404)
+            except PermissionError as exc:
+                send_json(self, {"ok": False, "error": str(exc), "code": "STALE_LEASE"}, 409)
+            except ValueError as exc:
+                send_json(self, {"ok": False, "error": str(exc), "code": "INVALID_WORKER_PAYLOAD"}, 400)
+            except Exception as exc:
+                log(f"worker API error: {type(exc).__name__}: {str(exc)[:180]}")
+                send_json(self, {"ok": False, "error": "worker operation failed"}, 500)
+            return
         if p == "/api/generate":
             mode = (data.get("mode") or "t2v").strip().lower()
             if mode not in ("t2v", "i2v"):
@@ -2252,6 +3031,18 @@ class Handler(BaseHTTPRequestHandler):
             prompt = (data.get("prompt") or "").strip()
             if len(prompt) < 3:
                 send_json(self, {"ok": False, "error": "프롬프트가 너무 짧습니다"}, 400)
+                return
+            worker_target = str(data.get("worker_target") or "pgx").strip().lower()
+            if worker_target not in ("pgx", "rtx5080"):
+                send_json(self, {"ok": False, "error": "worker_target은 pgx 또는 rtx5080이어야 합니다"}, 400)
+                return
+            if worker_target == "rtx5080" and not rtx5080_worker_status()["eligible"]:
+                send_json(self, {
+                    "ok": False,
+                    "error": "RTX 5080이 오프라인이거나 MiniMax H3 준비가 완료되지 않았습니다",
+                    "code": "RTX5080_OFFLINE",
+                    "worker": rtx5080_worker_status(),
+                }, 409)
                 return
             # 참조 파일은 이 짧은 접수 요청에서 ComfyUI로 전송하지 않는다.
             # 대기열 워커가 작업을 시작할 때 전송해야 Vercel/Railway HTTP
@@ -2321,6 +3112,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 seconds = normalize_generation_seconds(data.get("seconds"), mode)
             except ValueError as exc:
+                cleanup_job_input_snapshots(image_source_path, video_source_path)
                 send_json(self, {"ok": False, "error": str(exc)}, 400)
                 return
             strategy = (data.get("strategy") or STRATEGY_SPLIT).strip().lower()
@@ -2358,17 +3150,26 @@ class Handler(BaseHTTPRequestHandler):
                 return max(0.0, min(2.0, f))
             realism_strength = _num(data.get("realism_strength"))
             cam_strength = _num(data.get("cam_strength"))
+            try:
+                width = int(data.get("width", 1344))
+                height = int(data.get("height", 768))
+                seed = int(data.get("seed", -1))
+            except (TypeError, ValueError):
+                cleanup_job_input_snapshots(image_source_path, video_source_path)
+                send_json(self, {"ok": False, "error": "해상도와 시드는 정수여야 합니다"}, 400)
+                return
             cfg = {
+                "worker_target": worker_target,
                 "mode": mode,
                 "prompt": prompt,
                 "negative": (data.get("negative") or "").strip(),
-                "width": int(data.get("width", 1344)),
-                "height": int(data.get("height", 768)),
+                "width": width,
+                "height": height,
                 "seconds": seconds,
                 "strategy": strategy,
                 "seg_seconds": seg_seconds,
                 "steps": steps,
-                "seed": int(data.get("seed", -1)),
+                "seed": seed,
                 "filename": fname,
                 "image_name": image_name,
                 "video_name": video_name,
@@ -2387,29 +3188,38 @@ class Handler(BaseHTTPRequestHandler):
                 "realism_strength": realism_strength,
                 "cam_strength": cam_strength,
             }
-            # admission slot을 먼저 예약한다. 따라서 동시에 여러 HTTP 요청이 와도
-            # 대기열(예약 포함) 6번째는 이 시점에서 원자적으로 거절된다.
+            # worker별 admission slot을 먼저 예약한다. 따라서 PGX와 RTX 큐는
+            # 각각 최대 5개이며 동시에 들어온 요청도 서로 용량을 침범하지 않는다.
             global QUEUE_RESERVATIONS
+            queue_full = False
             with QUEUE_LOCK:
-                pending_total = len(QUEUE) + QUEUE_RESERVATIONS
+                pending_total = (
+                    queued_jobs_for_target(JOBS, QUEUE, worker_target)
+                    + QUEUE_RESERVATIONS[worker_target]
+                )
                 if pending_total >= MAX_PENDING_JOBS:
-                    send_json(self, {"ok": False, "error": "대기열이 가득 찼습니다 (최대 5개). 실행 중인 작업이 끝난 뒤 다시 시도해 주세요.",
-                                     "code": "QUEUE_FULL", "queue_pending": pending_total, "queue_limit": MAX_PENDING_JOBS}, 429)
-                    return
-                QUEUE_RESERVATIONS += 1
+                    queue_full = True
+                else:
+                    QUEUE_RESERVATIONS[worker_target] += 1
+            if queue_full:
+                cleanup_job_input_snapshots(image_source_path, video_source_path)
+                send_json(self, {"ok": False, "error": f"{worker_target} 대기열이 가득 찼습니다 (최대 5개). 실행 중인 작업이 끝난 뒤 다시 시도해 주세요.",
+                                 "code": "QUEUE_FULL", "worker_target": worker_target,
+                                 "queue_pending": pending_total, "queue_limit": MAX_PENDING_JOBS}, 429)
+                return
             with LOCK:
                 JOBS[jid] = {
                     "id": jid, "status": "queued", "created": time.time(),
                     "cfg": cfg, "prompt": prompt,
-                    "mode": mode,
+                    "mode": mode, "worker_target": worker_target,
+                    "worker_label": "RTX 5080" if worker_target == "rtx5080" else "PGX Spark",
                     "segments": segments, "total_seconds": seconds,
                     "estimated_seconds": est,
                 }
             _save_job(jid)
-            # 서버에서 원자적으로 제한한다. 프런트엔드 체크를 우회해도 6번째
-            # 대기 요청은 절대 enqueue되지 않는다.
+            # 예약한 worker 큐에 정확히 한 번만 enqueue한다.
             with QUEUE_LOCK:
-                QUEUE_RESERVATIONS -= 1
+                QUEUE_RESERVATIONS[worker_target] -= 1
                 QUEUE.append(jid)
             log(f"new job {jid} [{mode}]: {prompt[:50]}... {cfg['width']}x{cfg['height']} "
                 f"{seconds}s [{strategy}] {segments}seg steps={cfg['steps']}"
@@ -2420,7 +3230,8 @@ class Handler(BaseHTTPRequestHandler):
                 + (f" cam_motion={cam_motion}" if cam_motion else "")
                 + (f" (x{cfg['cam_strength']})" if cfg.get("cam_strength") is not None else ""))
             send_json(self, {
-                "ok": True, "job": jid,
+                "ok": True, "job": jid, "worker_target": worker_target,
+                "worker_label": "RTX 5080" if worker_target == "rtx5080" else "PGX Spark",
                 "segments": segments, "total_seconds": seconds,
                 "strategy": strategy, "seg_seconds": seg_seconds,
                 "steps": steps,
