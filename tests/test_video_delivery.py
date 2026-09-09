@@ -2081,7 +2081,7 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         root = Path(__file__).resolve().parents[1]
         html = (root / "index.html").read_text()
         css = (root / "apple-redesign.css").read_text()
-        self.assertIn('href="/apple-redesign.css?v=20260909-playback2"', html)
+        self.assertIn('href="/apple-redesign.css?v=20260909-vertical3"', html)
         self.assertIn('id="videoStatus"', html)
         self.assertIn('id="modalPlaybackRate"', html)
         self.assertIn('id="modalPip"', html)
@@ -2132,7 +2132,7 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertIn(".progress-character", css)
         self.assertIn("@keyframes characterRun", css)
 
-    def test_recent_work_handle_has_visible_korean_label_and_polished_pill_surface(self):
+    def test_recent_work_handle_is_a_crisp_vertical_edge_tab(self):
         root = Path(__file__).resolve().parents[1]
         html = (root / "index.html").read_text()
         css = (root / "apple-redesign.css").read_text()
@@ -2141,9 +2141,28 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         handle = html[start:end]
         self.assertIn('<span class="recent-handle-label">최근 작업</span>', handle)
         self.assertIn('aria-label="최근 작업 열기"', handle)
-        self.assertIn(".recent-handle-label", css)
-        self.assertIn("linear-gradient", css[css.index(".recent-drawer-handle"):])
-        self.assertIn("box-shadow", css[css.index(".recent-drawer-handle"):])
+        self.assertIn('viewBox="0 0 32 32"', handle)
+        handle_css = css[css.index(".recent-drawer-handle"):]
+        self.assertIn("position:fixed", handle_css)
+        self.assertIn("width:48px", handle_css)
+        self.assertIn("height:132px", handle_css)
+        self.assertIn("writing-mode:vertical-rl", handle_css)
+        self.assertIn("vector-effect:non-scaling-stroke", handle_css)
+        self.assertIn("width:44px;min-width:0;height:124px", handle_css)
+
+    def test_header_uses_a_layered_inline_svg_app_icon(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "index.html").read_text()
+        css = (root / "apple-redesign.css").read_text()
+        start = html.index('<div class="logo"')
+        end = html.index('</div>', start)
+        logo = html[start:end]
+        self.assertIn('<svg viewBox="0 0 48 48"', logo)
+        self.assertIn("<linearGradient", logo)
+        self.assertIn("<path", logo)
+        self.assertNotIn(">▶<", logo)
+        self.assertIn(".logo svg", css)
+        self.assertNotIn('.logo::after{content:"▶"', css)
 
     def test_sampling_steps_max_at_twenty_in_ui_and_api(self):
         html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
