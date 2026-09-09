@@ -2094,6 +2094,8 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertIn("Add-Type -AssemblyName System.Security", installer)
         self.assertNotIn("Set-Content -LiteralPath (Join-Path $InstallRoot 'config.json')", installer)
         self.assertIn("run_local_generation_smoke", source)
+        self.assertIn("ComfyUI recovery failed", source)
+        self.assertIn("ensure_comfy(comfy_root, comfy, config)", source)
         self.assertIn("generation_marker_valid", source)
         self.assertIn("for path in (MANIFEST_PATH, shared_server_path(), Path(__file__).resolve()):", source)
         self.assertIn('"generation_verified": generation_verified', source)

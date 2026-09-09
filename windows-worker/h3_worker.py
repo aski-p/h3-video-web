@@ -928,6 +928,15 @@ def run_worker(force_hash: bool = False) -> None:
     heartbeat.start()
     log(f"ready: {gpu} · {vram} MiB · {PROFILE} · {comfy_root}")
     while True:
+        if not comfy.ready():
+            try:
+                ensure_comfy(comfy_root, comfy, config)
+                comfy.assert_runtime()
+                log("ComfyUI recovered and revalidated")
+            except Exception as exc:
+                log(f"ComfyUI recovery failed: {exc}")
+                time.sleep(5)
+                continue
         if comfy.busy():
             time.sleep(3)
             continue
