@@ -119,7 +119,11 @@ NO_REDIRECT_OPENER = urllib.request.build_opener(NoRedirectHandler())
 
 def log(message: str) -> None:
     line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}"
-    print(line, flush=True)
+    if sys.stdout is not None:
+        try:
+            print(line, flush=True)
+        except (OSError, ValueError):
+            pass
     try:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with LOG_PATH.open("a", encoding="utf-8") as stream:
@@ -362,6 +366,25 @@ def nvidia_info() -> tuple[str, int]:
     return name, int(float(memory))
 
 
+def assert_comfy_loopback_only(port: int = 8188) -> None:
+    if os.name != "nt":
+        return
+    query = (
+        f"@(Get-NetTCPConnection -State Listen -LocalPort {port} "
+        "-ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalAddress) -join \"`n\""
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", query],
+        capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode:
+        raise RuntimeError("unable to verify the ComfyUI listener binding")
+    addresses = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    if not addresses or not addresses.issubset({"127.0.0.1", "::1"}):
+        rendered = ", ".join(sorted(addresses)) if addresses else "none"
+        raise RuntimeError(f"ComfyUI port {port} is not loopback-only: {rendered}")
+
+
 class ApiClient:
     def __init__(self, base_url: str, token: str):
         self.base = validate_api_base(base_url)
@@ -440,6 +463,7 @@ class ComfyClient:
     def assert_runtime(self) -> None:
         if not self.ready():
             raise RuntimeError("ComfyUI is not using the expected RTX 5080")
+        assert_comfy_loopback_only()
         objects = self.json("/object_info", timeout=60)
         missing = sorted(REQUIRED_COMFY_CLASSES - set(objects))
         if missing:

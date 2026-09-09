@@ -11,8 +11,9 @@ $BackupRoot = Join-Path $ParentRoot ("H3Worker.backup-" + $PID)
 $Needle = 'minimax_h3_fl2va_pruned_int8_convrot.safetensors'
 $PythonVersion = '3.12.10'
 $PythonUrl = "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-amd64.exe"
-$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$runName = 'ASKI-H3-RTX5080-Worker'
+$TaskName = 'ASKI-H3-RTX5080-Worker'
+$LegacyRunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$LegacyRunName = 'ASKI-H3-RTX5080-Worker'
 
 function Write-Step([string]$Message) { Write-Host "`n==> $Message" -ForegroundColor Cyan }
 function Set-PrivateAcl([string]$Path) {
@@ -32,19 +33,35 @@ function Protect-Token([string]$Token) {
 }
 function Stop-InstalledWorker([string]$Root) {
   if ([string]::IsNullOrWhiteSpace($Root)) { return }
+  Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   $script = Join-Path $Root 'h3_worker.py'
   Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -and $_.CommandLine.Contains($script) } |
     ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null }
   Start-Sleep -Milliseconds 750
 }
-function Start-InstalledWorker([string]$Root) {
+function Register-WorkerTask([string]$Root) {
   $pythonw = Join-Path $Root '.venv\Scripts\pythonw.exe'
   $script = Join-Path $Root 'h3_worker.py'
-  if ((Test-Path -LiteralPath $pythonw -PathType Leaf) -and (Test-Path -LiteralPath $script -PathType Leaf)) {
-    return Start-Process -FilePath $pythonw -ArgumentList ('"' + $script + '"') -WorkingDirectory $Root -PassThru
+  if (-not (Test-Path -LiteralPath $pythonw -PathType Leaf)) { throw 'Installed worker Python is missing.' }
+  if (-not (Test-Path -LiteralPath $script -PathType Leaf)) { throw 'Installed worker script is missing.' }
+  $taskUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+  $taskAction = New-ScheduledTaskAction -Execute $pythonw -Argument ('"' + $script + '"') -WorkingDirectory $Root
+  $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+  $taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Limited
+  $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+  Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Trigger $taskTrigger -Settings $taskSettings `
+    -Principal $taskPrincipal -Force | Out-Null
+}
+function Start-InstalledWorker([string]$Root) {
+  if ((Test-Path -LiteralPath $Root -PathType Container) -and
+      $null -ne (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+    Start-ScheduledTask -TaskName $TaskName
+    return $true
   }
-  return $null
+  return $false
 }
 function Test-ModelsDir([string]$Path) {
   if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
@@ -113,6 +130,8 @@ $tokenFile = Join-Path $PSScriptRoot 'worker-token.txt'
 $token = (Get-Content -LiteralPath $tokenFile -Raw).Trim()
 if ($token.Length -lt 32) { throw 'worker-token.txt is invalid.' }
 $protectedToken = Protect-Token $token
+Remove-Item -LiteralPath $tokenFile -Force
+$token = $null
 
 Write-Step 'Locating exact H3 models and ComfyUI'
 $modelsDir = Find-ModelsDir
@@ -147,6 +166,7 @@ $config = [ordered]@{
 $configJson = $config | ConvertTo-Json -Depth 4
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText((Join-Path $StageRoot 'config.json'), $configJson, $utf8NoBom)
+$protectedToken = $null
 Set-PrivateAcl $StageRoot
 
 $venv = Join-Path $StageRoot '.venv'
@@ -157,6 +177,7 @@ $stagePython = Join-Path $venv 'Scripts\python.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Worker dependency installation failed.' }
 
 $hadPrevious = Test-Path -LiteralPath $InstallRoot -PathType Container
+$activated = $false
 Stop-InstalledWorker $InstallRoot
 try {
   Write-Step 'Running RTX 5080, exact-model SHA-256, node, GPU, and generation self-test'
@@ -167,44 +188,48 @@ try {
 
   Write-Step 'Atomically activating the staged installation'
   if ($hadPrevious) { Move-Item -LiteralPath $InstallRoot -Destination $BackupRoot }
-  try {
-    Move-Item -LiteralPath $StageRoot -Destination $InstallRoot
-  } catch {
-    if ($hadPrevious -and (Test-Path -LiteralPath $BackupRoot)) {
-      Move-Item -LiteralPath $BackupRoot -Destination $InstallRoot
-    }
-    throw
-  }
-  Remove-Item -LiteralPath $BackupRoot -Recurse -Force -ErrorAction SilentlyContinue
+  Move-Item -LiteralPath $StageRoot -Destination $InstallRoot
+  $activated = $true
   Set-PrivateAcl $InstallRoot
+
+  Write-Step 'Registering a current-user scheduled task and starting the new worker'
+  Register-WorkerTask $InstallRoot
+  if (-not (Start-InstalledWorker $InstallRoot)) { throw 'Activated worker could not be started.' }
+  Start-Sleep -Seconds 8
+  $workerScript = Join-Path $InstallRoot 'h3_worker.py'
+  $running = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($workerScript) } | Select-Object -First 1
+  if ($null -eq $running) { throw "New worker exited early. See $InstallRoot\worker.log" }
+  $taskInfo = Get-ScheduledTaskInfo -TaskName $TaskName
+  if ($taskInfo.LastTaskResult -notin @(0, 267009)) {
+    throw "Scheduled worker returned unexpected task result: $($taskInfo.LastTaskResult)"
+  }
+
+  Remove-ItemProperty -Path $LegacyRunKey -Name $LegacyRunName -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $BackupRoot -Recurse -Force -ErrorAction SilentlyContinue
 } catch {
-  Remove-Item -LiteralPath $StageRoot -Recurse -Force -ErrorAction SilentlyContinue
-  if (-not (Test-Path -LiteralPath $InstallRoot) -and (Test-Path -LiteralPath $BackupRoot)) {
+  $failure = $_
+  Write-Warning 'Worker activation failed; restoring previous installation'
+  Stop-InstalledWorker $InstallRoot
+  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+  if ($activated -and (Test-Path -LiteralPath $InstallRoot)) {
+    Remove-Item -LiteralPath $InstallRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  if (Test-Path -LiteralPath $BackupRoot) {
+    if (Test-Path -LiteralPath $InstallRoot) { Remove-Item -LiteralPath $InstallRoot -Recurse -Force }
     Move-Item -LiteralPath $BackupRoot -Destination $InstallRoot
   }
-  if (Test-Path -LiteralPath $InstallRoot) { Start-InstalledWorker $InstallRoot | Out-Null }
-  throw
+  Remove-Item -LiteralPath $StageRoot -Recurse -Force -ErrorAction SilentlyContinue
+  if ($hadPrevious -and (Test-Path -LiteralPath $InstallRoot)) {
+    try {
+      Register-WorkerTask $InstallRoot
+      Start-InstalledWorker $InstallRoot | Out-Null
+    } catch {
+      Write-Warning 'Previous installation was restored but could not be restarted automatically.'
+    }
+  }
+  throw $failure
 }
-
-Write-Step 'Registering current-user startup and starting the new worker'
-$pythonw = Join-Path $InstallRoot '.venv\Scripts\pythonw.exe'
-$workerScript = Join-Path $InstallRoot 'h3_worker.py'
-$runCommand = '"' + $pythonw + '" "' + $workerScript + '"'
-New-Item -Path $runKey -Force | Out-Null
-Set-ItemProperty -Path $runKey -Name $runName -Value $runCommand
-$workerProcess = Start-InstalledWorker $InstallRoot
-if ($null -eq $workerProcess) { throw 'Activated worker could not be started.' }
-Start-Sleep -Seconds 8
-$workerProcess.Refresh()
-if ($workerProcess.HasExited) { throw "New worker exited early. See $InstallRoot\worker.log" }
-$running = Get-CimInstance Win32_Process -Filter "ProcessId=$($workerProcess.Id)" -ErrorAction SilentlyContinue
-if ($null -eq $running -or -not $running.CommandLine.Contains($workerScript)) {
-  throw 'Could not verify the newly activated local worker process.'
-}
-
-Remove-Item -LiteralPath $tokenFile -Force
-$token = $null
-$protectedToken = $null
 
 try {
   $status = Invoke-RestMethod -UseBasicParsing -Uri 'https://h3-video-web.vercel.app/api/jobs' -TimeoutSec 20

@@ -501,10 +501,13 @@ button:disabled{opacity:.35;cursor:not-allowed}
 .recent-drawer-handle{position:fixed;z-index:70;right:env(safe-area-inset-right,0px);margin-right:10px;top:46%;width:48px;height:48px;padding:0;border-radius:50%;background:var(--surface);border:1px solid var(--line);color:var(--tx2);box-shadow:0 8px 28px rgba(0,0,0,.16);display:flex;align-items:center;justify-content:center;touch-action:pan-y}
 .recent-drawer-handle svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .recent-count-badge{position:absolute;right:-4px;top:-5px;min-width:18px;height:18px;padding:0 4px;border-radius:999px;background:var(--acc-bg);color:#fff;font:600 10px/18px var(--font);text-align:center}.recent-count-badge:empty{display:none}
-.modal-overlay#recentModal{display:flex;visibility:hidden;pointer-events:none;justify-content:flex-end;align-items:stretch;padding:0;background:rgba(0,0,0,0);transition:background .22s ease}
-#recentModal.show{visibility:visible;pointer-events:auto;background:rgba(0,0,0,.28)}
+.modal-overlay#recentModal{display:flex;visibility:hidden;pointer-events:none;justify-content:flex-end;align-items:stretch;padding:0;background:rgba(0,0,0,0);backdrop-filter:blur(0);transition:background-color .28s cubic-bezier(.22,.8,.24,1),backdrop-filter .28s cubic-bezier(.22,.8,.24,1),visibility 0s linear .28s}
+#recentModal.show{visibility:visible;pointer-events:auto;background:rgba(0,0,0,.28);backdrop-filter:blur(8px);transition-delay:0s}
+#recentModal.swipe-preview{visibility:visible;pointer-events:none;transition-delay:0s}
 #recentModal .recent-modal{width:min(480px,calc(100vw - 24px));height:100vh;height:100dvh;max-width:none;max-height:none;margin:0;padding:max(18px,env(safe-area-inset-top)) max(18px,env(safe-area-inset-right)) max(18px,env(safe-area-inset-bottom)) 18px;border-radius:24px 0 0 24px;display:flex;flex-direction:column;overflow:hidden;animation:none;transform:translateX(100%);transition:transform .28s cubic-bezier(.22,.8,.24,1);will-change:transform}
+#recentModal .recent-modal.swipe-dragging{transition:none}
 #recentModal.show .recent-modal{transform:translateX(0)}
+@media(prefers-reduced-motion:reduce){#recentModal,#recentModal .recent-modal{transition:none!important}}
 .recent-modal-head{display:flex;justify-content:space-between;gap:12px;align-items:baseline;margin-bottom:12px;padding-right:42px;flex:0 0 auto}
 .recent-modal-head p{margin:0;color:var(--tx4);font-size:12px}
 .recent-modal .recent{max-height:none;min-height:0;flex:1;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:2px 4px 12px 0}
@@ -598,7 +601,7 @@ footer{
   .dl{min-width:100px}
 }
 </style>
-<link rel="stylesheet" href="/apple-redesign.css?v=20260909-todaycount1">
+<link rel="stylesheet" href="/apple-redesign.css?v=20260909-swipe1">
 </head>
 <body>
 <a class="skip-link" href="#main-controls">생성 설정으로 바로가기</a>
@@ -1987,12 +1990,13 @@ function showRecentModal(){
   loadRecent();
 }
 function closeRecentModal(){
-  const modal=$('#recentModal'); modal.classList.remove('show'); modal.setAttribute('aria-hidden','true');
+  const modal=$('#recentModal'); modal.classList.remove('show','swipe-preview'); modal.setAttribute('aria-hidden','true');
   $('#recentModalOpen').setAttribute('aria-expanded','false');
   document.documentElement.classList.remove('recent-drawer-open');
   setRecentBackgroundInert(false);
+  modal.style.removeProperty('background-color'); modal.style.removeProperty('backdrop-filter'); modal.style.removeProperty('pointer-events');
   const drawer=modal.querySelector('.recent-modal');
-  drawer.style.removeProperty('transition'); drawer.style.removeProperty('transform');
+  drawer.classList.remove('swipe-dragging'); drawer.style.removeProperty('transition'); drawer.style.removeProperty('transform');
   if(recentReturnFocus&&document.contains(recentReturnFocus)) recentReturnFocus.focus();
   recentReturnFocus=null;
 }
@@ -2002,55 +2006,141 @@ function recentEdgeWidth(){
 }
 function bindRecentSwipeGestures(){
   const modal=$('#recentModal'), drawer=modal.querySelector('.recent-modal');
-  let edgeStartX=null,edgeStartY=null,edgeDeltaX=0,edgeDeltaY=0;
-  let drawerStartX=null,drawerStartY=null,drawerDeltaX=0,drawerDeltaY=0;
+  const motionQuery=window.matchMedia('(prefers-reduced-motion: reduce)');
+  let edgeStartX=null,edgeStartY=null,edgeDeltaX=0,edgeDeltaY=0,edgePreviewActive=false;
+  let drawerStartX=null,drawerStartY=null,drawerDeltaX=0,drawerDeltaY=0,settleTimer=null;
+  const settleDuration=()=>motionQuery.matches?0:280;
   const resetEdgeSwipe=()=>{
     edgeStartX=edgeStartY=null; edgeDeltaX=edgeDeltaY=0;
   };
-  const resetDrawerSwipe=()=>{
-    drawer.style.removeProperty('transition'); drawer.style.removeProperty('transform');
+  const resetDrawerCoordinates=()=>{
     drawerStartX=drawerStartY=null; drawerDeltaX=drawerDeltaY=0;
   };
+  const clearRecentSwipeVisuals=()=>{
+    clearTimeout(settleTimer); settleTimer=null;
+    edgePreviewActive=false;
+    modal.classList.remove('swipe-preview');
+    modal.style.removeProperty('background-color');
+    modal.style.removeProperty('backdrop-filter');
+    modal.style.removeProperty('pointer-events');
+    drawer.classList.remove('swipe-dragging');
+    drawer.style.removeProperty('transition');
+    drawer.style.removeProperty('transform');
+  };
+  function beginRecentEdgePreview(){
+    if(edgePreviewActive) return;
+    edgePreviewActive=true;
+    modal.classList.add('swipe-preview');
+    drawer.classList.add('swipe-dragging');
+    drawer.style.transition='none';
+  }
+  function updateRecentEdgePreview(deltaX){
+    beginRecentEdgePreview();
+    const width=Math.max(1,drawer.getBoundingClientRect().width);
+    const revealed=Math.min(width,Math.max(0,-deltaX));
+    const progress=revealed/width;
+    drawer.style.transform='translateX('+(width-revealed)+'px)';
+    modal.style.backgroundColor='rgba(0,0,0,'+(0.24*progress).toFixed(3)+')';
+    modal.style.backdropFilter='blur('+(8*progress).toFixed(2)+'px)';
+  }
+  function settleRecentEdgePreview(shouldOpen){
+    const duration=settleDuration();
+    resetEdgeSwipe();
+    if(!edgePreviewActive){
+      if(shouldOpen){ recentReturnFocus=$('#recentModalOpen'); showRecentModal(); }
+      return;
+    }
+    drawer.classList.remove('swipe-dragging');
+    drawer.style.transition=duration?'transform .28s cubic-bezier(.22,.8,.24,1)':'none';
+    if(shouldOpen){
+      recentReturnFocus=$('#recentModalOpen');
+      showRecentModal();
+      requestAnimationFrame(()=>requestAnimationFrame(()=>{
+        drawer.style.transform='translateX(0)';
+        modal.style.backgroundColor='rgba(0,0,0,.24)';
+        modal.style.backdropFilter='blur(8px)';
+      }));
+    }else{
+      drawer.style.transform='translateX(100%)';
+      modal.style.backgroundColor='rgba(0,0,0,0)';
+      modal.style.backdropFilter='blur(0)';
+    }
+    settleTimer=setTimeout(clearRecentSwipeVisuals,duration+40);
+  }
+  const resetDrawerSwipe=()=>{
+    clearRecentSwipeVisuals();
+    resetDrawerCoordinates();
+  };
+  function settleRecentDrawerSwipe(shouldClose){
+    const duration=settleDuration();
+    drawer.classList.remove('swipe-dragging');
+    drawer.style.transition=duration?'transform .28s cubic-bezier(.22,.8,.24,1)':'none';
+    if(shouldClose){
+      modal.style.pointerEvents='none';
+      drawer.style.transform='translateX(100%)';
+      modal.style.backgroundColor='rgba(0,0,0,0)';
+      modal.style.backdropFilter='blur(0)';
+    }else{
+      drawer.style.transform='translateX(0)';
+      modal.style.backgroundColor='rgba(0,0,0,.24)';
+      modal.style.backdropFilter='blur(8px)';
+    }
+    resetDrawerCoordinates();
+    settleTimer=setTimeout(()=>{
+      if(shouldClose) closeRecentModal();
+      clearRecentSwipeVisuals();
+    },duration+20);
+  }
   document.addEventListener('touchstart',event=>{
     if(modal.classList.contains('show')||event.touches.length!==1||document.querySelector('.modal-overlay.show')){
       resetEdgeSwipe(); return;
     }
+    clearTimeout(settleTimer); settleTimer=null;
     const touch=event.touches[0];
     edgeStartX=touch.clientX; edgeStartY=touch.clientY; edgeDeltaX=0; edgeDeltaY=0;
   },{passive:true});
   document.addEventListener('touchmove',event=>{
     if(edgeStartX===null) return;
-    if(event.touches.length!==1){ resetEdgeSwipe(); return; }
+    if(event.touches.length!==1){ settleRecentEdgePreview(false); return; }
     const touch=event.touches[0];
     edgeDeltaX=touch.clientX-edgeStartX; edgeDeltaY=touch.clientY-edgeStartY;
-    if(edgeStartX>=window.innerWidth-recentEdgeWidth()&&edgeDeltaX<0&&Math.abs(edgeDeltaX)>Math.abs(edgeDeltaY)) event.preventDefault();
+    if(edgeStartX>=window.innerWidth-recentEdgeWidth()&&edgeDeltaX<0&&Math.abs(edgeDeltaX)>Math.abs(edgeDeltaY)){
+      updateRecentEdgePreview(edgeDeltaX);
+      event.preventDefault();
+    }
   },{passive:false});
   document.addEventListener('touchend',()=>{
     const shouldOpen=edgeStartX!==null&&edgeStartX>=window.innerWidth-recentEdgeWidth()&&edgeDeltaX<=-56&&Math.abs(edgeDeltaX)>Math.abs(edgeDeltaY);
-    resetEdgeSwipe();
-    if(shouldOpen){ recentReturnFocus=$('#recentModalOpen'); showRecentModal(); }
+    settleRecentEdgePreview(shouldOpen);
   },{passive:true});
-  document.addEventListener('touchcancel',resetEdgeSwipe,{passive:true});
+  document.addEventListener('touchcancel',()=>settleRecentEdgePreview(false),{passive:true});
   drawer.addEventListener('touchstart',event=>{
     if(event.touches.length!==1){ resetDrawerSwipe(); return; }
+    clearTimeout(settleTimer); settleTimer=null;
     const touch=event.touches[0];
     drawerStartX=touch.clientX; drawerStartY=touch.clientY; drawerDeltaX=0; drawerDeltaY=0;
   },{passive:true});
   drawer.addEventListener('touchmove',event=>{
     if(drawerStartX===null) return;
-    if(event.touches.length!==1){ resetDrawerSwipe(); return; }
+    if(event.touches.length!==1){ settleRecentDrawerSwipe(false); return; }
     const touch=event.touches[0];
     drawerDeltaX=Math.max(0,touch.clientX-drawerStartX); drawerDeltaY=touch.clientY-drawerStartY;
     if(drawerDeltaX>Math.abs(drawerDeltaY)){
-      drawer.style.transition='none'; drawer.style.transform='translateX('+drawerDeltaX+'px)'; event.preventDefault();
+      const width=Math.max(1,drawer.getBoundingClientRect().width);
+      const progress=Math.min(1,drawerDeltaX/width);
+      drawer.classList.add('swipe-dragging');
+      drawer.style.transition='none';
+      drawer.style.transform='translateX('+drawerDeltaX+'px)';
+      modal.style.backgroundColor='rgba(0,0,0,'+(0.24*(1-progress)).toFixed(3)+')';
+      modal.style.backdropFilter='blur('+(8*(1-progress)).toFixed(2)+'px)';
+      event.preventDefault();
     }
   },{passive:false});
   drawer.addEventListener('touchend',()=>{
     const shouldClose=drawerDeltaX>=70&&drawerDeltaX>Math.abs(drawerDeltaY);
-    resetDrawerSwipe();
-    if(shouldClose) closeRecentModal();
+    settleRecentDrawerSwipe(shouldClose);
   },{passive:true});
-  drawer.addEventListener('touchcancel',resetDrawerSwipe,{passive:true});
+  drawer.addEventListener('touchcancel',()=>settleRecentDrawerSwipe(false),{passive:true});
 }
 function trackValue(label, value){
   return '<div class="track-kv"><small>'+esc(label)+'</small><span>'+esc(value==null||value===''?'—':value)+'</span></div>';

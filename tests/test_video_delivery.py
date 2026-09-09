@@ -2040,16 +2040,54 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PACKAGE VALID", result.stdout)
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            for name in ("h3_worker.py", "model-manifest.json"):
+                (package / name).write_bytes((worker / name).read_bytes())
+            (package / "server.py").write_bytes((root / "server.py").read_bytes())
+            isolated = subprocess.run(
+                [sys.executable, str(package / "h3_worker.py"), "--validate-package"],
+                cwd=package, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(isolated.returncode, 0, isolated.stdout + isolated.stderr)
+            self.assertIn("PACKAGE VALID", isolated.stdout)
         manifest = json.loads((worker / "model-manifest.json").read_text())
         self.assertEqual(manifest["profile"], "minimax-h3-pgx-exact-v1")
         self.assertEqual(len(manifest["models"]), 8)
+        live_pgx_sizes = {
+            "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors": 20975924960,
+            "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors": 15687142551,
+            "vae/minimax_h3_video_vae_fp16.safetensors": 5207808496,
+            "vae/minimax_h3_audio_vae_fp32.safetensors": 605254808,
+            "loras/minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors": 620285592,
+            "loras/h3-realism-people-t2v-i2v-r2v.safetensors": 131229656,
+            "loras/cam_motion_1000.safetensors": 155109488,
+            "loras/cam_motion_3000.safetensors": 155109680,
+        }
+        self.assertEqual({item["relative_path"]: item["size"] for item in manifest["models"]}, live_pgx_sizes)
         self.assertTrue(all(item["required"] for item in manifest["models"]))
         self.assertTrue(all(len(item["sha256"]) == 64 for item in manifest["models"]))
         source = (worker / "h3_worker.py").read_text()
         installer = (worker / "Install-H3Worker.ps1").read_text()
         self.assertIn('http://127.0.0.1:8188', source)
         self.assertNotIn('--listen", "0.0.0.0', source)
-        self.assertIn("HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", installer)
+        self.assertIn("def assert_comfy_loopback_only", source)
+        self.assertIn("Get-NetTCPConnection", source)
+        self.assertIn("if sys.stdout is not None:", source)
+        self.assertIn("Register-ScheduledTask", installer)
+        self.assertIn("New-ScheduledTaskPrincipal", installer)
+        self.assertIn("-LogonType Interactive", installer)
+        self.assertIn("New-ScheduledTaskTrigger -AtLogOn", installer)
+        self.assertIn("Start-ScheduledTask", installer)
+        self.assertIn("ExecutionTimeLimit", installer)
+        self.assertIn("Remove-ItemProperty -Path $LegacyRunKey -Name $LegacyRunName", installer)
+        uninstaller = (worker / "Uninstall-H3Worker.ps1").read_text()
+        self.assertIn("Unregister-ScheduledTask", uninstaller)
+        self.assertIn("Remove-ItemProperty -Path $LegacyRunKey -Name $LegacyRunName", uninstaller)
+        token_delete = "Remove-Item -LiteralPath $tokenFile -Force"
+        self.assertLess(installer.index(token_delete), installer.index("Locating exact H3 models and ComfyUI"))
+        self.assertIn("Worker activation failed; restoring previous installation", installer)
+        self.assertGreater(installer.rindex("Remove-Item -LiteralPath $BackupRoot"), installer.index("Get-ScheduledTaskInfo"))
         self.assertIn("--lowvram", installer)
         self.assertIn("--reserve-vram", installer)
         self.assertIn("System.Text.UTF8Encoding($false)", installer)
@@ -2131,6 +2169,11 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertIn("drawerDeltaX>=70", html)
         self.assertIn("touchmove", html)
         self.assertIn("touchcancel", html)
+        edge_touchstart = html.index("document.addEventListener('touchstart',event=>{")
+        edge_touchstart_end = html.index("},{passive:true});", edge_touchstart)
+        edge_touchstart_source = html[edge_touchstart:edge_touchstart_end]
+        self.assertIn("clearTimeout(settleTimer); settleTimer=null;", edge_touchstart_source)
+        self.assertLess(edge_touchstart_source.index("clearTimeout(settleTimer);"), edge_touchstart_source.index("edgeStartX=touch.clientX"))
         self.assertIn("resetEdgeSwipe", html)
         self.assertIn("resetDrawerSwipe", html)
         self.assertIn("passive:false", html)
@@ -2139,7 +2182,16 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertIn("function trapRecentFocus(event)", html)
         self.assertIn("if(event.key==='Tab') trapRecentFocus(event);", html)
         self.assertIn("setTimeout(()=>{ if(modal.classList.contains('show'))", html)
+        self.assertIn("function beginRecentEdgePreview()", html)
+        self.assertIn("function updateRecentEdgePreview(deltaX)", html)
+        self.assertIn("function settleRecentEdgePreview(shouldOpen)", html)
+        self.assertIn("modal.classList.add('swipe-preview')", html)
+        self.assertIn("requestAnimationFrame(()=>requestAnimationFrame", html)
         self.assertIn('.modal-overlay#recentModal{display:flex;visibility:hidden;pointer-events:none;justify-content:flex-end', html)
+        self.assertIn('#recentModal.swipe-preview{visibility:visible;pointer-events:none;transition-delay:0s}', html)
+        self.assertIn('transition:background-color .28s', html)
+        self.assertIn('will-change:transform', html)
+        self.assertIn('@media(prefers-reduced-motion:reduce){#recentModal,#recentModal .recent-modal{transition:none!important}}', html)
         self.assertIn('transform:translateX(100%)', html)
         self.assertIn('#recentModal.show .recent-modal{transform:translateX(0)', html)
         self.assertIn('right:env(safe-area-inset-right,0px)', html)
@@ -2162,7 +2214,7 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         root = Path(__file__).resolve().parents[1]
         html = (root / "index.html").read_text()
         css = (root / "apple-redesign.css").read_text()
-        self.assertIn('href="/apple-redesign.css?v=20260909-todaycount1"', html)
+        self.assertIn('href="/apple-redesign.css?v=20260909-swipe1"', html)
         self.assertIn('id="videoStatus"', html)
         self.assertIn('id="modalPlaybackRate"', html)
         self.assertIn('id="modalPip"', html)

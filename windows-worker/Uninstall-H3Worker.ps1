@@ -3,8 +3,12 @@
 param()
 $ErrorActionPreference = 'Stop'
 $InstallRoot = Join-Path $env:LOCALAPPDATA 'ASKI\H3Worker'
-$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-Remove-ItemProperty -Path $runKey -Name 'ASKI-H3-RTX5080-Worker' -ErrorAction SilentlyContinue
+$TaskName = 'ASKI-H3-RTX5080-Worker'
+$LegacyRunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$LegacyRunName = 'ASKI-H3-RTX5080-Worker'
+Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+Remove-ItemProperty -Path $LegacyRunKey -Name $LegacyRunName -ErrorAction SilentlyContinue
 Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue |
   Where-Object { $_.CommandLine -and $_.CommandLine.Contains((Join-Path $InstallRoot 'h3_worker.py')) } |
   ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null }
