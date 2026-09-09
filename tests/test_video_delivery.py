@@ -679,6 +679,50 @@ class VideoDeliveryTests(unittest.TestCase):
                 httpd.server_close()
                 thread.join(timeout=2)
 
+    def test_generate_client_request_id_is_idempotent_and_does_not_grow_queue(self):
+        def post(port):
+            body = json.dumps({
+                "prompt": "daily ReelRadar idempotency test prompt",
+                "mode": "t2v",
+                "seconds": 10,
+                "worker_target": "pgx",
+                "client_request_id": "8d2160cb-53d2-4f90-8d8d-a35b7f4e6d51",
+            }).encode()
+            conn = http.client.HTTPConnection("127.0.0.1", port)
+            conn.request("POST", "/api/generate", body=body, headers={
+                "Content-Type": "application/json",
+                server.ORIGIN_HEADER: self.ORIGIN_SECRET,
+            })
+            response = conn.getresponse()
+            payload = json.loads(response.read())
+            conn.close()
+            return response.status, payload
+
+        with patch.object(server, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch.dict(server.JOBS, {}, clear=True), \
+             patch.object(server, "QUEUE", []), \
+             patch.object(server, "QUEUE_RESERVATIONS", {"pgx": 0, "rtx5080": 0}), \
+             patch.object(server, "_save_job"):
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            try:
+                first_status, first = post(httpd.server_port)
+                second_status, second = post(httpd.server_port)
+                self.assertEqual(first_status, 200)
+                self.assertEqual(second_status, 200)
+                self.assertFalse(first.get("duplicate", False))
+                self.assertTrue(second["duplicate"])
+                self.assertEqual(second["job"], first["job"])
+                self.assertEqual(len(server.JOBS), 1)
+                self.assertEqual(server.QUEUE, [first["job"]])
+                self.assertEqual(server.JOBS[first["job"]]["cfg"]["client_request_id"],
+                                 "8d2160cb-53d2-4f90-8d8d-a35b7f4e6d51")
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=2)
+
     def test_comfy_recovery_never_starts_failed_duplicate_user_unit(self):
         source = inspect.getsource(server.ensure_comfyui)
         self.assertIn("systemctl start comfyui-minimax-h3.service", source)

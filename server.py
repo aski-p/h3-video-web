@@ -135,6 +135,7 @@ QUEUE = []            # FIFO: 대기 중인 job_id
 MAX_PENDING_JOBS = 5  # 실행 중 작업은 제외하고, 대기열만 최대 5개
 QUEUE_RESERVATIONS = {"pgx": 0, "rtx5080": 0}  # worker별 admission slot
 QUEUE_LOCK = threading.Lock()
+GENERATE_ADMISSION_LOCK = threading.Lock()  # atomically dedupe + reserve + register
 ACTIVE = [None]       # 실행 중인 PGX job_id (동시 1개)
 
 # Optional Windows RTX 5080 outbound worker.  The worker never exposes
@@ -245,6 +246,67 @@ def queued_jobs_for_target(jobs, queue, worker_target):
         if (jobs.get(jid) or {}).get("status") == "queued"
         and (jobs.get(jid, {}).get("cfg") or {}).get("worker_target", "pgx") == worker_target
     )
+
+
+def generation_receipt(job, duplicate=False):
+    cfg = job.get("cfg") or {}
+    segments = int(job.get("segments") or 1)
+    total_seconds = job.get("total_seconds")
+    estimated_seconds = job.get("estimated_seconds")
+    return {
+        "ok": True,
+        "job": job.get("id"),
+        "duplicate": bool(duplicate),
+        "worker_target": cfg.get("worker_target", job.get("worker_target", "pgx")),
+        "worker_label": job.get("worker_label") or ("RTX 5080" if cfg.get("worker_target") == "rtx5080" else "PGX Spark"),
+        "segments": segments,
+        "total_seconds": total_seconds,
+        "strategy": cfg.get("strategy"),
+        "seg_seconds": cfg.get("seg_seconds"),
+        "steps": cfg.get("steps"),
+        "estimated_seconds": estimated_seconds,
+        "message": f"{segments}개 세그먼트, 예상 {estimated_seconds}초",
+    }
+
+
+def _same_idempotent_generation(left, right):
+    keys = (
+        "worker_target", "mode", "prompt", "negative", "width", "height",
+        "seconds", "strategy", "seg_seconds", "steps", "seed", "filename",
+        "image_source_sha256", "video_source_sha256", "realism_lora",
+        "cam_motion", "realism_strength", "cam_strength",
+    )
+    return all(left.get(key) == right.get(key) for key in keys)
+
+
+def admit_generation_job(job):
+    """Atomically deduplicate, reserve target capacity, and register one job."""
+    cfg = job.get("cfg") or {}
+    client_request_id = cfg.get("client_request_id") or ""
+    worker_target = cfg.get("worker_target", "pgx")
+    global QUEUE_RESERVATIONS
+    with GENERATE_ADMISSION_LOCK:
+        if client_request_id:
+            with LOCK:
+                existing = next((
+                    item for item in JOBS.values()
+                    if (item.get("cfg") or {}).get("client_request_id") == client_request_id
+                ), None)
+            if existing is not None:
+                if not _same_idempotent_generation(existing.get("cfg") or {}, cfg):
+                    return "conflict", existing, None
+                return "duplicate", existing, None
+        with QUEUE_LOCK:
+            pending_total = (
+                queued_jobs_for_target(JOBS, QUEUE, worker_target)
+                + QUEUE_RESERVATIONS[worker_target]
+            )
+            if pending_total >= MAX_PENDING_JOBS:
+                return "full", None, pending_total
+            QUEUE_RESERVATIONS[worker_target] += 1
+        with LOCK:
+            JOBS[job["id"]] = job
+        return "accepted", job, pending_total
 
 
 def worker_queue_snapshot(jobs=None, queue=None):
@@ -3036,6 +3098,11 @@ class Handler(BaseHTTPRequestHandler):
             if len(prompt) < 3:
                 send_json(self, {"ok": False, "error": "프롬프트가 너무 짧습니다"}, 400)
                 return
+            client_request_id = str(data.get("client_request_id") or "").strip()
+            if client_request_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{2,127}", client_request_id):
+                send_json(self, {"ok": False, "error": "client_request_id 형식이 올바르지 않습니다",
+                                 "code": "INVALID_CLIENT_REQUEST_ID"}, 400)
+                return
             worker_target = str(data.get("worker_target") or "pgx").strip().lower()
             if worker_target not in ("pgx", "rtx5080"):
                 send_json(self, {"ok": False, "error": "worker_target은 pgx 또는 rtx5080이어야 합니다"}, 400)
@@ -3163,6 +3230,7 @@ class Handler(BaseHTTPRequestHandler):
                 send_json(self, {"ok": False, "error": "해상도와 시드는 정수여야 합니다"}, 400)
                 return
             cfg = {
+                "client_request_id": client_request_id,
                 "worker_target": worker_target,
                 "mode": mode,
                 "prompt": prompt,
@@ -3192,35 +3260,42 @@ class Handler(BaseHTTPRequestHandler):
                 "realism_strength": realism_strength,
                 "cam_strength": cam_strength,
             }
-            # worker별 admission slot을 먼저 예약한다. 따라서 PGX와 RTX 큐는
-            # 각각 최대 5개이며 동시에 들어온 요청도 서로 용량을 침범하지 않는다.
-            global QUEUE_RESERVATIONS
-            queue_full = False
-            with QUEUE_LOCK:
-                pending_total = (
-                    queued_jobs_for_target(JOBS, QUEUE, worker_target)
-                    + QUEUE_RESERVATIONS[worker_target]
-                )
-                if pending_total >= MAX_PENDING_JOBS:
-                    queue_full = True
+            # Dedupe, worker별 admission reservation, job registration을 한 짧은
+            # critical section에서 처리한다. 생성 작업 자체는 이 lock 밖에서 실행된다.
+            job = {
+                "id": jid, "status": "queued", "created": time.time(),
+                "cfg": cfg, "prompt": prompt,
+                "mode": mode, "worker_target": worker_target,
+                "worker_label": "RTX 5080" if worker_target == "rtx5080" else "PGX Spark",
+                "segments": segments, "total_seconds": seconds,
+                "estimated_seconds": est,
+            }
+            admission, admitted_job, pending_total = admit_generation_job(job)
+            if admission in ("duplicate", "conflict"):
+                cleanup_job_input_snapshots(image_source_path, video_source_path)
+                if admission == "conflict":
+                    send_json(self, {"ok": False, "error": "같은 client_request_id에 다른 생성 요청을 사용할 수 없습니다",
+                                     "code": "IDEMPOTENCY_CONFLICT", "job": admitted_job.get("id")}, 409)
                 else:
-                    QUEUE_RESERVATIONS[worker_target] += 1
-            if queue_full:
+                    send_json(self, generation_receipt(admitted_job, duplicate=True))
+                return
+            if admission == "full":
                 cleanup_job_input_snapshots(image_source_path, video_source_path)
                 send_json(self, {"ok": False, "error": f"{worker_target} 대기열이 가득 찼습니다 (최대 5개). 실행 중인 작업이 끝난 뒤 다시 시도해 주세요.",
                                  "code": "QUEUE_FULL", "worker_target": worker_target,
                                  "queue_pending": pending_total, "queue_limit": MAX_PENDING_JOBS}, 429)
                 return
-            with LOCK:
-                JOBS[jid] = {
-                    "id": jid, "status": "queued", "created": time.time(),
-                    "cfg": cfg, "prompt": prompt,
-                    "mode": mode, "worker_target": worker_target,
-                    "worker_label": "RTX 5080" if worker_target == "rtx5080" else "PGX Spark",
-                    "segments": segments, "total_seconds": seconds,
-                    "estimated_seconds": est,
-                }
-            _save_job(jid)
+            try:
+                _save_job(jid)
+            except Exception as exc:
+                with LOCK:
+                    JOBS.pop(jid, None)
+                with QUEUE_LOCK:
+                    QUEUE_RESERVATIONS[worker_target] = max(0, QUEUE_RESERVATIONS[worker_target] - 1)
+                cleanup_job_input_snapshots(image_source_path, video_source_path)
+                log(f"job admission persistence failed {jid}: {type(exc).__name__}: {exc}")
+                send_json(self, {"ok": False, "error": "작업 접수 저장에 실패했습니다"}, 500)
+                return
             # 예약한 worker 큐에 정확히 한 번만 enqueue한다.
             with QUEUE_LOCK:
                 QUEUE_RESERVATIONS[worker_target] -= 1
@@ -3233,15 +3308,7 @@ class Handler(BaseHTTPRequestHandler):
                 + (f" (x{cfg['realism_strength']})" if cfg.get("realism_strength") is not None else "")
                 + (f" cam_motion={cam_motion}" if cam_motion else "")
                 + (f" (x{cfg['cam_strength']})" if cfg.get("cam_strength") is not None else ""))
-            send_json(self, {
-                "ok": True, "job": jid, "worker_target": worker_target,
-                "worker_label": "RTX 5080" if worker_target == "rtx5080" else "PGX Spark",
-                "segments": segments, "total_seconds": seconds,
-                "strategy": strategy, "seg_seconds": seg_seconds,
-                "steps": steps,
-                "estimated_seconds": est,
-                "message": f"{segments}개 세그먼트, 예상 {est}초"
-            })
+            send_json(self, generation_receipt(job, duplicate=False))
         elif p.startswith("/api/cancel/"):
             jid = p.split("/")[3]
             if cancel_queued_job(jid):
