@@ -87,7 +87,7 @@ class VideoDeliveryTests(unittest.TestCase):
             result = backend_proxy.handler(env, lambda status, headers: started.extend([status, dict(headers)]))
         self.assertEqual(started[0], "502")
         self.assertEqual(json.loads(b"".join(result))["error"], "backend unavailable")
-        logged.assert_called_once_with("H3 upstream error: URLError", flush=True)
+        logged.assert_called_once_with("H3 upstream error: URLError/str", flush=True)
 
     def test_proxy_injects_server_side_origin_secret(self):
         seen = {}

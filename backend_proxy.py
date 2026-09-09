@@ -125,9 +125,14 @@ def proxy(environ, start_response):
         start_response(f"{e.code}", headers)
         return [data]
     except Exception as exc:
-        # Record only the exception class for diagnosis. Do not log the private
-        # backend URL, request headers, origin token, or transport detail.
-        print(f"H3 upstream error: {type(exc).__name__}", flush=True)
+        # Record exception classes only. This distinguishes DNS/TLS/socket
+        # failures without exposing the backend URL, headers, credentials, or
+        # transport detail embedded in exception messages.
+        error_class = type(exc).__name__
+        reason = getattr(exc, "reason", None)
+        if reason is not None:
+            error_class += f"/{type(reason).__name__}"
+        print(f"H3 upstream error: {error_class}", flush=True)
         # Do not reflect private tailnet/DNS/TLS details into a public response.
         err = json.dumps({"ok": False, "error": "backend unavailable"}).encode()
         start_response("502", [("Content-Type", "application/json"),
