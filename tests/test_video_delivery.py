@@ -2087,6 +2087,8 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         token_delete = "Remove-Item -LiteralPath $tokenFile -Force"
         self.assertLess(installer.index(token_delete), installer.index("Locating exact H3 models and ComfyUI"))
         self.assertIn("Worker activation failed; restoring previous installation", installer)
+        self.assertIn("Invoke-CimMethod -InputObject $_ -MethodName Terminate -ErrorAction SilentlyContinue", installer)
+        self.assertGreater(installer.index("Stop-InstalledWorker $InstallRoot"), installer.index("try {", installer.index("$activated = $false")))
         self.assertGreater(installer.rindex("Remove-Item -LiteralPath $BackupRoot"), installer.index("Get-ScheduledTaskInfo"))
         self.assertIn("--lowvram", installer)
         self.assertIn("--reserve-vram", installer)

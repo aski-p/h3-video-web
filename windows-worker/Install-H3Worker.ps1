@@ -38,7 +38,7 @@ function Stop-InstalledWorker([string]$Root) {
   $script = Join-Path $Root 'h3_worker.py'
   Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -and $_.CommandLine.Contains($script) } |
-    ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null }
+    ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null }
   Start-Sleep -Milliseconds 750
 }
 function Register-WorkerTask([string]$Root) {
@@ -179,8 +179,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Worker dependency installation failed.' }
 
 $hadPrevious = Test-Path -LiteralPath $InstallRoot -PathType Container
 $activated = $false
-Stop-InstalledWorker $InstallRoot
 try {
+  Stop-InstalledWorker $InstallRoot
   Write-Step 'Running RTX 5080, exact-model SHA-256, node, GPU, and generation self-test'
   $selfTestArgs = @((Join-Path $StageRoot 'h3_worker.py'),'--self-test')
   if ($ForceHash) { $selfTestArgs += '--force-hash' }
