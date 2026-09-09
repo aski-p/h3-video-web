@@ -2091,6 +2091,7 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertIn("--lowvram", installer)
         self.assertIn("--reserve-vram", installer)
         self.assertIn("System.Text.UTF8Encoding($false)", installer)
+        self.assertIn("Add-Type -AssemblyName System.Security", installer)
         self.assertNotIn("Set-Content -LiteralPath (Join-Path $InstallRoot 'config.json')", installer)
         self.assertIn("run_local_generation_smoke", source)
         self.assertIn("generation_marker_valid", source)

@@ -3,6 +3,7 @@
 param([switch]$ForceHash)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+Add-Type -AssemblyName System.Security
 
 $ParentRoot = Join-Path $env:LOCALAPPDATA 'ASKI'
 $InstallRoot = Join-Path $ParentRoot 'H3Worker'
