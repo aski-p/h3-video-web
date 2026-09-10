@@ -750,6 +750,20 @@ class VideoDeliveryTests(unittest.TestCase):
             self.assertTrue(server.ensure_comfyui())
         self.assertEqual(start.call_count, 2)
 
+    def test_run_asu_executes_directly_when_already_running_as_target_user(self):
+        completed = subprocess.CompletedProcess(
+            args=["bash", "-c", "fixed-control-command"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        target_user = type("TargetUser", (), {"pw_uid": 1000})()
+        with patch.object(server.os, "geteuid", return_value=1000), \
+             patch("pwd.getpwnam", return_value=target_user), \
+             patch.object(server.subprocess, "run", return_value=completed) as run:
+            server.run_asu("fixed-control-command")
+        self.assertEqual(run.call_args.args[0], ["bash", "-c", "fixed-control-command"])
+
     def test_run_asu_surfaces_stdout_when_failed_command_has_whitespace_stderr(self):
         failed = subprocess.CompletedProcess(
             args=["fixed-control-command"], returncode=1,

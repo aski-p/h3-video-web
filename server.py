@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import math
 import os
+import pwd
 import re
 import time
 import shutil
@@ -1421,8 +1422,17 @@ def comfy_up(timeout=8):
 
 
 def run_asu(cmd, timeout=300, check=True):
-    """aski 권한으로 명령 실행 (NOPASSWD sudo, CIFS home 충돌 방지)."""
-    full = ["sudo", "-n", "-u", ASUI, "bash", "-c", cmd]
+    """대상 사용자 권한으로 실행하되 동일 UID에서는 sudo를 거치지 않는다."""
+    try:
+        target_uid = pwd.getpwnam(ASUI).pw_uid
+    except KeyError:
+        target_uid = None
+    if target_uid is not None and os.geteuid() == target_uid:
+        # NoNewPrivileges=true 서비스에서는 같은 사용자로의 sudo 재진입도
+        # 차단된다. 이미 대상 UID이면 직접 실행하는 것이 권한상 동등하다.
+        full = ["bash", "-c", cmd]
+    else:
+        full = ["sudo", "-n", "-u", ASUI, "bash", "-c", cmd]
     env = dict(os.environ)
     env.update({"XDG_RUNTIME_DIR": "/run/user/1000",
                 "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
