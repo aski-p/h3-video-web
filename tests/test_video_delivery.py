@@ -740,6 +740,30 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertIn("systemctl start comfyui-minimax-h3.service", source)
         self.assertNotIn("systemctl --user start minimax-h3-comfyui.service", source)
 
+    def test_comfy_recovery_retries_transient_system_service_start_failure(self):
+        with patch.object(server, "comfy_up", side_effect=[False, False, False, True]), \
+             patch.object(server, "run_asu", side_effect=[
+                 RuntimeError("transient"),
+                 subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+             ]) as start, \
+             patch.object(server.time, "sleep"):
+            self.assertTrue(server.ensure_comfyui())
+        self.assertEqual(start.call_count, 2)
+
+    def test_run_asu_surfaces_stdout_when_failed_command_has_no_stderr(self):
+        failed = subprocess.CompletedProcess(
+            args=["fixed-control-command"], returncode=1,
+            stdout="systemd control transport failed", stderr="",
+        )
+        with patch.object(server.subprocess, "run", return_value=failed):
+            with self.assertRaisesRegex(RuntimeError, "systemd control transport failed"):
+                server.run_asu("fixed-control-command")
+
+    def test_comfy_recovery_uses_a_real_300_second_deadline(self):
+        source = inspect.getsource(server.ensure_comfyui)
+        self.assertIn("time.monotonic()", source)
+        self.assertNotIn("range(300)", source)
+
     def test_cancel_queued_job_releases_lock_before_persisting(self):
         job = {"id": "queued-job", "status": "queued"}
         with patch.dict(server.JOBS, {"queued-job": job}, clear=True), \

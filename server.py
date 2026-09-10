@@ -1430,7 +1430,8 @@ def run_asu(cmd, timeout=300, check=True):
                 "PWD": "/tmp"})
     p = subprocess.run(full, capture_output=True, text=True, timeout=timeout, env=env)
     if check and p.returncode != 0:
-        raise RuntimeError(f"asu cmd failed: {cmd}\n{p.stderr.strip()[:400]}")
+        diagnostic = (p.stderr or p.stdout or "no command output").strip()[:400]
+        raise RuntimeError(f"asu cmd failed (rc={p.returncode}): {cmd}\n{diagnostic}")
     return p
 
 
@@ -1444,18 +1445,40 @@ def ensure_comfyui():
         "docker run --rm --privileged --pid=host -v /:/host python:3.12-alpine "
         "chroot /host /usr/bin/nsenter -t 1 -m -i -n -p /usr/bin/systemctl start comfyui-minimax-h3.service"
     )
-    try:
-        run_asu(cmd, timeout=60, check=True)
-        log("  primary system ComfyUI start requested")
-    except Exception as e:
-        # It may already be starting. Wait for the authoritative listener, but
-        # never fall back to the duplicate user service.
-        log(f"  primary system ComfyUI start attempt failed: {e}")
-    for _ in range(300):
+    deadline = time.monotonic() + 300.0
+    # The privileged host-control container is intentionally short-lived. A
+    # transient Docker/systemd transport failure must not strand the job for the
+    # whole readiness window, so retry the idempotent start request three times.
+    for attempt in range(1, 4):
+        if attempt > 1 and comfy_up():
+            log("ComfyUI ready")
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            run_asu(cmd, timeout=min(60.0, remaining), check=True)
+            log(f"  primary system ComfyUI start requested (attempt {attempt}/3)")
+            break
+        except Exception as e:
+            # It may already be starting. Probe before retrying, and never fall
+            # back to the duplicate user service.
+            log(f"  primary system ComfyUI start attempt {attempt}/3 failed: {e}")
+            if comfy_up():
+                log("ComfyUI ready")
+                return True
+            remaining = deadline - time.monotonic()
+            if attempt < 3 and remaining > 0:
+                time.sleep(min(2.0, remaining))
+
+    while True:
         if comfy_up():
             log("ComfyUI ready")
             return True
-        time.sleep(2)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(2.0, remaining))
     raise RuntimeError("ComfyUI 기동 실패 (300초 대기 초과)")
 
 
