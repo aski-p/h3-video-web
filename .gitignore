@@ -1,4 +1,6 @@
 .vercel
+.env.local
+/prod
 .h3-web/
 .secrets/
 media-origin.txt

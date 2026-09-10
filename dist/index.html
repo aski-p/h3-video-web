@@ -94,6 +94,31 @@ header .sub2 b{color:var(--tx2);font-weight:500}
 .dot.on{background:var(--ok)}
 .dot.off{background:var(--err)}
 
+/* ── Always-visible dual worker progress ── */
+.worker-progress-board{
+  position:sticky;top:8px;z-index:20;
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;
+  margin:0 0 16px;padding:8px;
+  border:1px solid var(--line);border-radius:var(--r-lg);
+  background:rgba(8,9,10,.9);backdrop-filter:blur(16px);
+  box-shadow:0 8px 28px rgba(0,0,0,.28);
+}
+.worker-live{min-width:0;padding:11px 12px;border:1px solid var(--line-subtle);border-radius:var(--r-md);background:rgba(255,255,255,.025)}
+.worker-live-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.worker-live-name{display:flex;align-items:center;gap:7px;color:var(--tx);font-size:12px;font-weight:590}
+.worker-live-dot{width:7px;height:7px;border-radius:50%;background:var(--tx4);flex:0 0 auto}
+.worker-live.active .worker-live-dot{background:var(--ok);box-shadow:0 0 0 3px rgba(39,166,68,.12)}
+.worker-live-pct{color:var(--tx);font:590 13px var(--mono)}
+.worker-live-phase{margin-top:7px;color:var(--tx3);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.worker-live-bar{height:4px;margin-top:8px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.06)}
+.worker-live-bar i{display:block;width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--acc-bg),var(--acc));transition:width .45s ease}
+.worker-live-time{margin-top:7px;color:var(--tx2);font-size:10.5px;line-height:1.45}
+.worker-live-meta{margin-top:3px;color:var(--tx4);font:400 9.5px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:560px){
+  .worker-progress-board{top:4px;grid-template-columns:1fr;padding:6px;gap:6px}
+  .worker-live{padding:9px 10px}
+}
+
 /* ── Cards ── */
 .card{
   background:rgba(255,255,255,0.02);
@@ -630,6 +655,23 @@ footer{
       <div class="sub2" id="csub"></div>
     </div>
   </header>
+
+  <section class="worker-progress-board" id="workerProgressBoard" aria-label="생성 장비별 실시간 진행률" aria-live="polite">
+    <article class="worker-live" id="pgxLiveProgress" data-worker="pgx">
+      <div class="worker-live-head"><span class="worker-live-name"><i class="worker-live-dot" aria-hidden="true"></i>PGX Spark</span><strong class="worker-live-pct">대기</strong></div>
+      <div class="worker-live-phase">진행 중인 작업 없음</div>
+      <div class="worker-live-bar" aria-hidden="true"><i></i></div>
+      <div class="worker-live-time">예상 완료 —</div>
+      <div class="worker-live-meta">최근 서버 확인 대기</div>
+    </article>
+    <article class="worker-live" id="rtxLiveProgress" data-worker="rtx5080">
+      <div class="worker-live-head"><span class="worker-live-name"><i class="worker-live-dot" aria-hidden="true"></i>RTX 5080</span><strong class="worker-live-pct">대기</strong></div>
+      <div class="worker-live-phase">진행 중인 작업 없음</div>
+      <div class="worker-live-bar" aria-hidden="true"><i></i></div>
+      <div class="worker-live-time">예상 완료 —</div>
+      <div class="worker-live-meta">최근 서버 확인 대기</div>
+    </article>
+  </section>
 
   <!-- 모드 -->
   <div class="mtabs">
@@ -1696,6 +1738,58 @@ function fmtElapsed(s){
   const seconds=String(s%60).padStart(2,'0');
   return hours+'시간 '+minutes+'분 '+seconds+'초';
 }
+function fmtExpectedCompletion(epochSeconds){
+  const value=Number(epochSeconds);
+  if(!Number.isFinite(value)||value<=0) return '—';
+  return new Date(value*1000).toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'});
+}
+function renderWorkerProgressCard(selector,job,serverTime){
+  const card=$(selector);
+  if(!card)return;
+  const pctNode=card.querySelector('.worker-live-pct');
+  const phaseNode=card.querySelector('.worker-live-phase');
+  const bar=card.querySelector('.worker-live-bar i');
+  const timeNode=card.querySelector('.worker-live-time');
+  const metaNode=card.querySelector('.worker-live-meta');
+  if(!job){
+    card.classList.remove('active');
+    pctNode.textContent='대기'; phaseNode.textContent='진행 중인 작업 없음';
+    bar.style.width='0%'; timeNode.textContent='예상 완료 —';
+    metaNode.textContent='서버 확인 '+fmtExpectedCompletion(serverTime);
+    return;
+  }
+  card.classList.add('active');
+  const measured=finiteProgressNumber(job.pct,0,100);
+  const unavailable=job.unavailable===true;
+  const pct=measured!==null&&!unavailable?Math.round(measured):null;
+  pctNode.textContent=pct===null?(job.status==='queued'?'대기':'측정 중'):pct+'%';
+  phaseNode.textContent=job.phase||(job.status==='queued'?'작업 시작 대기 중':'영상 생성 중');
+  bar.style.width=(pct===null?0:pct)+'%';
+  const eta=finiteProgressNumber(job.eta_seconds,0);
+  const expected=fmtExpectedCompletion(job.expected_complete_at);
+  timeNode.textContent=unavailable
+    ? '진행 정보 연결 확인 중 · 생성은 계속됩니다'
+    :(eta===null?'실측 속도 산정 중':expected+' 완료 예상 · '+fmtEta(eta)+' 남음');
+  const step=finiteProgressNumber(job.value,0);
+  const maximum=finiteProgressNumber(job.max,1);
+  const stepText=step!==null&&maximum!==null?' · '+Math.round(step)+'/'+Math.round(maximum)+' step':'';
+  const queueText=job.status==='queued'&&job.queue_position?' · 큐 '+job.queue_position+'번':'';
+  metaNode.textContent=(job.id||'').slice(0,8)+stepText+queueText+' · 서버 갱신 '+fmtExpectedCompletion(serverTime);
+}
+function renderWorkerProgressBoard(workers,serverTime){
+  workers=workers||{};
+  renderWorkerProgressCard('#pgxLiveProgress',workers.pgx,serverTime);
+  renderWorkerProgressCard('#rtxLiveProgress',workers.rtx5080,serverTime);
+}
+async function refreshWorkerProgress(){
+  try{
+    const data=await fetchJsonWithTimeout('/api/active-progress',{},10000);
+    if(data&&data.ok)renderWorkerProgressBoard(data.workers,data.server_time);
+  }catch(_){
+    document.querySelectorAll('.worker-live-meta').forEach(node=>{node.textContent='서버 진행률 다시 연결 중';});
+  }
+}
+refreshWorkerProgress(); setInterval(refreshWorkerProgress,4000);
 
 function setSaveStatus(message, state=''){
   const node=$('#saveStatus');

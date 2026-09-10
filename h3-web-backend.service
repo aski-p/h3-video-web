@@ -8,6 +8,8 @@ Type=simple
 WorkingDirectory=/home/aski/h3-web
 Environment=H3_HOST=127.0.0.1
 Environment=H3_PORT=8300
+Environment=COMFY_SERVER_PATH=/home/aski/ComfyUI/server.py
+Environment=COMFY_TARGETED_INTERRUPT_SHA256=74573b10465505b88b618da86059878e3a56418f84c7dae4073c8824aee35a6c
 EnvironmentFile=/home/aski/h3-web/.env
 ExecStartPre=/bin/sh -c 'test -n "$H3_ORIGIN_SECRET"'
 ExecStartPre=/bin/sh -c 'test -n "$H3_DIRECT_WORKER_TOKEN"'

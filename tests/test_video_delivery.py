@@ -197,6 +197,14 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertIn("$('#negative').value='';", source)
         self.assertIn("$('#promptClear').onclick", source)
 
+    def test_local_vercel_credentials_are_never_part_of_the_release_tree(self):
+        root = Path(__file__).resolve().parents[1]
+        ignored = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertFalse((root / ".env.local").exists())
+        self.assertFalse((root / "prod").exists())
+        self.assertIn(".env.local", ignored)
+        self.assertIn("/prod", ignored)
+
     def test_rtx5080_worker_is_eligible_only_while_fresh_and_ready(self):
         heartbeat = {
             "gpu": "NVIDIA GeForce RTX 5080",
@@ -453,6 +461,12 @@ class VideoDeliveryTests(unittest.TestCase):
             self.assertEqual(repeated_sampler["progress"]["value"], 2)
             self.assertEqual(repeated_sampler["progress"]["pct"], updated["progress"]["pct"])
             self.assertEqual(server.JOBS["remote"]["lease_expires_at"], 21.0 + server.RTX5080_LEASE_SECONDS)
+            changed_max = server.update_rtx5080_progress(
+                "remote", claim["execution_id"], claim["lease_token"],
+                {"value": 3, "max": 100, "phase": "다음 sampler", "segment_index": 0, "segments": 1},
+                now=21.5,
+            )
+            self.assertGreaterEqual(changed_max["progress"]["pct"], updated["progress"]["pct"])
             with self.assertRaises(PermissionError):
                 server.update_rtx5080_progress(
                     "remote", "stale", "wrong",
@@ -553,6 +567,95 @@ class VideoDeliveryTests(unittest.TestCase):
                 self.assertEqual(server.requeue_expired_rtx5080_jobs(now=72.0), ["remote"])
                 self.assertFalse(part.exists())
                 self.assertIsNone(server.JOBS["remote"]["upload_path"])
+
+    def test_remote_completion_cannot_publish_after_lease_is_requeued_during_archive(self):
+        payload = b"archive race bytes"
+        digest = hashlib.sha256(payload).hexdigest()
+        heartbeat = {
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True, "busy": False,
+            "modes": ["t2v", "i2v"], "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        tokens = iter(["execution", "secret"])
+        with tempfile.TemporaryDirectory() as root:
+            nas = os.path.join(root, "nas")
+            out = os.path.join(nas, ".h3-web", "work")
+            os.makedirs(out)
+            job = {"id": "remote", "status": "queued", "segments": 1,
+                   "cfg": {"worker_target": "rtx5080", "mode": "t2v"}}
+            published = Path(nas) / "remote.mp4"
+
+            def archive_then_requeue(_jid, _path):
+                published.write_bytes(payload)
+                with server.LOCK:
+                    current = server.JOBS["remote"]
+                    current.update(status="queued", worker_id=None, execution_id=None,
+                                   lease_sha256=None, lease_expires_at=None, upload_path=None)
+                with server.QUEUE_LOCK:
+                    if "remote" not in server.QUEUE:
+                        server.QUEUE.append("remote")
+                return {"src": str(published), "size": len(payload), "sha256": digest, "nas_saved": True}
+
+            with patch.object(server, "NAS_DIR", nas), patch.object(server, "OUT_DIR", out), \
+                 patch.dict(server.JOBS, {"remote": job}, clear=True), \
+                 patch.object(server, "QUEUE", ["remote"]), \
+                 patch.dict(server.WORKERS, {}, clear=True), \
+                 patch.object(server, "_save_job"), patch.object(server, "_validate_remote_mp4"), \
+                 patch.object(server, "archive_final_to_nas", side_effect=archive_then_requeue):
+                server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=10.0)
+                claim = server.claim_rtx5080_job(now=10.0, token_factory=lambda: next(tokens))
+                server.begin_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"],
+                                            len(payload), digest, now=11.0)
+                server.append_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"],
+                                             0, payload, digest, now=12.0)
+                with self.assertRaises(PermissionError):
+                    server.complete_rtx5080_upload(
+                        "remote", claim["execution_id"], claim["lease_token"], now=13.0
+                    )
+                self.assertEqual(server.JOBS["remote"]["status"], "queued")
+                self.assertIn("remote", server.QUEUE)
+                self.assertFalse(published.exists())
+
+    def test_remote_completion_rechecks_fresh_clock_after_archive(self):
+        payload = b"slow archive bytes"
+        digest = hashlib.sha256(payload).hexdigest()
+        heartbeat = {
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True, "busy": False,
+            "modes": ["t2v", "i2v"], "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        tokens = iter(["execution", "secret"])
+        with tempfile.TemporaryDirectory() as root:
+            nas = os.path.join(root, "nas")
+            out = os.path.join(nas, ".h3-web", "work")
+            os.makedirs(out)
+            job = {"id": "remote", "status": "queued", "segments": 1,
+                   "cfg": {"worker_target": "rtx5080", "mode": "t2v"}}
+            published = Path(nas) / "remote.mp4"
+
+            def slow_archive(_jid, _path):
+                published.write_bytes(payload)
+                return {"src": str(published), "size": len(payload), "sha256": digest, "nas_saved": True}
+
+            with patch.object(server, "NAS_DIR", nas), patch.object(server, "OUT_DIR", out), \
+                 patch.dict(server.JOBS, {"remote": job}, clear=True), \
+                 patch.object(server, "QUEUE", ["remote"]), \
+                 patch.dict(server.WORKERS, {}, clear=True), \
+                 patch.object(server, "_save_job"), patch.object(server, "_validate_remote_mp4"), \
+                 patch.object(server, "archive_final_to_nas", side_effect=slow_archive):
+                server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=10.0)
+                claim = server.claim_rtx5080_job(now=10.0, token_factory=lambda: next(tokens))
+                server.begin_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"],
+                                            len(payload), digest, now=11.0)
+                server.append_rtx5080_upload("remote", claim["execution_id"], claim["lease_token"],
+                                             0, payload, digest, now=12.0)
+                with patch.object(server.time, "time", side_effect=[60.0, 60.0, 100.0]):
+                    with self.assertRaises(PermissionError):
+                        server.complete_rtx5080_upload(
+                            "remote", claim["execution_id"], claim["lease_token"]
+                        )
+                self.assertNotEqual(server.JOBS["remote"]["status"], "done")
+                self.assertFalse(published.exists())
 
     def test_worker_http_api_accepts_proxy_or_direct_auth_and_rejects_missing_secret(self):
         heartbeat = {
@@ -887,17 +990,109 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertEqual(job["progress"]["phase"], "사용자가 생성을 중단했습니다")
         self.assertEqual(events, [("saved", "running-job"), ("interrupted", "prompt-owned")])
 
-    def test_pgx_cancel_deletes_owned_pending_prompt_without_interrupting_other_running_prompt(self):
-        queue = {
-            "queue_running": [[1, "other-running", {}, {}]],
-            "queue_pending": [[2, "owned-pending", {}, {}]],
-        }
-        with patch.object(server, "comfy_get", return_value=queue), \
-             patch.object(server, "comfy_post") as request:
-            self.assertTrue(server.cancel_comfy_prompt("owned-pending"))
-        request.assert_called_once_with(
-            "/queue", {"delete": ["owned-pending"]}, timeout=10,
+    def test_prompt_registration_cleans_up_if_cancel_won_after_submit(self):
+        job = {"id": "cancel-race", "status": "cancelled"}
+        with patch.dict(server.JOBS, {"cancel-race": job}, clear=True), \
+             patch.object(server, "cancel_comfy_prompt", return_value=True) as cancel, \
+             patch.object(server, "_save_job") as save:
+            with self.assertRaises(server.JobCancelled):
+                server.register_comfy_prompt(
+                    "cancel-race", "accepted-prompt", segment_index=0, segments=1, now=123.0,
+                )
+        cancel.assert_called_once_with("accepted-prompt")
+        save.assert_called_once_with("cancel-race")
+        self.assertEqual(job.get("comfy_prompt_id"), "accepted-prompt")
+
+    def test_prompt_registration_persists_id_before_cancellation_can_observe_job(self):
+        job = {"id": "active-race", "status": "starting"}
+        with patch.dict(server.JOBS, {"active-race": job}, clear=True), \
+             patch.object(server, "_save_job") as save:
+            server.register_comfy_prompt(
+                "active-race", "accepted-prompt", segment_index=0, segments=1, now=123.0,
+            )
+        self.assertEqual(job["comfy_prompt_id"], "accepted-prompt")
+        self.assertEqual(job["status"], "queued")
+        save.assert_called_once_with("active-race")
+
+    def test_pgx_cancel_deletes_pending_absent_and_stale_prompts_without_global_interrupt(self):
+        observations = (
+            {"queue_running": [[1, "unrelated-running", {}, {}]], "queue_pending": []},
+            {"queue_running": [], "queue_pending": []},
+            {"queue_running": [[1, "newer-unrelated", {}, {}]], "queue_pending": []},
         )
+        for prompt_id, queue in zip(("owned-pending", "absent", "stale"), observations):
+            with self.subTest(prompt_id=prompt_id), \
+                 patch.object(server, "comfy_post") as post, \
+                 patch.object(server, "comfy_get", return_value=queue):
+                self.assertTrue(server.cancel_comfy_prompt(prompt_id))
+            self.assertEqual(post.call_args_list, [
+                call("/queue", {"delete": [prompt_id]}, timeout=10),
+            ])
+
+    def test_pgx_running_cancel_requires_pinned_targeted_interrupt_contract(self):
+        queue = {"queue_running": [[1, "owned-running", {}, {}]], "queue_pending": []}
+        contract = b"targeted ComfyUI interrupt contract"
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "server.py"
+            source.write_bytes(contract)
+            digest = hashlib.sha256(contract).hexdigest()
+            with patch.object(server, "COMFY_SERVER_PATH", str(source)), \
+                 patch.object(server, "COMFY_TARGETED_INTERRUPT_SHA256", digest), \
+                 patch.object(server, "comfy_get", return_value=queue), \
+                 patch.object(server, "comfy_post") as post:
+                self.assertTrue(server.cancel_comfy_prompt("owned-running"))
+            self.assertEqual(post.call_args_list, [
+                call("/queue", {"delete": ["owned-running"]}, timeout=10),
+                call("/interrupt", {"prompt_id": "owned-running"}, timeout=10),
+            ])
+
+            with patch.object(server, "COMFY_SERVER_PATH", str(source)), \
+                 patch.object(server, "COMFY_TARGETED_INTERRUPT_SHA256", "0" * 64), \
+                 patch.object(server, "comfy_get", return_value=queue), \
+                 patch.object(server, "comfy_post") as post:
+                with self.assertRaises(RuntimeError):
+                    server.cancel_comfy_prompt("owned-running")
+            self.assertEqual(post.call_args_list, [
+                call("/queue", {"delete": ["owned-running"]}, timeout=10),
+            ])
+        unit = (Path(__file__).resolve().parents[1] / "h3-web-backend.service").read_text()
+        self.assertIn("Environment=COMFY_SERVER_PATH=/home/aski/ComfyUI/server.py", unit)
+        self.assertIn(
+            "Environment=COMFY_TARGETED_INTERRUPT_SHA256="
+            "74573b10465505b88b618da86059878e3a56418f84c7dae4073c8824aee35a6c",
+            unit,
+        )
+
+    def test_windows_cancel_targets_running_prompt_only_with_pinned_contract(self):
+        worker = self.load_windows_worker()
+        contract = b"targeted ComfyUI interrupt contract"
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "server.py"
+            source.write_bytes(contract)
+            digest = hashlib.sha256(contract).hexdigest()
+            client = worker.ComfyClient(
+                "http://127.0.0.1:8188", server_path=source,
+                targeted_interrupt_sha256=digest,
+            )
+            calls = []
+            queue = {"queue_running": [[1, "owned-running", {}, {}]], "queue_pending": []}
+
+            def fake_json(path, payload=None, timeout=30):
+                calls.append((path, payload, timeout))
+                return queue if path == "/queue" and payload is None else {}
+
+            with patch.object(client, "json", side_effect=fake_json):
+                self.assertTrue(client.cancel_prompt("owned-running"))
+            self.assertEqual(calls, [
+                ("/queue", {"delete": ["owned-running"]}, 10),
+                ("/queue", None, 10),
+                ("/interrupt", {"prompt_id": "owned-running"}, 10),
+            ])
+
+            unpinned = worker.ComfyClient("http://127.0.0.1:8188", server_path=source)
+            with patch.object(unpinned, "json", side_effect=fake_json):
+                with self.assertRaises(RuntimeError):
+                    unpinned.cancel_prompt("owned-running")
 
     def test_cancel_endpoint_accepts_running_job(self):
         job = {"id": "running-job", "status": "running", "cfg": {"worker_target": "rtx5080"}}
@@ -979,18 +1174,23 @@ class VideoDeliveryTests(unittest.TestCase):
         wait_loop = source[source.index("while True:"):source.index("finally:", source.index("while True:"))]
         self.assertIn("assert_job_active(job_id)", wait_loop)
 
-    def test_windows_worker_interrupts_only_its_running_comfy_prompt(self):
+    def test_windows_worker_unpinned_contract_never_interrupts_unrelated_or_owned_work(self):
         worker = self.load_windows_worker()
         comfy = worker.ComfyClient("http://127.0.0.1:8188")
         queue = {
             "queue_running": [[1, "owned-prompt", {}, {}]],
             "queue_pending": [[2, "other-prompt", {}, {}]],
         }
-        with patch.object(comfy, "json", side_effect=[queue, {}]) as request:
-            self.assertTrue(comfy.cancel_prompt("owned-prompt"))
+
+        def fake_json(path, payload=None, timeout=30):
+            return queue if path == "/queue" and payload is None else {}
+
+        with patch.object(comfy, "json", side_effect=fake_json) as request:
+            with self.assertRaises(RuntimeError):
+                comfy.cancel_prompt("owned-prompt")
         self.assertEqual(request.call_args_list, [
+            call("/queue", {"delete": ["owned-prompt"]}, timeout=10),
             call("/queue", timeout=10),
-            call("/interrupt", {}, timeout=10),
         ])
 
     def test_windows_worker_lease_cancellation_interrupts_submitted_comfy_prompt(self):
@@ -2895,6 +3095,135 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertNotIn("archive_final_to_r2(", full_source)
         self.assertNotIn("r2_key=", full_source)
         self.assertNotIn("video_source_r2_key", full_source)
+
+    def test_comfy_wait_deadline_turns_persistent_unavailability_into_terminal_error(self):
+        server.JOBS["stalljob"] = {"id": "stalljob", "status": "running"}
+        self.assertEqual(
+            server.classify_comfy_observation(
+                history_available=False, queue_available=False,
+                queue_state=None, websocket_evidence=True,
+            ),
+            "live",
+        )
+        self.assertEqual(
+            server.classify_comfy_observation(
+                history_available=False, queue_available=True,
+                queue_state="running", websocket_evidence=False,
+            ),
+            "live",
+        )
+        self.assertEqual(
+            server.classify_comfy_observation(
+                history_available=False, queue_available=False,
+                queue_state=None, websocket_evidence=False,
+            ),
+            "unavailable",
+        )
+        self.assertEqual(
+            server.classify_comfy_observation(
+                history_available=True, queue_available=False,
+                queue_state=None, websocket_evidence=False,
+            ),
+            "inconclusive",
+        )
+        self.assertEqual(
+            server.classify_comfy_observation(
+                history_available=True, queue_available=True,
+                queue_state="unknown", websocket_evidence=False,
+            ),
+            "missing",
+        )
+        self.assertEqual(server.comfy_prompt_deadline_seconds(362, base_seconds=21600), 21600)
+        self.assertGreater(server.comfy_prompt_deadline_seconds(1445, base_seconds=21600), 23 * 60 * 60)
+        self.assertEqual(
+            server.guard_comfy_wait_deadline(
+                "stalljob", since=None, now=100.0, limit=300.0,
+                message="ComfyUI 상태 확인이 장시간 불가능합니다",
+            ),
+            100.0,
+        )
+        self.assertEqual(
+            server.guard_comfy_wait_deadline(
+                "stalljob", since=100.0, now=399.9, limit=300.0,
+                message="ComfyUI 상태 확인이 장시간 불가능합니다",
+            ),
+            100.0,
+        )
+        with self.assertRaisesRegex(RuntimeError, "장시간 불가능"):
+            server.guard_comfy_wait_deadline(
+                "stalljob", since=100.0, now=400.0, limit=300.0,
+                message="ComfyUI 상태 확인이 장시간 불가능합니다",
+            )
+
+    def test_run_job_has_bounded_prompt_and_comfy_outage_waits(self):
+        source = inspect.getsource(server.run_job)
+        self.assertIn("comfy_prompt_deadline_seconds", source)
+        self.assertIn("prompt_max_seconds", source)
+        self.assertIn("COMFY_UNAVAILABLE_GRACE_SECONDS", source)
+        self.assertIn("guard_comfy_wait_deadline", source)
+        self.assertIn("classify_comfy_observation", source)
+        self.assertIn("cancel_comfy_prompt", source)
+
+
+    def test_worker_progress_dashboard_reports_both_live_workers_with_server_eta(self):
+        jobs = {
+            "pgx-live": {
+                "id": "pgx-live", "status": "running", "created": 10,
+                "cfg": {"worker_target": "pgx"},
+                "progress": {"pct": 65, "eta": 120, "phase": "영상 생성 중", "value": 13, "max": 20},
+            },
+            "rtx-live": {
+                "id": "rtx-live", "status": "running", "created": 20,
+                "cfg": {"worker_target": "rtx5080"},
+                "progress": {"pct": 25, "eta": 300, "phase": "영상 생성 중", "value": 5, "max": 20},
+            },
+        }
+        dashboard = server.worker_progress_dashboard(jobs, now=1000.0)
+        self.assertEqual(dashboard["pgx"]["id"], "pgx-live")
+        self.assertEqual(dashboard["pgx"]["pct"], 65)
+        self.assertEqual(dashboard["pgx"]["eta_seconds"], 120)
+        self.assertEqual(dashboard["pgx"]["expected_complete_at"], 1120.0)
+        self.assertEqual(dashboard["rtx5080"]["id"], "rtx-live")
+        self.assertEqual(dashboard["rtx5080"]["expected_complete_at"], 1300.0)
+
+    def test_worker_progress_dashboard_sanitizes_malformed_and_nonfinite_numbers(self):
+        jobs = {
+            "bad-pgx": {
+                "id": "bad-pgx", "status": "running", "created": "not-a-number",
+                "cfg": {"worker_target": "pgx"},
+                "progress": {
+                    "pct": float("nan"), "eta": float("inf"),
+                    "value": float("nan"), "max": float("inf"),
+                },
+                "queue_position": True,
+            },
+            "bad-rtx": {
+                "id": "bad-rtx", "status": "queued", "created": True,
+                "cfg": {"worker_target": "rtx5080"},
+                "progress": {"pct": False, "eta": -1, "value": True, "max": 0},
+                "queue_position": "bad",
+            },
+        }
+        dashboard = server.worker_progress_dashboard(jobs, now=1000.0)
+        encoded = json.dumps(dashboard, allow_nan=False)
+        self.assertIsInstance(encoded, str)
+        for target in ("pgx", "rtx5080"):
+            self.assertIsNone(dashboard[target]["pct"])
+            self.assertIsNone(dashboard[target]["eta_seconds"])
+            self.assertIsNone(dashboard[target]["expected_complete_at"])
+            self.assertIsNone(dashboard[target]["value"])
+            self.assertIsNone(dashboard[target]["max"])
+            self.assertIsNone(dashboard[target]["queue_position"])
+
+    def test_top_worker_progress_board_polls_server_estimates_for_both_workers(self):
+        source = (Path(__file__).resolve().parents[1] / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="workerProgressBoard"', source)
+        self.assertIn('id="pgxLiveProgress"', source)
+        self.assertIn('id="rtxLiveProgress"', source)
+        self.assertIn("'/api/active-progress'", source)
+        self.assertIn('renderWorkerProgressBoard', source)
+        self.assertIn('expected_complete_at', source)
+        self.assertIn('setInterval(refreshWorkerProgress,4000)', source)
 
 
 if __name__ == "__main__":

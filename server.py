@@ -44,9 +44,17 @@ PORT = int(os.environ.get("H3_PORT") or os.environ.get("PORT") or "8300")
 ORIGIN_HEADER = "X-H3-Origin-Token"
 ORIGIN_SECRET = os.environ.get("H3_ORIGIN_SECRET", "")
 COMFY = os.environ.get("COMFY_BASE", "http://127.0.0.1:8188")
+COMFY_SERVER_PATH = os.environ.get("COMFY_SERVER_PATH", "/home/aski/ComfyUI/server.py")
+COMFY_TARGETED_INTERRUPT_SHA256 = os.environ.get("COMFY_TARGETED_INTERRUPT_SHA256", "")
 COMFY_WS_RETRY_SECONDS = 5.0
 COMFY_PROMPT_MISSING_GRACE_SECONDS = float(
     os.environ.get("COMFY_PROMPT_MISSING_GRACE_SECONDS", "60")
+)
+COMFY_UNAVAILABLE_GRACE_SECONDS = float(
+    os.environ.get("COMFY_UNAVAILABLE_GRACE_SECONDS", "300")
+)
+COMFY_PROMPT_MAX_SECONDS = float(
+    os.environ.get("COMFY_PROMPT_MAX_SECONDS", str(6 * 60 * 60))
 )
 ASUI = os.environ.get("ASUI", "aski")
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -355,6 +363,58 @@ def worker_queue_snapshot(jobs=None, queue=None):
     }
 
 
+def _dashboard_number(value, minimum=None, maximum=None):
+    if not _finite_real(value):
+        return None
+    number = float(value)
+    if minimum is not None and number < minimum:
+        return None
+    if maximum is not None and number > maximum:
+        return None
+    return number
+
+
+def worker_progress_dashboard(jobs, now=None):
+    """Return one lightweight live progress record per execution worker."""
+    now = time.time() if now is None else float(now)
+    result: dict[str, dict[str, Any] | None] = {"pgx": None, "rtx5080": None}
+    priority = {"running": 3, "starting": 2, "queued": 1}
+    for target in result:
+        candidates = []
+        for job in jobs.values():
+            cfg = job.get("cfg") or {}
+            job_target = job.get("worker_target") or cfg.get("worker_target", "pgx")
+            status = job.get("status")
+            if job_target != target or status not in priority:
+                continue
+            created = _dashboard_number(job.get("created"), minimum=0)
+            candidates.append((priority[status], created if created is not None else 0.0, job))
+        if not candidates:
+            continue
+        job = max(candidates, key=lambda item: (item[0], item[1]))[2]
+        progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+        pct = _dashboard_number(progress.get("pct"), minimum=0, maximum=100)
+        eta = _dashboard_number(progress.get("eta"), minimum=0)
+        value = _dashboard_number(progress.get("value"), minimum=0)
+        maximum = _dashboard_number(progress.get("max"), minimum=0)
+        if maximum is None or maximum <= 0 or value is None or value > maximum:
+            value = maximum = None
+        queue_position = _dashboard_number(job.get("queue_position"), minimum=1)
+        result[target] = {
+            "id": str(job.get("id") or ""),
+            "status": job.get("status"),
+            "phase": str(progress.get("phase") or ""),
+            "pct": pct,
+            "eta_seconds": eta,
+            "expected_complete_at": now + eta if eta is not None else None,
+            "value": value,
+            "max": maximum,
+            "unavailable": progress.get("unavailable") is True,
+            "queue_position": queue_position,
+        }
+    return result
+
+
 def _rtx5080_lease_hash(token):
     return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
@@ -499,6 +559,12 @@ def update_rtx5080_progress(jid, execution_id, lease_token, payload, now=None):
             value = float(previous_value)
             maximum = float(previous.get("max") or maximum)
             overall = float(previous.get("pct") or overall)
+        previous_pct = previous.get("pct")
+        if (segment_index == previous_segment and _finite_real(previous_pct)
+                and overall < float(previous_pct)):
+            # Different sampler nodes can also report different maxima. The raw
+            # value may increase while its derived percent falls (2/6 -> 3/100).
+            overall = float(previous_pct)
         started = float(job.get("started") or now)
         phase = re.sub(r"[^0-9A-Za-z가-힣\s./:_()\-]", "", str(payload.get("phase") or ""))[:80].strip()
         job["progress"] = _prog(
@@ -655,23 +721,41 @@ def complete_rtx5080_upload(jid, execution_id, lease_token, now=None):
             if not _valid_rtx5080_lease_locked(job, execution_id, lease_token, commit_now):
                 raise PermissionError("stale RTX 5080 execution")
         archive = archive_final_to_nas(jid, path)
+        completion_now = now if fixed_now else time.time()
+        stale_after_archive = False
+        public = None
         with LOCK:
             job = JOBS[jid]
-            job.update(
-                status="done", file=os.path.basename(archive["src"]), src=archive["src"],
-                size=archive["size"], sha256=archive["sha256"], nas_saved=True,
-                storage="nas", elapsed=round(max(0.0, now - started), 1),
-                completed_at=commit_now,
-                progress=_prog(jid, "생성 완료", completed=True, eta=0),
-                completed_execution_id=execution_id, completed_lease_sha256=lease_hash,
-                lease_sha256=None, lease_expires_at=None, execution_id=None,
-                upload_path=None, upload_expected_sha256=None,
-                upload_expected_size=None, upload_received=None,
-            )
-            worker = WORKERS.get(RTX5080_WORKER_ID)
-            if worker:
-                worker["busy"] = False
-            public = _public_rtx5080_claim(job)
+            if not _valid_rtx5080_lease_locked(job, execution_id, lease_token, completion_now):
+                stale_after_archive = True
+            else:
+                job.update(
+                    status="done", file=os.path.basename(archive["src"]), src=archive["src"],
+                    size=archive["size"], sha256=archive["sha256"], nas_saved=True,
+                    storage="nas", elapsed=round(max(0.0, completion_now - started), 1),
+                    completed_at=completion_now,
+                    progress=_prog(jid, "생성 완료", completed=True, eta=0),
+                    completed_execution_id=execution_id, completed_lease_sha256=lease_hash,
+                    lease_sha256=None, lease_expires_at=None, execution_id=None,
+                    upload_path=None, upload_expected_sha256=None,
+                    upload_expected_size=None, upload_received=None,
+                )
+                worker = WORKERS.get(RTX5080_WORKER_ID)
+                if worker:
+                    worker["busy"] = False
+                public = _public_rtx5080_claim(job)
+        if stale_after_archive:
+            archived_path = archive.get("src")
+            try:
+                if (archived_path and _is_under_nas(archived_path)
+                        and os.path.isfile(archived_path)
+                        and file_sha256(archived_path) == archive.get("sha256")):
+                    os.remove(archived_path)
+            except OSError as exc:
+                log(f"stale RTX archive cleanup failed: {type(exc).__name__}")
+            raise PermissionError("stale RTX 5080 execution after archive")
+        if public is None:
+            raise RuntimeError("RTX 5080 completion state was not published")
         _save_job(jid)
     return public
 
@@ -872,6 +956,44 @@ def guard_prompt_presence(job_id, state, unknown_since, now=None,
             "ComfyUI 작업이 큐/기록에서 사라졌습니다 — 다시 생성해 주세요"
         )
     return unknown_since
+
+
+def classify_comfy_observation(history_available, queue_available,
+                               queue_state=None, websocket_evidence=False):
+    """Combine independent transports without treating one partial outage as absence."""
+    if websocket_evidence or queue_state in ("running", "pending"):
+        return "live"
+    if not history_available and not queue_available:
+        return "unavailable"
+    if history_available and queue_available and queue_state == "unknown":
+        return "missing"
+    return "inconclusive"
+
+
+def guard_comfy_wait_deadline(job_id, since, limit, message, now=None):
+    """Turn a persistent wait condition into an explicit recoverable failure."""
+    assert_job_active(job_id)
+    now = time.monotonic() if now is None else float(now)
+    limit = float(limit)
+    if not math.isfinite(limit) or limit <= 0:
+        raise RuntimeError("ComfyUI 대기 제한 설정이 올바르지 않습니다")
+    if since is None:
+        return now
+    if now - float(since) >= limit:
+        raise RuntimeError(message)
+    return float(since)
+
+
+def comfy_prompt_deadline_seconds(frame_count, base_seconds=COMFY_PROMPT_MAX_SECONDS):
+    """Scale the hard bound so supported long single-shot T2V jobs remain valid."""
+    frame_count = float(frame_count)
+    base_seconds = float(base_seconds)
+    if not math.isfinite(frame_count) or frame_count <= 0:
+        raise ValueError("invalid ComfyUI frame count")
+    if not math.isfinite(base_seconds) or base_seconds <= 0:
+        raise ValueError("invalid ComfyUI prompt deadline")
+    reference_frames = 362.0  # 15 seconds on H3's 17k+5 frame grid
+    return base_seconds * max(1.0, frame_count / reference_frames)
 
 
 def _restore_jobs():
@@ -1947,6 +2069,39 @@ def _upload_job_references(job_id, cfg):
             raise last_error
 
 
+def register_comfy_prompt(job_id, prompt_id, segment_index, segments, now=None):
+    """Atomically publish accepted prompt ownership before cancellation can win."""
+    now = time.time() if now is None else now
+    phase = (
+        f"세그먼트 {segment_index + 1}/{segments} ComfyUI 대기 중"
+        if segments > 1 else "ComfyUI 대기 중"
+    )
+    progress = _prog(
+        job_id, phase, seg_done=segment_index, queue_pending=1
+    )
+    with LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            cancelled = True
+        else:
+            # Even if cancellation won immediately after POST /prompt, retain
+            # the accepted ID so cleanup remains attributable and retryable.
+            job["comfy_prompt_id"] = str(prompt_id)
+            cancelled = job.get("status") == "cancelled"
+            if not cancelled:
+                job.update({
+                    "status": "queued",
+                    "segment_started": now,
+                    "comfy_status": "pending",
+                    "progress": progress,
+                })
+    if job is not None:
+        _save_job(job_id)
+    if cancelled:
+        cancel_comfy_prompt(prompt_id)
+        raise JobCancelled("작업이 취소되었습니다")
+
+
 def run_job(job_id, cfg):
     try:
         require_nas_video_storage()
@@ -2002,11 +2157,11 @@ def run_job(job_id, cfg):
                 err_msg = json.dumps(queued, ensure_ascii=False)
                 raise RuntimeError(err_msg[:600])
             pid = queued["prompt_id"]
+            register_comfy_prompt(job_id, pid, segment_index=i, segments=segments)
             unknown_since = None
-            update_job(job_id, status="queued", comfy_prompt_id=pid, segment_started=time.time(),
-                       comfy_status="pending",
-                       progress=_prog(job_id, f"세그먼트 {i+1}/{segments} ComfyUI 대기 중" if segments > 1 else "ComfyUI 대기 중",
-                                      seg_done=i, queue_pending=1))
+            unavailable_since = None
+            prompt_wait_started = time.monotonic()
+            prompt_max_seconds = comfy_prompt_deadline_seconds(seg_frames)
             log(f"  seg {i+1}/{segments} queued pid={pid} (H3)")
 
             # A websocket supplies sampler measurements. Queue/history only
@@ -2014,6 +2169,10 @@ def run_job(job_id, cfg):
             try:
                 while True:
                     assert_job_active(job_id)
+                    guard_comfy_wait_deadline(
+                        job_id, prompt_wait_started, prompt_max_seconds,
+                        "ComfyUI 영상 생성이 안전 제한 시간을 초과했습니다 — 다시 생성해 주세요",
+                    )
                     if ws is None:
                         ws, ws_retry_at = reconnect_comfy_ws(client_id, ws_retry_at)
                         if ws is not None:
@@ -2022,10 +2181,11 @@ def run_job(job_id, cfg):
                                            job_id, phase="ComfyUI 진행 정보 연결됨",
                                            seg_done=i, unavailable=False
                                        ))
+                    websocket_evidence = False
                     if ws:
                         try:
                             event = recv_comfy_event(ws)
-                            apply_comfy_event(job_id, pid, event, i, segments)
+                            websocket_evidence = apply_comfy_event(job_id, pid, event, i, segments)
                         except Exception as e:
                             # A read timeout just means no event arrived yet;
                             # it is not a connection failure.
@@ -2040,14 +2200,14 @@ def run_job(job_id, cfg):
                                     pass
                                 ws = None
                                 ws_retry_at = 0.0
+                    history_available = True
                     try:
                         h = comfy_get(f"/history/{pid}", timeout=30)
+                        if not isinstance(h, dict):
+                            raise ValueError("invalid ComfyUI history response")
                     except Exception:
-                        update_job(job_id, comfy_status="unavailable",
-                                   progress=_prog(job_id, "ComfyUI 상태 확인 불가", seg_done=i,
-                                                  unavailable=True))
-                        time.sleep(2)
-                        continue
+                        history_available = False
+                        h = {}
                     assert_job_active(job_id)
                     if pid in h:
                         result = h[pid]
@@ -2080,19 +2240,46 @@ def run_job(job_id, cfg):
                         comfy_source_files.append(src)
                         log(f"  seg {i+1}/{segments} 완료 → {dst}")
                         break
+                    queue_available = True
                     try:
                         prompt_state = poll_comfy_queue_state(job_id, pid, i, segments)
                     except JobCancelled:
                         raise
                     except Exception:
+                        queue_available = False
+                        prompt_state = None
+                    observation = classify_comfy_observation(
+                        history_available=history_available,
+                        queue_available=queue_available,
+                        queue_state=prompt_state,
+                        websocket_evidence=websocket_evidence,
+                    )
+                    if observation == "live":
+                        unknown_since = None
+                        unavailable_since = None
+                    elif observation == "missing":
+                        unavailable_since = None
+                        unknown_since = guard_prompt_presence(
+                            job_id, "unknown", unknown_since
+                        )
+                    elif observation == "unavailable":
+                        unknown_since = None
+                        unavailable_since = guard_comfy_wait_deadline(
+                            job_id, unavailable_since, COMFY_UNAVAILABLE_GRACE_SECONDS,
+                            "ComfyUI 상태 확인이 장시간 불가능합니다 — 다시 생성해 주세요",
+                        )
                         update_job(job_id, comfy_status="unavailable",
                                    progress=_prog(job_id, "ComfyUI 상태 확인 불가", seg_done=i,
                                                   unavailable=True))
-                        time.sleep(2)
-                        continue
-                    unknown_since = guard_prompt_presence(
-                        job_id, prompt_state, unknown_since
-                    )
+                    else:
+                        # One HTTP source is still reachable, but it cannot prove
+                        # presence or absence. Preserve the job until the overall
+                        # workload-scaled deadline instead of guessing.
+                        unknown_since = None
+                        unavailable_since = None
+                        update_job(job_id, comfy_status="unavailable",
+                                   progress=_prog(job_id, "ComfyUI 상태 확인 일부 불가", seg_done=i,
+                                                  unavailable=True))
                     time.sleep(2)
             finally:
                 if ws:
@@ -2147,6 +2334,13 @@ def run_job(job_id, cfg):
         return
     except Exception as e:
         update_job(job_id, status="error", error=str(e)[:800])
+        with LOCK:
+            owned_prompt_id = (JOBS.get(job_id) or {}).get("comfy_prompt_id")
+        if owned_prompt_id:
+            try:
+                cancel_comfy_prompt(owned_prompt_id)
+            except Exception as cancel_error:
+                log(f"job {job_id} ComfyUI 오류 정리 보류: {type(cancel_error).__name__}")
         log(f"job {job_id} ERROR: {str(e)[:200]}")
 
 
@@ -2519,21 +2713,45 @@ def _comfy_queue_prompt_ids(entries):
     return result
 
 
+def _targeted_interrupt_contract_matches(server_path, expected_sha256):
+    expected = str(expected_sha256 or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        return False
+    try:
+        return hmac.compare_digest(file_sha256(server_path), expected)
+    except OSError:
+        return False
+
+
 def cancel_comfy_prompt(prompt_id):
-    """Remove one owned Comfy prompt without interrupting unrelated work."""
+    """Delete one pending prompt; interrupt only a running prompt on a pinned API contract."""
     if not prompt_id:
         return False
-    queue = comfy_get("/queue", timeout=10)
-    running = _comfy_queue_prompt_ids(queue.get("queue_running"))
-    pending = _comfy_queue_prompt_ids(queue.get("queue_pending"))
-    acted = False
-    if str(prompt_id) in pending:
-        comfy_post("/queue", {"delete": [str(prompt_id)]}, timeout=10)
-        acted = True
-    if str(prompt_id) in running:
-        comfy_post("/interrupt", {}, timeout=10)
-        acted = True
-    return acted
+    prompt_id = str(prompt_id)
+    errors = []
+    try:
+        comfy_post("/queue", {"delete": [prompt_id]}, timeout=10)
+    except Exception as exc:
+        errors.append(exc)
+    try:
+        queue = comfy_get("/queue", timeout=10)
+        running = _comfy_queue_prompt_ids(queue.get("queue_running"))
+    except Exception as exc:
+        errors.append(exc)
+        running = set()
+    if prompt_id in running:
+        if not _targeted_interrupt_contract_matches(
+            COMFY_SERVER_PATH, COMFY_TARGETED_INTERRUPT_SHA256,
+        ):
+            errors.append(RuntimeError("ComfyUI targeted interrupt contract is not pinned"))
+        else:
+            try:
+                comfy_post("/interrupt", {"prompt_id": prompt_id}, timeout=10)
+            except Exception as exc:
+                errors.append(exc)
+    if errors:
+        raise RuntimeError("ComfyUI prompt cancellation incomplete") from errors[0]
+    return True
 
 
 def cancel_job(jid, now=None):
@@ -2802,7 +3020,16 @@ class Handler(BaseHTTPRequestHandler):
                         remaining -= len(chunk)
             _save_job(jid)
             return
-        if p == "/api/jobs":
+        if p == "/api/active-progress":
+            now = time.time()
+            with LOCK:
+                jobs_snapshot = {jid: dict(job) for jid, job in JOBS.items()}
+            send_json(self, {
+                "ok": True,
+                "server_time": now,
+                "workers": worker_progress_dashboard(jobs_snapshot, now=now),
+            })
+        elif p == "/api/jobs":
             requeue_expired_rtx5080_jobs()
             with LOCK:
                 items = [_public_rtx5080_claim(dict(j, prompt=j.get("prompt", ""))) for j in JOBS.values()]

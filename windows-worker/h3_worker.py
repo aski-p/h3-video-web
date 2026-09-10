@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -443,8 +444,25 @@ class ApiClient:
 
 
 class ComfyClient:
-    def __init__(self, url: str):
+    def __init__(
+        self, url: str, server_path: Path | None = None,
+        targeted_interrupt_sha256: str = "",
+    ):
         self.url = validate_comfy_url(url)
+        self.server_path = Path(server_path) if server_path is not None else None
+        self.targeted_interrupt_sha256 = str(targeted_interrupt_sha256 or "").strip().lower()
+
+    def targeted_interrupt_contract_matches(self) -> bool:
+        if self.server_path is None or not re.fullmatch(
+            r"[0-9a-f]{64}", self.targeted_interrupt_sha256,
+        ):
+            return False
+        try:
+            return hmac.compare_digest(
+                sha256_file(self.server_path), self.targeted_interrupt_sha256,
+            )
+        except OSError:
+            return False
 
     def json(self, path: str, payload: dict | None = None, timeout: int = 30) -> dict:
         body = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -481,27 +499,35 @@ class ComfyClient:
             return True
 
     def cancel_prompt(self, prompt_id: str) -> bool:
-        """Cancel only a prompt proven present in this local ComfyUI queue."""
+        """Delete pending work; interrupt running work only with a pinned contract."""
         prompt_id = str(prompt_id or "")
         if not prompt_id:
             return False
-        queue = self.json("/queue", timeout=10)
-        running = {
-            str(entry[1]) for entry in queue.get("queue_running") or ()
-            if isinstance(entry, (list, tuple)) and len(entry) > 1
-        }
-        pending = {
-            str(entry[1]) for entry in queue.get("queue_pending") or ()
-            if isinstance(entry, (list, tuple)) and len(entry) > 1
-        }
-        acted = False
-        if prompt_id in pending:
+        errors = []
+        try:
             self.json("/queue", {"delete": [prompt_id]}, timeout=10)
-            acted = True
+        except Exception as exc:
+            errors.append(exc)
+        try:
+            queue = self.json("/queue", timeout=10)
+            running = {
+                str(item[1]) for item in queue.get("queue_running") or ()
+                if isinstance(item, (list, tuple)) and len(item) > 1
+            }
+        except Exception as exc:
+            errors.append(exc)
+            running = set()
         if prompt_id in running:
-            self.json("/interrupt", {}, timeout=10)
-            acted = True
-        return acted
+            if not self.targeted_interrupt_contract_matches():
+                errors.append(RuntimeError("ComfyUI targeted interrupt contract is not pinned"))
+            else:
+                try:
+                    self.json("/interrupt", {"prompt_id": prompt_id}, timeout=10)
+                except Exception as exc:
+                    errors.append(exc)
+        if errors:
+            raise RuntimeError("ComfyUI prompt cancellation incomplete") from errors[0]
+        return True
 
     def fetch_output(self, item: dict, destination: Path) -> None:
         query = urllib.parse.urlencode({
@@ -993,7 +1019,11 @@ def run_worker(force_hash: bool = False) -> None:
         raise RuntimeError("exact H3 model validation failed: " + "; ".join(errors))
     if not generation_marker_valid():
         raise RuntimeError("exact H3 generation smoke is not verified; run --self-test first")
-    comfy = ComfyClient(str(config.get("comfy_url") or "http://127.0.0.1:8188"))
+    comfy = ComfyClient(
+        str(config.get("comfy_url") or "http://127.0.0.1:8188"),
+        server_path=comfy_root / "server.py",
+        targeted_interrupt_sha256=str(config.get("targeted_interrupt_server_sha256") or ""),
+    )
     ensure_comfy(comfy_root, comfy, config)
     comfy.assert_runtime()
     server = import_shared_server()
@@ -1056,7 +1086,11 @@ def self_test(force_hash: bool = False) -> None:
     ok, errors = verify_models(models_dir, force=force_hash)
     if not ok:
         raise RuntimeError("model readiness failed: " + "; ".join(errors))
-    comfy = ComfyClient(str(config.get("comfy_url") or "http://127.0.0.1:8188"))
+    comfy = ComfyClient(
+        str(config.get("comfy_url") or "http://127.0.0.1:8188"),
+        server_path=comfy_root / "server.py",
+        targeted_interrupt_sha256=str(config.get("targeted_interrupt_server_sha256") or ""),
+    )
     ensure_comfy(comfy_root, comfy, config)
     comfy.assert_runtime()
     server = import_shared_server()
