@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import backend_proxy
 import server
@@ -752,6 +752,61 @@ class VideoDeliveryTests(unittest.TestCase):
             server.LOCK.release()
             save.assert_called_once_with("queued-job")
 
+    def test_cancel_running_pgx_job_persists_before_interrupting_its_prompt(self):
+        job = {
+            "id": "running-job", "status": "running", "comfy_prompt_id": "prompt-owned",
+            "cfg": {"worker_target": "pgx"},
+        }
+        events = []
+        with patch.dict(server.JOBS, {"running-job": job}, clear=True), \
+             patch.object(server, "QUEUE", []), \
+             patch.object(server, "_save_job", side_effect=lambda jid: events.append(("saved", jid))), \
+             patch.object(server, "cancel_comfy_prompt", side_effect=lambda pid: events.append(("interrupted", pid))):
+            result = server.cancel_job("running-job", now=123.0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(job["status"], "cancelled")
+        self.assertEqual(job["cancelled_at"], 123.0)
+        self.assertEqual(job["progress"]["phase"], "사용자가 생성을 중단했습니다")
+        self.assertEqual(events, [("saved", "running-job"), ("interrupted", "prompt-owned")])
+
+    def test_pgx_cancel_deletes_owned_pending_prompt_without_interrupting_other_running_prompt(self):
+        queue = {
+            "queue_running": [[1, "other-running", {}, {}]],
+            "queue_pending": [[2, "owned-pending", {}, {}]],
+        }
+        with patch.object(server, "comfy_get", return_value=queue), \
+             patch.object(server, "comfy_post") as request:
+            self.assertTrue(server.cancel_comfy_prompt("owned-pending"))
+        request.assert_called_once_with(
+            "/queue", {"delete": ["owned-pending"]}, timeout=10,
+        )
+
+    def test_cancel_endpoint_accepts_running_job(self):
+        job = {"id": "running-job", "status": "running", "cfg": {"worker_target": "rtx5080"}}
+        with patch.dict(server.JOBS, {"running-job": job}, clear=True), \
+             patch.object(server, "QUEUE", []), \
+             patch.object(server, "_save_job"), \
+             patch.object(server, "ORIGIN_SECRET", self.ORIGIN_SECRET):
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                conn.request("POST", "/api/cancel/running-job", body=b"{}", headers={
+                    "Content-Type": "application/json",
+                    server.ORIGIN_HEADER: self.ORIGIN_SECRET,
+                })
+                response = conn.getresponse()
+                payload = json.loads(response.read())
+                self.assertEqual(response.status, 200)
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload["status"], "cancelled")
+                conn.close()
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=2)
+
     def test_concurrent_job_saves_never_overwrite_newer_snapshot(self):
         with tempfile.TemporaryDirectory() as root, \
              patch.object(server, "JOBS_DIR", root), \
@@ -805,6 +860,95 @@ class VideoDeliveryTests(unittest.TestCase):
         source = inspect.getsource(server.run_job)
         wait_loop = source[source.index("while True:"):source.index("finally:", source.index("while True:"))]
         self.assertIn("assert_job_active(job_id)", wait_loop)
+
+    def test_windows_worker_interrupts_only_its_running_comfy_prompt(self):
+        worker = self.load_windows_worker()
+        comfy = worker.ComfyClient("http://127.0.0.1:8188")
+        queue = {
+            "queue_running": [[1, "owned-prompt", {}, {}]],
+            "queue_pending": [[2, "other-prompt", {}, {}]],
+        }
+        with patch.object(comfy, "json", side_effect=[queue, {}]) as request:
+            self.assertTrue(comfy.cancel_prompt("owned-prompt"))
+        self.assertEqual(request.call_args_list, [
+            call("/queue", timeout=10),
+            call("/interrupt", {}, timeout=10),
+        ])
+
+    def test_windows_worker_lease_cancellation_interrupts_submitted_comfy_prompt(self):
+        worker = self.load_windows_worker()
+
+        class FakeComfy:
+            url = "http://127.0.0.1:8188"
+            cancelled = []
+            def json(self, path, payload=None, timeout=30):
+                if path == "/prompt":
+                    return {"prompt_id": "owned-prompt"}
+                raise AssertionError(path)
+            def cancel_prompt(self, prompt_id):
+                self.cancelled.append(prompt_id)
+                return True
+
+        class FakeServer:
+            @staticmethod
+            def build_workflow(*args, **kwargs):
+                return {}
+
+        class CancelledState:
+            @staticmethod
+            def lease_ok(claim):
+                return False
+
+        class FakeWebSocket:
+            def close(self):
+                pass
+
+        class FakeWebSocketModule:
+            class WebSocketException(Exception):
+                pass
+            class WebSocketTimeoutException(Exception):
+                pass
+            @staticmethod
+            def create_connection(*args, **kwargs):
+                return FakeWebSocket()
+
+        comfy = FakeComfy()
+        claim = {"job": {"id": "deadbeef"}, "execution_id": "exec", "lease_token": "lease"}
+        cfg = {"prompt": "prompt", "negative": "", "width": 768, "height": 432, "steps": 4}
+        with tempfile.TemporaryDirectory() as root, \
+             patch.dict(sys.modules, {"websocket": FakeWebSocketModule()}):
+            with self.assertRaises(worker.WorkerJobCancelled):
+                worker.generate_segment(
+                    object(), comfy, FakeServer(), claim, cfg, 0, 1, 9, 1,
+                    Path(root) / "segment.mp4", Path(root), Path(root), CancelledState(),
+                )
+        self.assertEqual(comfy.cancelled, ["owned-prompt"])
+
+    def test_windows_worker_fences_cancelled_claim_before_generation_and_failure_reporting(self):
+        worker = self.load_windows_worker()
+
+        class CancelledState:
+            @staticmethod
+            def lease_ok(claim):
+                return False
+
+        claim = {
+            "job": {"id": "deadbeef", "cfg": {}},
+            "execution_id": "exec", "lease_token": "lease",
+        }
+        with tempfile.TemporaryDirectory() as root, \
+             patch.object(worker, "copy_job_inputs") as copy_inputs, \
+             patch.object(worker, "generate_segment", side_effect=AssertionError("generation must not start")):
+            with self.assertRaises(worker.WorkerJobCancelled):
+                worker.process_claim(
+                    object(), object(), object(), claim, Path(root), Path(root), CancelledState(),
+                )
+        copy_inputs.assert_not_called()
+        run_source = inspect.getsource(worker.run_worker)
+        cancelled = run_source.index("except WorkerJobCancelled")
+        generic = run_source.index("except Exception as exc", cancelled)
+        self.assertLess(cancelled, generic)
+        self.assertNotIn('"/api/worker/fail"', run_source[cancelled:generic])
 
     def test_prompt_missing_from_comfy_queue_and_history_is_bounded(self):
         job = {"id": "job", "status": "queued"}
@@ -874,6 +1018,19 @@ console.log(JSON.stringify({
         self.assertIn("2023", values["exact"])
         self.assertIn("1시간 전", values["exact"])
         self.assertEqual(values["missing"], "시간 미상")
+
+    def test_running_job_cancel_ui_targets_exact_job_and_rejects_stale_poll(self):
+        html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+        running = html[html.index("} else if(j.status==='running'"):html.index("} else if(j.status==='done'")]
+        self.assertIn("$('#stop').disabled=false", running)
+        handler = html[html.index("$('#stop').onclick=async()=>{"):html.index("// 스크립트 팝업")]
+        self.assertIn("const jobId=currentJob", handler)
+        self.assertIn("'/api/cancel/'+encodeURIComponent(jobId)", handler)
+        self.assertIn("if(!response.ok||!data.ok)", handler)
+        self.assertNotIn("'/api/job/'", handler)
+        poll = html[html.index("async function pollJob(){"):html.index("// 모드 (t2v / i2v)")]
+        self.assertIn("const jobId=currentJob", poll)
+        self.assertIn("if(currentJob!==jobId)return", poll)
 
     def test_completed_video_has_server_generated_jpeg_thumbnail(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1917,7 +2074,101 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertEqual(server.segment_frame_plan(5, 8, server.STRATEGY_SINGLE),
                          [server.snap_len(5)])
         source = (Path(__file__).resolve().parents[1] / "windows-worker" / "h3_worker.py").read_text()
-        self.assertIn("server.segment_frame_plan", source)
+        self.assertIn("server.worker_segment_frame_plan", source)
+
+    def test_rtx_long_generation_is_forced_to_vram_safe_h3_segments(self):
+        self.assertEqual(
+            server.normalize_worker_strategy("rtx5080", 20, server.STRATEGY_SINGLE, 8),
+            (server.STRATEGY_SPLIT, 4),
+        )
+        self.assertEqual(
+            server.normalize_worker_strategy("rtx5080", 5, server.STRATEGY_SINGLE, 8),
+            (server.STRATEGY_SINGLE, 8),
+        )
+        self.assertEqual(
+            server.normalize_worker_strategy("rtx5080", 20, server.STRATEGY_SPLIT, 8),
+            (server.STRATEGY_SPLIT, 4),
+        )
+        self.assertEqual(
+            server.normalize_worker_strategy("pgx", 20, server.STRATEGY_SINGLE, 8),
+            (server.STRATEGY_SINGLE, 8),
+        )
+        worker_source = (
+            Path(__file__).resolve().parents[1] / "windows-worker" / "h3_worker.py"
+        ).read_text()
+        self.assertIn('server.normalize_worker_strategy(', worker_source)
+        frames = server.worker_segment_frame_plan(
+            "rtx5080", 20, 4, server.STRATEGY_SPLIT,
+        )
+        self.assertEqual(frames, [server.snap_len(4)] * 4)
+        self.assertTrue(all(frame <= server.snap_len(4) for frame in frames))
+        self.assertGreaterEqual(sum(frames), round(20 * 24))
+        self.assertIn('server.worker_segment_frame_plan(', worker_source)
+        self.assertIn('duration_seconds=total_seconds', worker_source)
+
+    def test_rtx_generate_api_persists_vram_safe_split_instead_of_long_single_graph(self):
+        heartbeat = {
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True,
+            "busy": False, "modes": ["t2v", "i2v"],
+            "model_profile": "minimax-h3-pgx-exact-v1",
+        }
+        body = json.dumps({
+            "prompt": "portrait RTX OOM regression",
+            "mode": "t2v", "worker_target": "rtx5080",
+            "width": 768, "height": 1344, "seconds": 20,
+            "steps": 20, "strategy": "single", "seg_seconds": 8,
+        }).encode()
+        with patch.object(server, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch.dict(server.JOBS, {}, clear=True), \
+             patch.object(server, "QUEUE", []), \
+             patch.object(server, "QUEUE_RESERVATIONS", {"pgx": 0, "rtx5080": 0}), \
+             patch.dict(server.WORKERS, {}, clear=True), \
+             patch.object(server, "_save_job"):
+            server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat)
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                conn.request("POST", "/api/generate", body=body, headers={
+                    "Content-Type": "application/json",
+                    server.ORIGIN_HEADER: self.ORIGIN_SECRET,
+                })
+                response = conn.getresponse()
+                receipt = json.loads(response.read())
+                conn.close()
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=2)
+            stored = dict(server.JOBS[receipt["job"]])
+            stored["cfg"] = dict(stored["cfg"])
+        self.assertEqual(response.status, 200)
+        self.assertEqual(receipt["strategy"], server.STRATEGY_SPLIT)
+        self.assertEqual(receipt["seg_seconds"], 4)
+        self.assertEqual(receipt["segments"], 4)
+        self.assertEqual(stored["cfg"]["strategy"], server.STRATEGY_SPLIT)
+        self.assertEqual(stored["cfg"]["seg_seconds"], 4)
+
+    def test_windows_worker_extracts_comfy_error_without_logging_the_prompt_graph(self):
+        worker = self.load_windows_worker()
+        result = {
+            "prompt": [0, "prompt-id", {"5": {"inputs": {"prompt": "PRIVATE PROMPT"}}}],
+            "status": {"status_str": "error", "completed": False, "messages": [[
+                "execution_error", {
+                    "node_id": "10", "node_type": "SamplerCustomAdvanced",
+                    "exception_type": "torch.OutOfMemoryError",
+                    "exception_message": "Allocation would exceed allowed memory",
+                },
+            ]]},
+        }
+        message = worker.comfy_execution_failure(result)
+        self.assertIn("torch.OutOfMemoryError", message)
+        self.assertIn("SamplerCustomAdvanced", message)
+        self.assertIn("Allocation would exceed allowed memory", message)
+        self.assertNotIn("PRIVATE PROMPT", message)
+        self.assertNotIn('"prompt"', message)
 
     def test_exact_worker_workflow_never_silently_omits_requested_loras(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1957,10 +2208,11 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
                 target.write_bytes(b"video")
 
             with patch.object(worker, "run_ffmpeg", side_effect=fake_ffmpeg):
-                worker.finish_segments(segments, output)
+                worker.finish_segments(segments, output, duration_seconds=20)
             self.assertEqual(manifests, ["file 'segment_00.mp4'\nfile 'segment_01.mp4'\n"])
             self.assertEqual(calls[0][1], str(directory))
             self.assertIn("1", calls[0][0][calls[0][0].index("-safe") + 1:calls[0][0].index("-safe") + 2])
+            self.assertEqual(calls[1][0][calls[1][0].index("-t") + 1], "20")
 
     def test_windows_worker_rejects_invalid_upload_acknowledgements(self):
         worker = self.load_windows_worker()
@@ -2101,7 +2353,7 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertIn("generation_marker_valid", source)
         self.assertIn("for path in (MANIFEST_PATH, shared_server_path(), Path(__file__).resolve()):", source)
         self.assertIn('"generation_verified": generation_verified', source)
-        self.assertIn("server.segment_frame_plan", source)
+        self.assertIn("server.worker_segment_frame_plan", source)
         self.assertNotIn("RunAs", installer)
         self.assertFalse((worker / "worker-token.txt").exists())
 

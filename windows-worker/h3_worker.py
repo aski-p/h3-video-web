@@ -54,6 +54,10 @@ REQUIRED_COMFY_CLASSES = {
 }
 
 
+class WorkerJobCancelled(RuntimeError):
+    """The coordinator fenced this execution after a user cancellation."""
+
+
 def valid_job_id(value: str) -> bool:
     return bool(re.fullmatch(r"[0-9a-f]{8}", str(value or "")))
 
@@ -476,6 +480,29 @@ class ComfyClient:
         except Exception:
             return True
 
+    def cancel_prompt(self, prompt_id: str) -> bool:
+        """Cancel only a prompt proven present in this local ComfyUI queue."""
+        prompt_id = str(prompt_id or "")
+        if not prompt_id:
+            return False
+        queue = self.json("/queue", timeout=10)
+        running = {
+            str(entry[1]) for entry in queue.get("queue_running") or ()
+            if isinstance(entry, (list, tuple)) and len(entry) > 1
+        }
+        pending = {
+            str(entry[1]) for entry in queue.get("queue_pending") or ()
+            if isinstance(entry, (list, tuple)) and len(entry) > 1
+        }
+        acted = False
+        if prompt_id in pending:
+            self.json("/queue", {"delete": [prompt_id]}, timeout=10)
+            acted = True
+        if prompt_id in running:
+            self.json("/interrupt", {}, timeout=10)
+            acted = True
+        return acted
+
     def fetch_output(self, item: dict, destination: Path) -> None:
         query = urllib.parse.urlencode({
             "filename": item.get("filename", ""),
@@ -553,12 +580,13 @@ def run_ffmpeg(arguments: list[str], timeout: int = 600, cwd: str | None = None)
         raise RuntimeError("ffmpeg failed: " + result.stderr[-500:])
 
 
-def finish_segments(segments: list[Path], output: Path) -> None:
+def finish_segments(segments: list[Path], output: Path, duration_seconds: int | None = None) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
+    trim = ["-t", str(int(duration_seconds))] if duration_seconds is not None else []
     if len(segments) == 1:
         run_ffmpeg(["-i", str(segments[0]), "-c:v", "libx264", "-preset", "medium", "-crf", "16",
                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-r", "24",
-                    "-movflags", "+faststart", str(output)])
+                    *trim, "-movflags", "+faststart", str(output)])
         return
     directory = output.parent.resolve()
     if any(path.parent.resolve() != directory or not re.fullmatch(r"segment_[0-9]{2}\.mp4", path.name)
@@ -572,7 +600,7 @@ def finish_segments(segments: list[Path], output: Path) -> None:
                    cwd=str(directory))
         run_ffmpeg(["-i", str(stitched), "-c:v", "libx264", "-preset", "medium", "-crf", "16",
                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-r", "24",
-                    "-movflags", "+faststart", str(output)])
+                    *trim, "-movflags", "+faststart", str(output)])
     finally:
         concat.unlink(missing_ok=True)
         stitched.unlink(missing_ok=True)
@@ -614,6 +642,29 @@ def collect_output(result: dict) -> dict:
     return videos[0]
 
 
+def comfy_execution_failure(result: dict) -> str:
+    """Extract a bounded execution error without serializing the prompt graph."""
+    status = result.get("status") if isinstance(result, dict) else None
+    messages = status.get("messages") if isinstance(status, dict) else None
+    for event in messages or ():
+        if not isinstance(event, (list, tuple)) or len(event) < 2 or event[0] != "execution_error":
+            continue
+        payload = event[1] if isinstance(event[1], dict) else {}
+        exception_type = re.sub(
+            r"[^A-Za-z0-9_.]", "", str(payload.get("exception_type") or "")
+        )[:120]
+        node_type = re.sub(
+            r"[^A-Za-z0-9_.]", "", str(payload.get("node_type") or "")
+        )[:120]
+        detail = re.sub(
+            r"\s+", " ", str(payload.get("exception_message") or "")
+        ).strip()[:500]
+        identity = " / ".join(part for part in (exception_type, node_type) if part)
+        suffix = ": " + detail if detail else ""
+        return "ComfyUI execution failed" + (f" [{identity}]" if identity else "") + suffix
+    return "ComfyUI execution failed"
+
+
 def generate_segment(api, comfy: ComfyClient, server, claim: dict, cfg: dict,
                      segment_index: int, segments: int, frames: int, seed: int,
                      destination: Path, comfy_root: Path, models_dir: Path, state=None) -> dict:
@@ -647,10 +698,11 @@ def generate_segment(api, comfy: ComfyClient, server, claim: dict, cfg: dict,
     prompt_id = queued["prompt_id"]
     last_history = 0.0
     deadline = time.monotonic() + 6 * 60 * 60
+    completed = False
     try:
         while True:
             if state is not None and not state.lease_ok(claim):
-                raise RuntimeError("coordinator lease is no longer valid")
+                raise WorkerJobCancelled("coordinator cancelled or fenced this execution")
             if time.monotonic() >= deadline:
                 raise RuntimeError("ComfyUI segment exceeded the 6 hour safety timeout")
             if ws is not None:
@@ -690,13 +742,21 @@ def generate_segment(api, comfy: ComfyClient, server, claim: dict, cfg: dict,
             result = history[prompt_id]
             status = result.get("status") or {}
             if status.get("status_str") == "error" or not status.get("completed", False):
-                raise RuntimeError("ComfyUI execution failed: " + json.dumps(result)[:800])
+                raise RuntimeError(comfy_execution_failure(result))
+            if state is not None and not state.lease_ok(claim):
+                raise WorkerJobCancelled("coordinator cancelled or fenced this execution")
             item = collect_output(result)
             comfy.fetch_output(item, destination)
+            completed = True
             return item
     finally:
         if ws is not None:
             ws.close()
+        if not completed:
+            try:
+                comfy.cancel_prompt(prompt_id)
+            except Exception as exc:
+                log(f"ComfyUI prompt cancellation failed: {type(exc).__name__}")
 
 
 class _SmokeApi:
@@ -846,32 +906,48 @@ def heartbeat_loop(api: ApiClient, comfy: ComfyClient, gpu: str, vram: int,
         time.sleep(HEARTBEAT_SECONDS)
 
 
+def assert_claim_active(state: RuntimeState, claim: dict) -> None:
+    if state is not None and not state.lease_ok(claim):
+        raise WorkerJobCancelled("coordinator cancelled or fenced this execution")
+
+
 def process_claim(api: ApiClient, comfy: ComfyClient, server, claim: dict,
                   comfy_root: Path, models_dir: Path, state: RuntimeState) -> None:
     job = claim["job"]
     if not valid_job_id(str(job.get("id") or "")):
         raise RuntimeError("unsafe coordinator job id")
+    assert_claim_active(state, claim)
     work = WORK_ROOT / job["id"]
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
     cfg = copy_job_inputs(api, claim, comfy_root, work)
+    assert_claim_active(state, claim)
     total_seconds = min(int(cfg["seconds"]), int(server.MAX_SECONDS))
     strategy = cfg.get("strategy", server.STRATEGY_SPLIT)
     segment_seconds = int(cfg.get("seg_seconds", server.SEG_SECONDS))
-    segment_frames = server.segment_frame_plan(total_seconds, segment_seconds, strategy)
+    strategy, segment_seconds = server.normalize_worker_strategy(
+        "rtx5080", total_seconds, strategy, segment_seconds,
+    )
+    segment_frames = server.worker_segment_frame_plan(
+        "rtx5080", total_seconds, segment_seconds, strategy,
+    )
     segments = len(segment_frames)
     seed_base = int(cfg.get("seed", -1))
     if seed_base < 0:
         seed_base = int.from_bytes(os.urandom(6), "big")
     outputs = []
     for index, frames in enumerate(segment_frames):
+        assert_claim_active(state, claim)
         output = work / f"segment_{index:02d}.mp4"
         generate_segment(api, comfy, server, claim, cfg, index, segments, frames,
                          seed_base + index, output, comfy_root, models_dir, state)
+        assert_claim_active(state, claim)
         outputs.append(output)
     final = work / f"{job['id']}.mp4"
-    finish_segments(outputs, final)
+    assert_claim_active(state, claim)
+    finish_segments(outputs, final, duration_seconds=total_seconds)
+    assert_claim_active(state, claim)
     upload_final(api, claim, final)
     shutil.rmtree(work, ignore_errors=True)
 
@@ -950,6 +1026,8 @@ def run_worker(force_hash: bool = False) -> None:
             try:
                 process_claim(api, comfy, server, claim, comfy_root, models_dir, state)
                 log(f"completed {claim['job']['id']}")
+            except WorkerJobCancelled:
+                log(f"cancelled {claim['job']['id']}")
             except Exception as exc:
                 log(f"job {claim['job']['id']} failed: {exc}")
                 try:

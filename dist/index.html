@@ -994,7 +994,7 @@ footer{
 
 const $=s=>document.querySelector(s);
 let W=1344,H=768,S=5,currentJob=null;
-let pollTimer=null,pollDelay=4000;
+let pollTimer=null,pollDelay=4000,cancelInFlight=false;
 let WORKER_TARGET='pgx', WORKER_STATUS=null;
 let STRATEGY='single', SEG_SECONDS=4, STEPS=6, REALISM_LORA=false, CAM_MOTION='', REALISM_STRENGTH=1.0, CAM_STRENGTH=1.0;
 const MEDIA_STREAM_VERSION='20260909-playback2';
@@ -1110,8 +1110,10 @@ function clearActiveJob(){
 }
 async function pollJob(){
   if(!currentJob)return;
+  const jobId=currentJob;
   try{
-    const data=await fetchJsonWithTimeout('/api/job/'+encodeURIComponent(currentJob),{},15000);
+    const data=await fetchJsonWithTimeout('/api/job/'+encodeURIComponent(jobId),{},15000);
+    if(currentJob!==jobId)return;
     if(data.job)setJobUI(data.job);
     pollDelay=4000;
   }catch(_){
@@ -1775,7 +1777,7 @@ function setJobUI(j){
       (j.total_seconds?j.total_seconds+'초 · ':'')+
       '24fps 출력';
     if(p.queue_running!=null) m.innerHTML+=' · 대기열 '+p.queue_running;
-    $('#stop').disabled=true;
+    $('#stop').disabled=false;
   } else if(j.status==='done'){
     $('#stline').innerHTML='<span class="st" style="color:var(--ok)">✓ 생성 완료</span>';
     $('#bar').style.width='100%';
@@ -1897,13 +1899,29 @@ $('#go').onclick=async()=>{
 
 // 중단
 $('#stop').onclick=async()=>{
-  if(!currentJob) return;
-  const response=await fetch('/api/job/'+encodeURIComponent(currentJob));
-  const data=await response.json();
-  const j=data.job;
-  if(j&&(j.status==='queued'||j.status==='starting')){
-    await fetch('/api/cancel/'+encodeURIComponent(currentJob),{method:'POST'});
-    setJobUI({...j,status:'cancelled'});
+  if(!currentJob||cancelInFlight) return;
+  const jobId=currentJob;
+  const button=$('#stop');
+  const previousText=button.textContent;
+  cancelInFlight=true;
+  button.disabled=true;
+  button.textContent='취소 중…';
+  try{
+    const response=await fetch('/api/cancel/'+encodeURIComponent(jobId),{method:'POST'});
+    const data=await response.json().catch(()=>({ok:false,error:'잘못된 서버 응답'}));
+    if(!response.ok||!data.ok) throw new Error(data.error||'중단 요청 실패');
+    if(currentJob===jobId){
+      setJobUI({id:jobId,status:'cancelled',progress:{phase:'사용자가 생성을 중단했습니다'}});
+    }
+  }catch(error){
+    if(currentJob===jobId){
+      button.disabled=false;
+      alert('중단 실패: '+((error&&error.message)||'잠시 후 다시 시도해 주세요'));
+      scheduleJobPoll(0);
+    }
+  }finally{
+    cancelInFlight=false;
+    button.textContent=previousText;
   }
 };
 

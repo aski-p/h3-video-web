@@ -121,6 +121,21 @@ REFV_META = os.path.join(REFV_DIR, "meta.json")
 STRATEGY_CHOICES = ("single", "split")
 STRATEGY_SINGLE = "single"  # 연속 단일 생성 (장면 연속성 우선)
 STRATEGY_SPLIT = "split"   # 세그먼트 분할 (정확한 길이 우선)
+RTX5080_MAX_SINGLE_SECONDS = 5
+RTX5080_SAFE_SEG_SECONDS = 4
+
+
+def normalize_worker_strategy(worker_target, seconds, strategy, seg_seconds):
+    """Keep long RTX 5080 H3 jobs inside the 16 GB VRAM envelope.
+
+    Five-second generation is the largest profile verified on the desktop RTX
+    5080. Longer graphs can allocate too many requested frames at once—even
+    when the generic split planner optimizes for exact duration—so the
+    coordinator persists a deterministic four-second RTX safety plan instead.
+    """
+    if worker_target == "rtx5080" and float(seconds) > RTX5080_MAX_SINGLE_SECONDS:
+        return STRATEGY_SPLIT, RTX5080_SAFE_SEG_SECONDS
+    return strategy, seg_seconds
 
 # 샘플링 스텝
 STEPS_MIN, STEPS_MAX, STEPS_DEFAULT = 2, 20, 6
@@ -1217,6 +1232,21 @@ def segment_frame_plan(total_seconds, segment_seconds, strategy):
         overflow = sum(max(0, frame - segment_cap) for frame in frames)
         candidates.append((duration_error > 9, duration_error + overflow, duration_error, -count, frames))
     return min(candidates, key=lambda item: item[:4])[4]
+
+
+def worker_segment_frame_plan(worker_target, total_seconds, segment_seconds, strategy):
+    """Return a hard-capped frame plan for the 16 GB RTX worker.
+
+    H3's minimum latent is 124 frames. The generic duration-preserving planner
+    may intentionally exceed a requested four-second cap to avoid a short
+    output. That trade-off is unsafe on the RTX 5080, so long RTX jobs use only
+    minimum-size latents and trim the stitched output afterward.
+    """
+    if worker_target == "rtx5080" and float(total_seconds) > RTX5080_MAX_SINGLE_SECONDS:
+        frame_cap = snap_len(RTX5080_SAFE_SEG_SECONDS)
+        target_frames = max(1, round(float(total_seconds) * 24))
+        return [frame_cap] * max(1, math.ceil(target_frames / frame_cap))
+    return segment_frame_plan(total_seconds, segment_seconds, strategy)
 
 
 def estimate_seconds(total_seconds, seg_seconds, strategy, steps):
@@ -2426,22 +2456,70 @@ def ensure_job_thumbnail(jid):
             pass
 
 
-def cancel_queued_job(jid):
-    """Cancel a not-yet-running job without persisting under ``LOCK``.
+def _comfy_queue_prompt_ids(entries):
+    result = set()
+    for entry in entries or ():
+        if isinstance(entry, (list, tuple)) and len(entry) > 1:
+            result.add(str(entry[1]))
+    return result
 
-    ``_save_job`` acquires ``LOCK`` internally, so calling it while already
-    holding the non-reentrant lock permanently deadlocks every job API.
-    """
+
+def cancel_comfy_prompt(prompt_id):
+    """Remove one owned Comfy prompt without interrupting unrelated work."""
+    if not prompt_id:
+        return False
+    queue = comfy_get("/queue", timeout=10)
+    running = _comfy_queue_prompt_ids(queue.get("queue_running"))
+    pending = _comfy_queue_prompt_ids(queue.get("queue_pending"))
+    acted = False
+    if str(prompt_id) in pending:
+        comfy_post("/queue", {"delete": [str(prompt_id)]}, timeout=10)
+        acted = True
+    if str(prompt_id) in running:
+        comfy_post("/interrupt", {}, timeout=10)
+        acted = True
+    return acted
+
+
+def cancel_job(jid, now=None):
+    """Atomically cancel a queued/starting/running job, then stop owned PGX work."""
+    now = time.time() if now is None else float(now)
+    prompt_id = None
+    worker_target = "pgx"
+    with QUEUE_LOCK:
+        with LOCK:
+            job = JOBS.get(jid)
+            if not job:
+                return {"ok": False, "code": "NOT_FOUND", "error": "job 없음"}
+            status = job.get("status")
+            if status == "cancelled":
+                return {"ok": True, "status": "cancelled", "already_cancelled": True}
+            if status not in ("queued", "starting", "running"):
+                return {"ok": False, "code": "TERMINAL", "error": "이미 종료된 작업입니다"}
+            worker_target = (job.get("cfg") or {}).get("worker_target", "pgx")
+            prompt_id = job.get("comfy_prompt_id") if worker_target == "pgx" else None
+            job.update(
+                status="cancelled", cancelled_at=now, error=None,
+                progress=_prog(jid, "사용자가 생성을 중단했습니다", cancelled=True),
+            )
+            if jid in QUEUE:
+                QUEUE.remove(jid)
+    _save_job(jid)
+    if worker_target == "pgx" and prompt_id:
+        try:
+            cancel_comfy_prompt(prompt_id)
+        except Exception as exc:
+            log(f"job {jid} ComfyUI 취소 요청 보류: {type(exc).__name__}")
+    return {"ok": True, "status": "cancelled", "already_cancelled": False}
+
+
+def cancel_queued_job(jid):
+    """Backward-compatible queued cancellation wrapper."""
     with LOCK:
         job = JOBS.get(jid)
         if not job or job.get("status") not in ("queued", "starting"):
             return False
-        job["status"] = "cancelled"
-    with QUEUE_LOCK:
-        if jid in QUEUE:
-            QUEUE.remove(jid)
-    _save_job(jid)
-    return True
+    return bool(cancel_job(jid).get("ok"))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3237,10 +3315,15 @@ class Handler(BaseHTTPRequestHandler):
                 seg_seconds = SEG_SECONDS
             if seg_seconds not in SEG_CHOICES:
                 seg_seconds = SEG_SECONDS
+            strategy, seg_seconds = normalize_worker_strategy(
+                worker_target, seconds, strategy, seg_seconds,
+            )
             if strategy == STRATEGY_SINGLE:
                 segments = 1
             else:
-                segments = max(1, round(seconds / seg_seconds))
+                segments = len(worker_segment_frame_plan(
+                    worker_target, seconds, seg_seconds, strategy,
+                ))
             try:
                 steps = int(data.get("steps", STEPS_DEFAULT))
             except Exception:
@@ -3353,10 +3436,13 @@ class Handler(BaseHTTPRequestHandler):
             send_json(self, generation_receipt(job, duplicate=False))
         elif p.startswith("/api/cancel/"):
             jid = p.split("/")[3]
-            if cancel_queued_job(jid):
-                send_json(self, {"ok": True})
+            result = cancel_job(jid)
+            if result.get("ok"):
+                send_json(self, result)
+            elif result.get("code") == "NOT_FOUND":
+                send_json(self, result, 404)
             else:
-                send_json(self, {"ok": False, "error": "이미 실행 중이라 취소 불가"}, 400)
+                send_json(self, result, 409)
         elif p.startswith("/api/delete-error/"):
             # 정상 완료 영상은 어떤 경우에도 이 API로 지우지 않는다. 오류/중단/취소
             # 작업의 job 전용 임시 디렉터리 안에서만, 실제로 깨진 mp4만 정리한다.
