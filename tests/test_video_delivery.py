@@ -750,19 +750,52 @@ class VideoDeliveryTests(unittest.TestCase):
             self.assertTrue(server.ensure_comfyui())
         self.assertEqual(start.call_count, 2)
 
-    def test_run_asu_surfaces_stdout_when_failed_command_has_no_stderr(self):
+    def test_run_asu_surfaces_stdout_when_failed_command_has_whitespace_stderr(self):
         failed = subprocess.CompletedProcess(
             args=["fixed-control-command"], returncode=1,
-            stdout="systemd control transport failed", stderr="",
+            stdout="systemd control transport failed", stderr="  \n",
         )
         with patch.object(server.subprocess, "run", return_value=failed):
             with self.assertRaisesRegex(RuntimeError, "systemd control transport failed"):
                 server.run_asu("fixed-control-command")
 
-    def test_comfy_recovery_uses_a_real_300_second_deadline(self):
-        source = inspect.getsource(server.ensure_comfyui)
-        self.assertIn("time.monotonic()", source)
-        self.assertNotIn("range(300)", source)
+    def test_comfy_recovery_never_calls_past_its_300_second_deadline(self):
+        clock = {"now": 0.0}
+        probe_timeouts = []
+        start_timeouts = []
+
+        def monotonic():
+            return clock["now"]
+
+        def sleep(seconds):
+            self.assertGreater(seconds, 0)
+            clock["now"] += seconds
+
+        def unavailable(*, timeout):
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 8)
+            probe_timeouts.append(timeout)
+            clock["now"] += timeout
+            return False
+
+        def failed_start(_cmd, *, timeout, check):
+            self.assertTrue(check)
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 60)
+            start_timeouts.append(timeout)
+            clock["now"] += timeout
+            raise subprocess.TimeoutExpired("systemctl start", timeout)
+
+        with patch.object(server.time, "monotonic", side_effect=monotonic), \
+             patch.object(server.time, "sleep", side_effect=sleep), \
+             patch.object(server, "comfy_up", side_effect=unavailable), \
+             patch.object(server, "run_asu", side_effect=failed_start):
+            with self.assertRaisesRegex(RuntimeError, "300초"):
+                server.ensure_comfyui()
+
+        self.assertEqual(len(start_timeouts), 3)
+        self.assertTrue(probe_timeouts)
+        self.assertLessEqual(clock["now"], 300.0)
 
     def test_cancel_queued_job_releases_lock_before_persisting(self):
         job = {"id": "queued-job", "status": "queued"}

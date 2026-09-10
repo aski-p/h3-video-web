@@ -1411,14 +1411,14 @@ def extract_ref_video_frame(video_bytes: bytes, ts_offset: float = 0.5) -> bytes
             except Exception:
                 pass
 
-
-def comfy_up():
+def comfy_up(timeout=8):
     try:
-        comfy_get("/system_stats", timeout=8)
+        comfy_get("/system_stats", timeout=timeout)
         return True
     except Exception as e:
         log(f"  comfy_up probe failed: {e}")
         return False
+
 
 def run_asu(cmd, timeout=300, check=True):
     """aski 권한으로 명령 실행 (NOPASSWD sudo, CIFS home 충돌 방지)."""
@@ -1430,13 +1430,23 @@ def run_asu(cmd, timeout=300, check=True):
                 "PWD": "/tmp"})
     p = subprocess.run(full, capture_output=True, text=True, timeout=timeout, env=env)
     if check and p.returncode != 0:
-        diagnostic = (p.stderr or p.stdout or "no command output").strip()[:400]
-        raise RuntimeError(f"asu cmd failed (rc={p.returncode}): {cmd}\n{diagnostic}")
+        stderr = (p.stderr or "").strip()
+        stdout = (p.stdout or "").strip()
+        diagnostic = (stderr or stdout or "no command output")[:400]
+        raise RuntimeError(f"asu cmd failed (rc={p.returncode})\n{diagnostic}")
     return p
 
 
 def ensure_comfyui():
-    if comfy_up():
+    deadline = time.monotonic() + 300.0
+
+    def ready_within_deadline():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        return comfy_up(timeout=min(8.0, remaining))
+
+    if ready_within_deadline():
         return True
     log("ComfyUI down -> reactivating primary system service (comfyui-minimax-h3)")
     # Only the system-owned :8188 service is authoritative. The similarly named
@@ -1445,12 +1455,11 @@ def ensure_comfyui():
         "docker run --rm --privileged --pid=host -v /:/host python:3.12-alpine "
         "chroot /host /usr/bin/nsenter -t 1 -m -i -n -p /usr/bin/systemctl start comfyui-minimax-h3.service"
     )
-    deadline = time.monotonic() + 300.0
     # The privileged host-control container is intentionally short-lived. A
     # transient Docker/systemd transport failure must not strand the job for the
     # whole readiness window, so retry the idempotent start request three times.
     for attempt in range(1, 4):
-        if attempt > 1 and comfy_up():
+        if attempt > 1 and ready_within_deadline():
             log("ComfyUI ready")
             return True
         remaining = deadline - time.monotonic()
@@ -1464,7 +1473,7 @@ def ensure_comfyui():
             # It may already be starting. Probe before retrying, and never fall
             # back to the duplicate user service.
             log(f"  primary system ComfyUI start attempt {attempt}/3 failed: {e}")
-            if comfy_up():
+            if ready_within_deadline():
                 log("ComfyUI ready")
                 return True
             remaining = deadline - time.monotonic()
@@ -1472,7 +1481,10 @@ def ensure_comfyui():
                 time.sleep(min(2.0, remaining))
 
     while True:
-        if comfy_up():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if ready_within_deadline():
             log("ComfyUI ready")
             return True
         remaining = deadline - time.monotonic()
