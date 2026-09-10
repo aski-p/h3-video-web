@@ -167,6 +167,7 @@ WORKER_LEASE_HEADER = "X-H3-Lease-Token"
 # never forwarded.  An explicit value permits independent rotation later;
 # the origin secret is the safe zero-configuration default shared by both hops.
 WORKER_PROXY_SECRET = os.environ.get("H3_WORKER_PROXY_TOKEN") or ORIGIN_SECRET
+DIRECT_WORKER_SECRET = os.environ.get("H3_DIRECT_WORKER_TOKEN", "")
 WORKER_UPLOAD_CHUNK_MAX = 2 * 1024 * 1024
 REMOTE_UPLOAD_LOCK = threading.Lock()
 JOB_SAVE_LOCK = threading.Lock()
@@ -489,11 +490,15 @@ def update_rtx5080_progress(jid, execution_id, lease_token, payload, now=None):
         previous = job.get("progress") or {}
         previous_segment = int(previous.get("segment_index") or 0)
         previous_value = previous.get("value")
-        if segment_index < previous_segment or (
-            segment_index == previous_segment and _finite_real(previous_value)
-            and value < float(previous_value)
-        ):
+        if segment_index < previous_segment:
             raise ValueError("sampler progress cannot regress")
+        if (segment_index == previous_segment and _finite_real(previous_value)
+                and value < float(previous_value)):
+            # A Comfy graph can emit several sampler progress streams. Clamp a
+            # later node's reset while renewing this authenticated live lease.
+            value = float(previous_value)
+            maximum = float(previous.get("max") or maximum)
+            overall = float(previous.get("pct") or overall)
         started = float(job.get("started") or now)
         phase = re.sub(r"[^0-9A-Za-z가-힣\s./:_()\-]", "", str(payload.get("phase") or ""))[:80].strip()
         job["progress"] = _prog(
@@ -2594,10 +2599,12 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def _worker_authorized(self):
-        if not WORKER_PROXY_SECRET:
-            return False
         supplied = self.headers.get(WORKER_HEADER, "")
-        return hmac.compare_digest(supplied, WORKER_PROXY_SECRET)
+        if WORKER_PROXY_SECRET and hmac.compare_digest(supplied, WORKER_PROXY_SECRET):
+            return True
+        authorization = self.headers.get("Authorization", "")
+        expected = f"Bearer {DIRECT_WORKER_SECRET}" if DIRECT_WORKER_SECRET else ""
+        return bool(expected) and hmac.compare_digest(authorization, expected)
 
     def _require_worker(self):
         if self._worker_authorized():
@@ -2729,9 +2736,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         p = u.path
-        if p.startswith("/api/") and not self._require_origin():
-            return
-        if p.startswith("/api/worker/") and not self._require_worker():
+        if p.startswith("/api/worker/"):
+            if not self._require_worker():
+                return
+        elif p.startswith("/api/") and not self._require_origin():
             return
         if p.startswith("/api/worker/input/"):
             parts = p.split("/")
@@ -3032,9 +3040,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         p = u.path
-        if p.startswith("/api/") and not self._require_origin():
-            return
-        if p.startswith("/api/worker/") and not self._require_worker():
+        if p.startswith("/api/worker/"):
+            if not self._require_worker():
+                return
+        elif p.startswith("/api/") and not self._require_origin():
             return
         if p == "/api/ref/set":
             # 고정 참조 등록 (multipart/form-data: file=이미지)

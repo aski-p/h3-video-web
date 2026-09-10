@@ -174,6 +174,29 @@ class VideoDeliveryTests(unittest.TestCase):
             self.assertTrue(server.Handler._origin_authorized(request))
             self.assertTrue(server.Handler._worker_authorized(request))
 
+    def test_pgx_direct_worker_bearer_is_independent_and_constant_time_checked(self):
+        class DirectWorkerRequest:
+            headers = {"Authorization": "Bearer direct-worker-secret-0123456789abcdef"}
+
+        request = DirectWorkerRequest()
+        with patch.object(server, "DIRECT_WORKER_SECRET", "direct-worker-secret-0123456789abcdef"):
+            self.assertTrue(server.Handler._worker_authorized(request))
+            request.headers["Authorization"] = "Bearer wrong-worker-secret-0123456789abcdef"
+            self.assertFalse(server.Handler._worker_authorized(request))
+
+        root = Path(__file__).resolve().parents[1]
+        installer = (root / "windows-worker" / "Install-H3Worker.ps1").read_text(encoding="utf-8")
+        unit = (root / "h3-web-backend.service").read_text(encoding="utf-8")
+        self.assertIn("api_base = 'https://thinkstationpgx-11d3.tailccac79.ts.net'", installer)
+        self.assertIn('test -n "$H3_DIRECT_WORKER_TOKEN"', unit)
+
+    def test_prompt_clear_button_erases_positive_and_negative_in_one_action(self):
+        source = (Path(__file__).resolve().parents[1] / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="promptClear"', source)
+        self.assertIn("$('#prompt').value='';", source)
+        self.assertIn("$('#negative').value='';", source)
+        self.assertIn("$('#promptClear').onclick", source)
+
     def test_rtx5080_worker_is_eligible_only_while_fresh_and_ready(self):
         heartbeat = {
             "gpu": "NVIDIA GeForce RTX 5080",
@@ -422,12 +445,14 @@ class VideoDeliveryTests(unittest.TestCase):
             self.assertEqual(updated["progress"]["value"], 2)
             self.assertNotIn("<", updated["progress"]["phase"])
             self.assertNotIn(">", updated["progress"]["phase"])
-            with self.assertRaises(ValueError):
-                server.update_rtx5080_progress(
-                    "remote", claim["execution_id"], claim["lease_token"],
-                    {"value": 1, "max": 6, "phase": "영상 생성 중", "segment_index": 0, "segments": 1},
-                    now=21.0,
-                )
+            repeated_sampler = server.update_rtx5080_progress(
+                "remote", claim["execution_id"], claim["lease_token"],
+                {"value": 1, "max": 6, "phase": "영상 생성 중", "segment_index": 0, "segments": 1},
+                now=21.0,
+            )
+            self.assertEqual(repeated_sampler["progress"]["value"], 2)
+            self.assertEqual(repeated_sampler["progress"]["pct"], updated["progress"]["pct"])
+            self.assertEqual(server.JOBS["remote"]["lease_expires_at"], 21.0 + server.RTX5080_LEASE_SECONDS)
             with self.assertRaises(PermissionError):
                 server.update_rtx5080_progress(
                     "remote", "stale", "wrong",
@@ -529,7 +554,7 @@ class VideoDeliveryTests(unittest.TestCase):
                 self.assertFalse(part.exists())
                 self.assertIsNone(server.JOBS["remote"]["upload_path"])
 
-    def test_worker_http_api_requires_both_origin_and_worker_secrets(self):
+    def test_worker_http_api_accepts_proxy_or_direct_auth_and_rejects_missing_secret(self):
         heartbeat = {
             "worker_id": server.RTX5080_WORKER_ID,
             "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
@@ -563,6 +588,19 @@ class VideoDeliveryTests(unittest.TestCase):
                 status, denied = post(httpd.server_port, "/api/worker/heartbeat", heartbeat, False)
                 self.assertEqual(status, 401)
                 self.assertFalse(denied["ok"])
+
+                direct_headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer direct-worker-secret-0123456789abcdef",
+                }
+                with patch.object(server, "DIRECT_WORKER_SECRET", "direct-worker-secret-0123456789abcdef"):
+                    conn = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+                    conn.request("POST", "/api/worker/heartbeat", json.dumps(heartbeat), direct_headers)
+                    direct_response = conn.getresponse()
+                    direct_payload = json.loads(direct_response.read())
+                    conn.close()
+                self.assertEqual(direct_response.status, 200)
+                self.assertTrue(direct_payload["worker"]["eligible"])
 
                 status, ready = post(httpd.server_port, "/api/worker/heartbeat", heartbeat, True)
                 self.assertEqual(status, 200)

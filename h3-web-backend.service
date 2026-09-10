@@ -10,6 +10,7 @@ Environment=H3_HOST=127.0.0.1
 Environment=H3_PORT=8300
 EnvironmentFile=/home/aski/h3-web/.env
 ExecStartPre=/bin/sh -c 'test -n "$H3_ORIGIN_SECRET"'
+ExecStartPre=/bin/sh -c 'test -n "$H3_DIRECT_WORKER_TOKEN"'
 ExecStartPre=/home/aski/h3-web/.venv/bin/python -c 'import websocket'
 ExecStart=/home/aski/h3-web/.venv/bin/python /home/aski/h3-web/server.py
 Restart=always

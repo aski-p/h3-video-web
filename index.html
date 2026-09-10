@@ -660,6 +660,7 @@ footer{
       <div class="pbtnrow" id="pbtnrow" style="display:none">
         <span class="pbtn" id="pbtn" title="프롬프트 보기">스크립트</span>
         <span class="pbtn" id="pbtnneg" title="배제 프롬프트 보기">배제</span>
+        <button class="pbtn neg" id="promptClear" type="button" title="본문과 배제 프롬프트 모두 지우기">전체 삭제</button>
       </div>
       <div class="phint" id="phint" style="display:none"></div>
     </div>
@@ -1432,6 +1433,13 @@ function showPromptPopup(which){
 }
 $('#pbtn').onclick=()=>showPromptPopup('prompt');
 $('#pbtnneg').onclick=()=>showPromptPopup('neg');
+$('#promptClear').onclick=()=>{
+  $('#prompt').value='';
+  $('#negative').value='';
+  $('#promptModal').classList.remove('show');
+  updatePromptCardUI();
+  $('#prompt').focus();
+};
 $('#promptModalClose').onclick=()=>$('#promptModal').classList.remove('show');
 $('#promptModal').addEventListener('click',e=>{ if(e.target===e.currentTarget) e.currentTarget.classList.remove('show'); });
 updatePromptCardUI();

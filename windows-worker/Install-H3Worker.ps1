@@ -157,7 +157,8 @@ foreach ($name in @('h3_worker.py','server.py','model-manifest.json','requiremen
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $StageRoot $name) -Force
 }
 $config = [ordered]@{
-  api_base = 'https://h3-video-web.vercel.app'
+  # Keep the generation lease off the intermittent Vercel proxy hop.
+  api_base = 'https://thinkstationpgx-11d3.tailccac79.ts.net'
   worker_token_dpapi = $protectedToken
   comfy_url = 'http://127.0.0.1:8188'
   comfy_dir = $comfyDir
