@@ -1428,7 +1428,12 @@ def run_asu(cmd, timeout=300, check=True):
                 "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
                 "HOME": "/home/aski",
                 "PWD": "/tmp"})
-    p = subprocess.run(full, capture_output=True, text=True, timeout=timeout, env=env)
+    try:
+        p = subprocess.run(full, capture_output=True, text=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        # TimeoutExpired includes the complete argv in its string form. Never
+        # allow a generic run_asu caller's paths or arguments into service logs.
+        raise RuntimeError(f"asu cmd timed out after {timeout:g} seconds") from None
     if check and p.returncode != 0:
         stderr = (p.stderr or "").strip()
         stdout = (p.stdout or "").strip()

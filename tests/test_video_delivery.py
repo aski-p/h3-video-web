@@ -759,6 +759,15 @@ class VideoDeliveryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "systemd control transport failed"):
                 server.run_asu("fixed-control-command")
 
+    def test_run_asu_redacts_full_command_when_subprocess_times_out(self):
+        secret_command = "cp /private/customer-secret.mov /safe/output.mp4"
+        expired = subprocess.TimeoutExpired(secret_command, 7)
+        with patch.object(server.subprocess, "run", side_effect=expired):
+            with self.assertRaisesRegex(RuntimeError, "timed out after 7") as raised:
+                server.run_asu(secret_command, timeout=7)
+        self.assertNotIn("customer-secret.mov", str(raised.exception))
+        self.assertNotIn(secret_command, str(raised.exception))
+
     def test_comfy_recovery_never_calls_past_its_300_second_deadline(self):
         clock = {"now": 0.0}
         probe_timeouts = []
