@@ -47,6 +47,20 @@ EXPECTED_MODEL_ASSETS = {
     ("camera_motion_1000", "loras/cam_motion_1000.safetensors", "c126738c887804ace3a4be4a3156fcca70517613c7a7ece4e5938d372419186b"),
     ("camera_motion_3000", "loras/cam_motion_3000.safetensors", "9d7d98d7377f56efed3aa7d507f767936112d208906f49908ec9a8ae912be88b"),
 }
+OPTIONAL_LORA_FILENAMES = {
+    "h3-realism-people-t2v-i2v-r2v.safetensors",
+    "better_motion_h3_lora_v1_500.safetensors",
+    "ig_tiktok_aesthetic_h3_lora_v1_500.safetensors",
+    "Motion_Repair.safetensors",
+    "camera_motion_h3_lora_v1_1000_pruned.safetensors",
+    "camera_motion_h3_lora_v1_3000_pruned.safetensors",
+    "wushu_spatial_physics_clean_3000_pruned.safetensors",
+    "wushu_spatial_physics_v2_1000_pruned.safetensors",
+}
+OPTIONAL_LORA_ALIASES = {
+    "camera_motion_h3_lora_v1_1000_pruned.safetensors": "cam_motion_1000.safetensors",
+    "camera_motion_h3_lora_v1_3000_pruned.safetensors": "cam_motion_3000.safetensors",
+}
 REQUIRED_COMFY_CLASSES = {
     "UNETLoader", "CLIPLoader", "VAELoader", "MiniMaxH3ImageToVideo",
     "MiniMaxH3ReferenceToVideo", "RandomNoise", "KSamplerSelect", "BasicScheduler",
@@ -203,6 +217,15 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def installed_optional_loras(models_dir: Path) -> list[str]:
+    root = models_dir / "loras"
+    return sorted(
+        name for name in OPTIONAL_LORA_FILENAMES
+        if (root / name).is_file()
+        or (OPTIONAL_LORA_ALIASES.get(name) and (root / OPTIONAL_LORA_ALIASES[name]).is_file())
+    )
 
 
 def shared_server_path() -> Path:
@@ -705,6 +728,7 @@ def generate_segment(api, comfy: ComfyClient, server, claim: dict, cfg: dict,
         video_name=cfg.get("video_name", ""), prefix=f"h3remote/{claim['job']['id']}_s{segment_index:02d}",
         realism_lora=cfg.get("realism_lora", False), cam_motion=cfg.get("cam_motion", ""),
         realism_strength=cfg.get("realism_strength"), cam_strength=cfg.get("cam_strength"),
+        lora_options=cfg.get("lora_options"),
         lora_dirs=[str(models_dir / "loras"), str(models_dir / "loras/split_files/loras")],
         strict_loras=True,
     )
@@ -980,7 +1004,7 @@ def heartbeat_loop(api: ApiClient, comfy: ComfyClient, gpu: str, vram: int,
             "comfy_up": comfy.ready(), "model_ready": current_models_ready,
             "generation_verified": generation_verified,
             "busy": bool(claim) or comfy.busy(), "modes": ["t2v", "i2v"],
-            "model_profile": PROFILE,
+            "model_profile": PROFILE, "lora_files": installed_optional_loras(models_dir),
         }
         if claim:
             payload.update(job_id=claim["job"]["id"], execution_id=claim["execution_id"],

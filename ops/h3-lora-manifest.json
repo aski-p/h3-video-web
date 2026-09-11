@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "verified_at": "2026-09-11T14:00:00Z",
+  "base_model": "MiniMaxAI/MiniMax-H3",
+  "policy": "Weights and model cards only; repository code and custom code are never executed.",
+  "runtime": {
+    "steps_allowed": [2, 20],
+    "turbo_recommended_steps": [6, 8],
+    "turbo_strength": 1.0,
+    "production_sampler": "res_multistep",
+    "production_scheduler": "simple",
+    "note": "The installed Turbo card recommends Euler/Beta. The existing verified production sampler/scheduler is retained; 20-step stacked use is experimental, not an optimized-quality claim."
+  },
+  "files": [
+    {"id":"turbo","repo":"drbaph/MiniMax-H3-Turbo-Lora-ComfyUI","revision":"1394f07b09561bd2e27084700dd4e0831ae0b326","filename":"minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors","size":620285592,"sha256":"7098acf3ee75028fd9fcd948f50fcc8d995057fabb76f86bd3ca2c0ffc58e409","required":true,"strength":1.0,"steps":"6-8","sampler":"Euler","scheduler":"Beta"},
+    {"id":"realism","repo":"fal/MiniMax-H3-Realism-People-LoRA","revision":"039cc8579d7aa357a882d7f4111b25da4f72dccc","filename":"h3-realism-people-t2v-i2v-r2v.safetensors","size":131229656,"sha256":"acc529601d2da117fb81179e76c56e488a3beab1171659d305f04fa3655b787e","required":true,"trigger":"r34l1sm","recommended_strength":"0.6-1.0"},
+    {"id":"better_motion","repo":"vpakarinen/better-human-motion-h3-lora","revision":"72a74b7128e65685127b3a4e5ed685b23b135bbd","filename":"better_motion_h3_lora_v1_500.safetensors","size":310168816,"sha256":"285f9ed3fbb735c3625fca0d22166c7450ad7acb552a869fcbbd8e86e79d1f4c","recommended_strength":"0.4-0.8","steps":"15-30","scheduler":null},
+    {"id":"insta_tiktok","repo":"vpakarinen/insta-tiktok-aesthetics-h3-lora","revision":"d7b4cee29bad9596964bd18b37428312085cfa59","filename":"ig_tiktok_aesthetic_h3_lora_v1_500.safetensors","size":310168824,"sha256":"e9d1ffc380a6abaca39d92ce717e2ead22d05eadbeb6cd526db04aea3226f758","recommended_strength":"0.4-0.8","steps":"15-30","scheduler":null},
+    {"id":"motion_repair","repo":"JOKER141/MiniMax-H3-General-Motion-Continuity-Repair","revision":"3cf13868413331d57668ad128a5a40f5e1c37413","filename":"Motion_Repair.safetensors","size":155110272,"sha256":"a678a3657cefd5c2c2712f892da2f71be53c3f252e335557e918854f8abc579f","recommended_strength":"0.9","steps":null,"scheduler":null},
+    {"id":"camera_motion","repo":"Jojocodex/minimax-h3-Camera-Motion-lora","revision":"a0ed07c594812378addc215d2c6527864175d5ea","filename":"camera_motion_h3_lora_v1_1000_pruned.safetensors","version":"1000","size":155109488,"sha256":"c126738c887804ace3a4be4a3156fcca70517613c7a7ece4e5938d372419186b","trigger":"camera motion","recommended_strength":"0.8-1.0"},
+    {"id":"camera_motion","repo":"Jojocodex/minimax-h3-Camera-Motion-lora","revision":"a0ed07c594812378addc215d2c6527864175d5ea","filename":"camera_motion_h3_lora_v1_3000_pruned.safetensors","version":"3000","size":155109680,"sha256":"9d7d98d7377f56efed3aa7d507f767936112d208906f49908ec9a8ae912be88b","trigger":"camera motion","recommended_strength":"0.8-1.0"},
+    {"id":"spatial_physics","repo":"Jojocodex/minimax-h3-spatial-physics-lora","revision":"476b24df28b9b7cc5481b750469698f5cc4b0558","filename":"wushu_spatial_physics_clean_3000_pruned.safetensors","version":"3000","size":155109672,"sha256":"7d14f3701560068e7004159c8b2a7278bd2dbfc9e5e3b60d0bc9aef6c049919d","recommended_strength":"conflicting card guidance: 0.3-0.5 and 0.8-1.0"},
+    {"id":"spatial_physics","repo":"Jojocodex/minimax-h3-spatial-physics-lora","revision":"476b24df28b9b7cc5481b750469698f5cc4b0558","filename":"wushu_spatial_physics_v2_1000_pruned.safetensors","version":"1000","size":155109488,"sha256":"c38b8f9c43614c91a2847d290d9c5b3341536acb4d6d8ce2d825d4caf7eaee6b","recommended_strength":"conflicting card guidance: 0.3-0.5 and 0.8-1.0"}
+  ]
+}

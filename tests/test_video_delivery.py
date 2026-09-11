@@ -1835,7 +1835,7 @@ console.log(JSON.stringify({
                 "camera test", "", 768, 1344, 121, 6, 1,
                 cam_motion="3000", cam_strength=1.35,
             )
-        self.assertEqual(workflow["1c"]["inputs"]["lora_name"], server.CAM_LORA_3000)
+        self.assertEqual(workflow["1c"]["inputs"]["lora_name"], "camera_motion_h3_lora_v1_3000_pruned.safetensors")
         self.assertEqual(workflow["1c"]["inputs"]["strength_model"], 1.35)
         self.assertEqual(workflow["8"]["inputs"]["model"], ["1c", 0])
 
@@ -3095,7 +3095,7 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         root = Path(__file__).resolve().parents[1]
         html = (root / "index.html").read_text()
         css = (root / "apple-redesign.css").read_text()
-        self.assertIn('href="/apple-redesign.css?v=20260909-swipe1"', html)
+        self.assertIn('href="/apple-redesign.css?v=20260911-cream-ref2"', html)
         self.assertIn('id="videoStatus"', html)
         self.assertIn('id="modalPlaybackRate"', html)
         self.assertIn('id="modalPip"', html)

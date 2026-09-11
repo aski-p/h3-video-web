@@ -151,6 +151,219 @@ def normalize_worker_strategy(worker_target, seconds, strategy, seg_seconds):
 # 샘플링 스텝
 STEPS_MIN, STEPS_MAX, STEPS_DEFAULT = 2, 20, 6
 
+# Optional MiniMax H3 LoRAs.  Filenames are server-owned allowlist values: an
+# API client can select only these IDs and versions and can never submit a
+# filesystem path or download URL.
+PGX_LORA_DIRS = (
+    "/home/aski/ComfyUI/models/loras",
+    "/home/aski/ComfyUI/models/loras/split_files/loras",
+)
+LORA_CATALOG = {
+    "realism": {
+        "label": "Realism", "description": "인물 피부·질감의 실사감 보강",
+        "filename": "h3-realism-people-t2v-i2v-r2v.safetensors",
+        "default_strength": 0.80,
+    },
+    "better_motion": {
+        "label": "Better Human Motion", "description": "걷기·일상 동작의 자연스러운 관절 움직임",
+        "filename": "better_motion_h3_lora_v1_500.safetensors",
+        "default_strength": 0.60,
+    },
+    "insta_tiktok": {
+        "label": "Insta/TikTok Aesthetics", "description": "자연스러운 숏폼·스마트폰 영상 미감",
+        "filename": "ig_tiktok_aesthetic_h3_lora_v1_500.safetensors",
+        "default_strength": 0.60,
+    },
+    "motion_repair": {
+        "label": "Motion Continuity Repair", "description": "동작 끊김·프레임 간 연속성 보정",
+        "filename": "Motion_Repair.safetensors", "default_strength": 0.90,
+    },
+    "camera_motion": {
+        "label": "Camera Motion", "description": "선택한 카메라 이동의 안정성 보강",
+        "versions": {
+            "1000": "camera_motion_h3_lora_v1_1000_pruned.safetensors",
+            "3000": "camera_motion_h3_lora_v1_3000_pruned.safetensors",
+        },
+        "default_version": "1000", "default_strength": 0.80,
+    },
+    "spatial_physics": {
+        "label": "Spatial Physics", "description": "접촉·중력·공간 상호작용 보강",
+        "versions": {
+            "1000": "wushu_spatial_physics_v2_1000_pruned.safetensors",
+            "3000": "wushu_spatial_physics_clean_3000_pruned.safetensors",
+        },
+        "default_version": "3000", "default_strength": 0.40,
+    },
+}
+CAMERA_MOVEMENTS = {
+    "handheld": "gentle handheld shot",
+    "tracking": "smooth tracking shot",
+    "pan_left": "smooth pan left",
+    "pan_right": "smooth pan right",
+    "push_in": "slow push-in",
+    "pull_out": "slow pull-out",
+}
+LORA_FILE_ALIASES = {
+    "camera_motion_h3_lora_v1_1000_pruned.safetensors": "cam_motion_1000.safetensors",
+    "camera_motion_h3_lora_v1_3000_pruned.safetensors": "cam_motion_3000.safetensors",
+}
+
+
+def normalize_steps(value):
+    """Return one supported integer step count without silently clamping it."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"스텝은 {STEPS_MIN}~{STEPS_MAX} 사이의 정수여야 합니다")
+    if value < STEPS_MIN or value > STEPS_MAX:
+        raise ValueError(f"스텝은 {STEPS_MIN}~{STEPS_MAX} 사이의 정수여야 합니다")
+    return value
+
+
+def default_lora_options():
+    result = {}
+    for lora_id, spec in LORA_CATALOG.items():
+        item = {"enabled": False, "strength": spec["default_strength"]}
+        if "versions" in spec:
+            item["version"] = spec["default_version"]
+        if lora_id == "camera_motion":
+            item["movement"] = "handheld"
+        result[lora_id] = item
+    return result
+
+
+def normalize_lora_options(value=None, legacy=None):
+    if value is None:
+        value = {}
+        legacy = legacy or {}
+        value["realism"] = {
+            "enabled": legacy.get("realism_lora") is True,
+            "strength": (LORA_CATALOG["realism"]["default_strength"]
+                         if legacy.get("realism_strength") is None else legacy.get("realism_strength")),
+        }
+        cam = legacy.get("cam_motion")
+        value["camera_motion"] = {
+            "enabled": cam in ("1000", "3000"),
+            "version": cam if cam in ("1000", "3000") else "1000",
+            "strength": (LORA_CATALOG["camera_motion"]["default_strength"]
+                         if legacy.get("cam_strength") is None else legacy.get("cam_strength")),
+            "movement": "handheld",
+        }
+    if not isinstance(value, dict):
+        raise ValueError("lora_options는 객체여야 합니다")
+    unknown = set(value) - set(LORA_CATALOG)
+    if unknown:
+        raise ValueError("허용되지 않은 LoRA ID가 포함되어 있습니다")
+    result = default_lora_options()
+    for lora_id, supplied in value.items():
+        if not isinstance(supplied, dict):
+            raise ValueError(f"{lora_id} 설정은 객체여야 합니다")
+        spec = LORA_CATALOG[lora_id]
+        allowed = {"enabled", "strength"}
+        if "versions" in spec:
+            allowed.add("version")
+        if lora_id == "camera_motion":
+            allowed.add("movement")
+        if set(supplied) - allowed:
+            raise ValueError(f"{lora_id}에 허용되지 않은 설정이 있습니다")
+        enabled = supplied.get("enabled", result[lora_id]["enabled"])
+        strength = supplied.get("strength", result[lora_id]["strength"])
+        if not isinstance(enabled, bool):
+            raise ValueError(f"{lora_id}.enabled는 불리언이어야 합니다")
+        if isinstance(strength, bool) or not isinstance(strength, (int, float)) or not math.isfinite(float(strength)):
+            raise ValueError(f"{lora_id}.strength는 유한한 숫자여야 합니다")
+        strength = float(strength)
+        if not 0.0 <= strength <= 2.0:
+            raise ValueError(f"{lora_id}.strength는 0~2 범위여야 합니다")
+        item = {"enabled": enabled, "strength": strength}
+        if "versions" in spec:
+            version = supplied.get("version", spec["default_version"])
+            if not isinstance(version, str) or version not in spec["versions"]:
+                raise ValueError(f"{lora_id}.version을 확인해 주세요")
+            item["version"] = version
+        if lora_id == "camera_motion":
+            movement = supplied.get("movement", "handheld")
+            if not isinstance(movement, str) or movement not in CAMERA_MOVEMENTS:
+                raise ValueError("camera_motion.movement를 확인해 주세요")
+            item["movement"] = movement
+        result[lora_id] = item
+    return result
+
+
+def selected_loras(options):
+    normalized = normalize_lora_options(options)
+    result = []
+    for lora_id, spec in LORA_CATALOG.items():
+        item = normalized[lora_id]
+        if not item["enabled"] or item["strength"] == 0:
+            continue
+        filename = spec.get("filename") or spec["versions"][item["version"]]
+        result.append({"id": lora_id, "filename": filename, "strength": item["strength"],
+                       **({"version": item["version"]} if "version" in item else {})})
+    return result
+
+
+def resolved_lora_filename(filename, directories):
+    for candidate in (filename, LORA_FILE_ALIASES.get(filename)):
+        if candidate and any(os.path.exists(os.path.join(directory, candidate)) for directory in directories):
+            return candidate
+    return None
+
+
+def applied_lora_options(options):
+    applied = json.loads(json.dumps(normalize_lora_options(options)))
+    for item in applied.values():
+        if item["strength"] == 0:
+            item["enabled"] = False
+    return applied
+
+
+def missing_loras_for_target(worker_target, options, now=None):
+    selected = selected_loras(options)
+    if worker_target == "pgx":
+        files = {item["filename"] for item in selected if resolved_lora_filename(item["filename"], PGX_LORA_DIRS)}
+    elif worker_target == "rtx5080":
+        record = WORKERS.get(RTX5080_WORKER_ID) or {}
+        files = set(record.get("lora_files") or ()) if rtx5080_worker_status(now=now)["online"] else set()
+    else:
+        raise ValueError("unknown worker target")
+    return [item for item in selected if item["filename"] not in files]
+
+
+def public_lora_catalog(now=None):
+    rtx_status = rtx5080_worker_status(now=now)
+    rtx_files = set((WORKERS.get(RTX5080_WORKER_ID) or {}).get("lora_files") or ())
+    result = []
+    for lora_id, spec in LORA_CATALOG.items():
+        item = {
+            "id": lora_id, "label": spec["label"], "description": spec["description"],
+            "default_strength": spec["default_strength"],
+        }
+        if "versions" in spec:
+            item["versions"] = list(spec["versions"])
+            item["default_version"] = spec["default_version"]
+            item["installed"] = {
+                target: {version: (resolved_lora_filename(filename, PGX_LORA_DIRS) is not None
+                                   if target == "pgx" else filename in rtx_files)
+                         for version, filename in spec["versions"].items()}
+                for target in ("pgx", "rtx5080")
+            }
+        else:
+            filename = spec["filename"]
+            item["installed"] = {
+                "pgx": resolved_lora_filename(filename, PGX_LORA_DIRS) is not None,
+                "rtx5080": filename in rtx_files,
+            }
+        result.append(item)
+    return {
+        "steps": {"min": STEPS_MIN, "max": STEPS_MAX, "recommended": [6, 8]},
+        "devices": {"pgx": {"online": True, "inventory_current": True},
+                    "rtx5080": {"online": rtx_status["online"], "inventory_current": rtx_status["online"],
+                                "last_seen_age_seconds": rtx_status.get("last_seen_age_seconds")}},
+        "turbo": {"strength": 1.0, "recommended_steps": [6, 8],
+                  "sampler": "res_multistep", "scheduler": "simple",
+                  "compatibility": "기존 운영 워크플로우 유지 · 모델카드 Euler/Beta 조합과 다르므로 다중 LoRA는 실험용"},
+        "items": result,
+    }
+
 # 예상 시간 계수 (초/4초세그먼트, 6스텝 기준)
 EST_BASE_SECONDS = 75
 EST_STEP_COEF = 8.0  # 스텝당 추가 (6스텝 대비)
@@ -447,6 +660,7 @@ def rtx5080_worker_status(now=None):
         "generation_verified": bool(record.get("generation_verified")),
         "model_profile": RTX5080_MODEL_PROFILE,
         "modes": list(record.get("modes") or ()),
+        "lora_files": list(record.get("lora_files") or ()),
         "last_seen_age_seconds": round(age, 1) if age is not None else None,
     }
 
@@ -457,10 +671,19 @@ def record_worker_heartbeat(worker_id, payload, now=None):
     gpu = payload.get("gpu")
     profile = payload.get("model_profile")
     modes = payload.get("modes")
+    lora_files = payload.get("lora_files", [])
     if gpu != "NVIDIA GeForce RTX 5080" or profile != RTX5080_MODEL_PROFILE:
         raise ValueError("worker capability mismatch")
     if not isinstance(modes, list) or any(mode not in ("t2v", "i2v") for mode in modes):
         raise ValueError("invalid worker modes")
+    allowed_lora_files = {
+        spec.get("filename") or filename
+        for spec in LORA_CATALOG.values()
+        for filename in (spec.get("versions") or {"single": spec.get("filename")}).values()
+    }
+    if (not isinstance(lora_files, list) or any(not isinstance(name, str) for name in lora_files)
+            or len(lora_files) != len(set(lora_files)) or not set(lora_files) <= allowed_lora_files):
+        raise ValueError("invalid worker LoRA inventory")
     if (payload.get("comfy_up") not in (True, False)
             or payload.get("model_ready") not in (True, False)
             or payload.get("generation_verified") not in (True, False)):
@@ -480,6 +703,7 @@ def record_worker_heartbeat(worker_id, payload, now=None):
         "busy": payload["busy"],
         "modes": sorted(set(modes)),
         "model_profile": profile,
+        "lora_files": sorted(lora_files),
     }
     with LOCK:
         WORKERS[worker_id] = record
@@ -522,6 +746,8 @@ def generation_receipt(job, duplicate=False):
         "strategy": cfg.get("strategy"),
         "seg_seconds": cfg.get("seg_seconds"),
         "steps": cfg.get("steps"),
+        "requested_generation_options": cfg.get("requested_generation_options"),
+        "applied_generation_options": cfg.get("applied_generation_options"),
         "estimated_seconds": estimated_seconds,
         "message": f"{segments}개 세그먼트, 예상 {estimated_seconds}초",
     }
@@ -532,7 +758,7 @@ def _same_idempotent_generation(left, right):
         "worker_target", "mode", "prompt", "negative", "width", "height",
         "seconds", "strategy", "seg_seconds", "steps", "seed", "filename",
         "image_source_sha256", "video_source_sha256", "realism_lora",
-        "cam_motion", "realism_strength", "cam_strength",
+        "cam_motion", "realism_strength", "cam_strength", "lora_options",
     )
     return all(left.get(key) == right.get(key) for key in keys)
 
@@ -1888,48 +2114,49 @@ CAM_LORA_3000 = "cam_motion_3000.safetensors"
 CAM_LORA_STRENGTH = 1.0
 
 
-def build_workflow(text, negative, width, height, length, steps, seed, image_name=None, prefix="h3", video_name=None, realism_lora=False, cam_motion="", realism_strength=None, cam_strength=None, lora_dirs=None, strict_loras=False):
-    """T2V/I2V 워크플로우 — H3 전용. Wan 폴백 제거 (사용자 지정).
-    video_name: LoadVideo 노드를 통한 참조 동영상 (인물 동영상 모드)
-    realism_strength/cam_strength: None이면 기본값, 실수면 0.0~2.0으로 클램프"""
-    def _clamp(v, default):
-        if v is None:
-            return default
-        try:
-            f = float(v)
-        except (TypeError, ValueError):
-            return default
-        if f != f or f in (float("inf"), float("-inf")):
-            return default
-        return max(0.0, min(2.0, f))
-    r_strength = _clamp(realism_strength, REALISM_LORA_STRENGTH)
-    c_strength = _clamp(cam_strength, CAM_LORA_STRENGTH)
+def build_workflow(text, negative, width, height, length, steps, seed, image_name=None, prefix="h3", video_name=None, realism_lora=False, cam_motion="", realism_strength=None, cam_strength=None, lora_options=None, lora_dirs=None, strict_loras=False):
+    """Build an H3 graph with Turbo followed by selected model-only LoRAs."""
+    legacy = {
+        "realism_lora": realism_lora, "realism_strength": realism_strength,
+        "cam_motion": cam_motion, "cam_strength": cam_strength,
+    }
+    options = normalize_lora_options(lora_options, legacy=legacy)
+    chosen = selected_loras(options)
     base_negative = "text, subtitles, captions, watermark, logo, script overlay, on-screen text, UI elements"
     if negative:
         full_prompt = f"{text} (do NOT include: {base_negative}, {negative})"
     else:
         full_prompt = f"{text} (do NOT include: {base_negative})"
-    # ReferenceToVideo has a separate multimodal reference-conditioning path.
-    # Keep the user's prompt intact and add the documented explicit image tag
-    # rather than hiding a prompt rewrite or stretching the photo into a keyframe.
+    camera = options["camera_motion"]
     reference_image = bool(image_name)
     if reference_image:
         full_prompt = f"{REFERENCE_TO_VIDEO_INSTRUCTION}\n\n{full_prompt}"
+    # Model-card trigger words belong at the absolute beginning once.  They are
+    # server-owned; remove user copies before prepending the canonical form.
+    triggers = []
+    if camera["enabled"] and camera["strength"] > 0:
+        full_prompt = re.sub(r"\bcamera motion\b\s*[,.:;-]*\s*", "", full_prompt, flags=re.I)
+        triggers.append(f"camera motion, {CAMERA_MOVEMENTS[camera['movement']]}")
+    realism = options["realism"]
+    if realism["enabled"] and realism["strength"] > 0:
+        full_prompt = re.sub(r"\br34l1sm\b\s*[,.:;-]*\s*", "", full_prompt, flags=re.I)
+        triggers.append("r34l1sm")
+    if triggers:
+        full_prompt = f"{', '.join(triggers)}. {full_prompt}"
 
-    # 기본 Turbo 뒤에, 사용자가 토글을 켠 경우에만 리얼리즘 LoRA를 누적한다.
     if lora_dirs is None:
-        lora_dirs = ["/home/aski/ComfyUI/models/loras",
-                     "/home/aski/ComfyUI/models/loras/split_files/loras"]
-    lora_avail = any(os.path.exists(os.path.join(d, H3_LORA)) for d in lora_dirs)
-    realism_lora = realism_lora is True  # 문자열 "false" 등 truthy 값은 허용하지 않음
-    realism_avail = realism_lora and any(
-        os.path.exists(os.path.join(d, REALISM_LORA)) for d in lora_dirs
-    )
-    if strict_loras and not lora_avail:
+        lora_dirs = list(PGX_LORA_DIRS)
+    turbo_available = any(os.path.isfile(os.path.join(d, H3_LORA)) for d in lora_dirs)
+    if strict_loras and not turbo_available:
         raise RuntimeError(f"exact H3 Turbo LoRA missing: {H3_LORA}")
-    if strict_loras and realism_lora and not realism_avail:
-        raise RuntimeError(f"requested realism LoRA missing: {REALISM_LORA}")
-    model_ref = ["1b", 0] if realism_avail else (["1a", 0] if lora_avail else ["1", 0])
+    available = []
+    for item in chosen:
+        resolved = resolved_lora_filename(item["filename"], lora_dirs)
+        if strict_loras and not resolved:
+            raise RuntimeError(f"requested LoRA missing: {item['id']} ({item['filename']})")
+        if resolved:
+            available.append({**item, "filename": resolved})
+    model_ref = ["1", 0]
     wf = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": H3_UNET, "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": H3_CLIP, "type": "minimax", "device": "default"}},
@@ -1946,6 +2173,26 @@ def build_workflow(text, negative, width, height, length, steps, seed, image_nam
         "13": {"class_type": "CreateVideo", "inputs": {"images": ["11", 0], "audio": ["12", 0], "fps": 24.0, "bit_depth": 8}},
         "14": {"class_type": "SaveVideo", "inputs": {"video": ["13", 0], "filename_prefix": prefix, "format": "mp4", "codec": "h264", "encoding": "re-encode", "crf": 18.0}},
     }
+    loader_index = 0
+    if turbo_available:
+        wf["1a"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+            "model": model_ref, "lora_name": H3_LORA, "strength_model": 1.0,
+        }}
+        model_ref = ["1a", 0]
+    for item in available:
+        loader_index += 1
+        if item["id"] == "realism":
+            node_id = "1b"
+        elif item["id"] == "camera_motion":
+            node_id = "1c"
+        else:
+            node_id = f"lora_{loader_index:02d}"
+        wf[node_id] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+            "model": model_ref, "lora_name": item["filename"], "strength_model": item["strength"],
+        }}
+        model_ref = [node_id, 0]
+    wf["8"]["inputs"]["model"] = model_ref
+    wf["9"]["inputs"]["model"] = model_ref
     if reference_image:
         # Dynamic input name follows ComfyUI's official ReferenceToVideo
         # template (`ref_images.ref_image_1`). `match` avoids warping a 4:5
@@ -1964,32 +2211,6 @@ def build_workflow(text, negative, width, height, length, steps, seed, image_nam
                 "length": length,
             },
         }
-    if lora_avail:
-        wf["1a"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": H3_LORA, "strength_model": 1.0}}
-    if realism_avail:
-        wf["1b"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
-            "model": ["1a", 0] if lora_avail else ["1", 0],
-            "lora_name": REALISM_LORA,
-            "strength_model": r_strength,
-        }}
-    # 카메라 모션 LoRA (H3 전용): 토글 시 마지막에 누적
-    cam_lo = None
-    if cam_motion == "1000":
-        cam_lo = CAM_LORA_1000
-    elif cam_motion == "3000":
-        cam_lo = CAM_LORA_3000
-    if cam_lo:
-        cam_avail = any(os.path.exists(os.path.join(d, cam_lo)) for d in lora_dirs)
-        if strict_loras and not cam_avail:
-            raise RuntimeError(f"requested camera LoRA missing: {cam_lo}")
-        if cam_avail:
-            wf["1c"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
-                "model": model_ref, "lora_name": cam_lo, "strength_model": c_strength,
-            }}
-            model_ref = ["1c", 0]
-            # 8/9의 model 참조 갱신
-            wf["8"]["inputs"]["model"] = model_ref
-            wf["9"]["inputs"]["model"] = model_ref
     if image_name:
         wf["15"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
         # ReferenceToVideo consumes the image through its documented dynamic
@@ -2386,7 +2607,9 @@ def run_job(job_id, cfg):
                                    realism_lora=cfg.get("realism_lora", False),
                                    cam_motion=cfg.get("cam_motion", ""),
                                    realism_strength=cfg.get("realism_strength"),
-                                   cam_strength=cfg.get("cam_strength"))
+                                   cam_strength=cfg.get("cam_strength"),
+                                   lora_options=cfg.get("lora_options"),
+                                   strict_loras=True)
             client_id = str(uuid.uuid4())
             # Subscribe before queueing so an immediately-started prompt cannot
             # emit its first real progress event before this client is listening.
@@ -3332,6 +3555,7 @@ class Handler(BaseHTTPRequestHandler):
                             **queues["pgx"]},
                     "rtx5080": {**rtx5080_worker_status(), **queues["rtx5080"]},
                 },
+                "lora_catalog": public_lora_catalog(),
             })
         elif p.startswith("/api/job/"):
             jid = p.split("/")[3]
@@ -3897,27 +4121,35 @@ class Handler(BaseHTTPRequestHandler):
                     worker_target, seconds, seg_seconds, strategy,
                 ))
             try:
-                steps = int(data.get("steps", STEPS_DEFAULT))
-            except Exception:
-                steps = STEPS_DEFAULT
-            steps = max(STEPS_MIN, min(STEPS_MAX, steps))
+                steps = normalize_steps(data.get("steps", STEPS_DEFAULT))
+            except ValueError as exc:
+                cleanup_job_input_snapshots(image_source_path, video_source_path)
+                send_json(self, {"ok": False, "error": str(exc), "code": "INVALID_STEPS"}, 400)
+                return
             est = estimate_seconds(seconds, seg_seconds, strategy, steps)
             fname = re.sub(r'[^\w\-]', '_', (data.get("filename") or "video")).strip()[:40] or "video"
-            # JSON true만 허용한다. 문자열 "false" 등으로 우회해 켜지지 않는다.
-            realism_lora = data.get("realism_lora") is True
-            # 카메라 모션 LoRA: "off"|"1000"|"3000" — 다른 값은 off로 처리
-            cam_motion = data.get("cam_motion")
-            cam_motion = cam_motion if cam_motion in ("1000", "3000") else ""
-            # LoRA 강도: 실수만 허용, 부동/문자열/bool은 None → 기본값
-            def _num(v):
-                if isinstance(v, bool) or not isinstance(v, (int, float)):
-                    return None
-                f = float(v)
-                if f != f or f in (float("inf"), float("-inf")):
-                    return None
-                return max(0.0, min(2.0, f))
-            realism_strength = _num(data.get("realism_strength"))
-            cam_strength = _num(data.get("cam_strength"))
+            try:
+                lora_options = normalize_lora_options(data.get("lora_options"), legacy=data)
+            except ValueError as exc:
+                cleanup_job_input_snapshots(image_source_path, video_source_path)
+                send_json(self, {"ok": False, "error": str(exc), "code": "INVALID_LORA_OPTIONS"}, 400)
+                return
+            missing_loras = missing_loras_for_target(worker_target, lora_options)
+            if missing_loras:
+                cleanup_job_input_snapshots(image_source_path, video_source_path)
+                send_json(self, {
+                    "ok": False,
+                    "error": f"{worker_target}에 선택한 LoRA가 설치되지 않아 작업을 보류합니다",
+                    "code": "LORA_MISSING",
+                    "worker_target": worker_target,
+                    "missing_loras": [{"id": item["id"], **({"version": item["version"]} if "version" in item else {})} for item in missing_loras],
+                }, 409)
+                return
+            realism_lora = lora_options["realism"]["enabled"]
+            realism_strength = lora_options["realism"]["strength"]
+            camera = lora_options["camera_motion"]
+            cam_motion = camera["version"] if camera["enabled"] else ""
+            cam_strength = camera["strength"]
             try:
                 width = int(data.get("width", 1344))
                 height = int(data.get("height", 768))
@@ -3956,6 +4188,15 @@ class Handler(BaseHTTPRequestHandler):
                 "cam_motion": cam_motion,
                 "realism_strength": realism_strength,
                 "cam_strength": cam_strength,
+                "lora_options": lora_options,
+                "requested_generation_options": {"steps": steps, "lora_options": lora_options},
+                "applied_generation_options": {
+                    "steps": steps,
+                    "lora_options": applied_lora_options(lora_options),
+                    "turbo": {"enabled": True, "strength": 1.0, "steps_recommended": [6, 8]},
+                    "sampler": "res_multistep", "scheduler": "simple",
+                },
+                "lora_combination_experimental": len(selected_loras(lora_options)) > 1,
             }
             # Dedupe, worker별 admission reservation, job registration을 한 짧은
             # critical section에서 처리한다. 생성 작업 자체는 이 lock 밖에서 실행된다.
