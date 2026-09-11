@@ -876,10 +876,22 @@ class RuntimeState:
         self.lease_deadline = 0.0
         self.stopping = False
 
-    def set_claim(self, claim: dict | None) -> None:
+    def try_set_claim(self, claim: dict) -> bool:
+        """Atomically reject a late claim after shutdown won the local race."""
         with self.lock:
+            if self.stopping or self.claim is not None:
+                return False
             self.claim = claim
-            self.lease_deadline = time.monotonic() + 45 if claim else 0.0
+            self.lease_deadline = time.monotonic() + 45
+            return True
+
+    def clear_claim(self, claim: dict | None = None) -> None:
+        with self.lock:
+            if claim is not None and self.claim is not None:
+                if self.claim.get("execution_id") != claim.get("execution_id"):
+                    return
+            self.claim = None
+            self.lease_deadline = 0.0
 
     def mark_renewed(self, claim: dict) -> None:
         with self.lock:
@@ -903,6 +915,59 @@ class RuntimeState:
         with self.lock:
             return dict(self.claim) if self.claim else None
 
+    def request_shutdown(self) -> bool:
+        with self.lock:
+            if self.claim or self.stopping:
+                return False
+            self.stopping = True
+            return True
+
+
+def handle_power_command(api: ApiClient, comfy: ComfyClient, state: RuntimeState,
+                         command: dict | None) -> bool:
+    if not isinstance(command, dict):
+        return False
+    command_id = str(command.get("id") or "")
+    if (not re.fullmatch(r"[0-9a-f]{32}", command_id)
+            or command.get("action") != "shutdown"
+            or float(command.get("expires_at") or 0) < time.time()):
+        return False
+    if os.name != "nt" or comfy.busy() or not state.request_shutdown():
+        api.request("/api/worker/power/ack", {
+            "command_id": command_id, "status": "rejected",
+        }, timeout=20)
+        return False
+    try:
+        subprocess.run(
+            ["shutdown.exe", "/s", "/t", "15", "/d", "p:0:0",
+             "/c", "H3 웹에서 요청한 안전한 종료"],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        # Scheduling failed, so it is safe to reopen claim admission.  The
+        # diagnostic ACK is best-effort and must not mask the real failure.
+        try:
+            api.request("/api/worker/power/ack", {
+                "command_id": command_id, "status": "error",
+            }, timeout=20)
+        except Exception as ack_error:
+            log(f"shutdown error acknowledgement failed: {type(ack_error).__name__}")
+        with state.lock:
+            state.stopping = False
+        raise
+
+    # From this point Windows will power off even if the network disappears.
+    # Keep the worker permanently fenced and never downgrade the command or
+    # resume claim polling merely because acknowledgement delivery failed.
+    try:
+        api.request("/api/worker/power/ack", {
+            "command_id": command_id, "status": "scheduled",
+        }, timeout=20)
+    except Exception as ack_error:
+        log(f"scheduled shutdown acknowledgement failed: {type(ack_error).__name__}")
+    log("authenticated power-off scheduled")
+    return True
+
 
 def heartbeat_loop(api: ApiClient, comfy: ComfyClient, gpu: str, vram: int,
                    models_dir: Path, state: RuntimeState) -> None:
@@ -922,6 +987,7 @@ def heartbeat_loop(api: ApiClient, comfy: ComfyClient, gpu: str, vram: int,
                            lease_token=claim["lease_token"])
         try:
             response = api.request("/api/worker/heartbeat", payload, timeout=20)
+            handle_power_command(api, comfy, state, response.get("power_command"))
             if claim and response.get("lease_renewed"):
                 state.mark_renewed(claim)
             elif claim:
@@ -1033,7 +1099,7 @@ def run_worker(force_hash: bool = False) -> None:
         args=(api, comfy, gpu, vram, models_dir, state), daemon=True)
     heartbeat.start()
     log(f"ready: {gpu} · {vram} MiB · {PROFILE} · {comfy_root}")
-    while True:
+    while not state.stopping:
         if not comfy.ready():
             try:
                 ensure_comfy(comfy_root, comfy, config)
@@ -1051,7 +1117,17 @@ def run_worker(force_hash: bool = False) -> None:
             if not claim.get("job"):
                 time.sleep(2)
                 continue
-            state.set_claim(claim)
+            if not state.try_set_claim(claim):
+                # The heartbeat thread may have accepted shutdown while this
+                # claim response was in flight. Return the exact lease instead
+                # of starting generation during shutdown.
+                api.request("/api/worker/fail", {
+                    "job_id": claim["job"]["id"], "execution_id": claim["execution_id"],
+                    "lease_token": claim["lease_token"],
+                    "error": "worker shutdown won before local claim assignment",
+                    "retryable": True,
+                }, timeout=30)
+                continue
             log(f"claimed {claim['job']['id']}")
             try:
                 process_claim(api, comfy, server, claim, comfy_root, models_dir, state)
@@ -1069,7 +1145,7 @@ def run_worker(force_hash: bool = False) -> None:
                     log(f"failure report rejected: {report_exc}")
             finally:
                 cleanup_claim_files(comfy_root, str(claim["job"].get("id") or ""))
-                state.set_claim(None)
+                state.clear_claim(claim)
         except Exception as exc:
             log(f"claim loop error: {exc}")
             time.sleep(5)

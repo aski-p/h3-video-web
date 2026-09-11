@@ -157,11 +157,13 @@ foreach ($name in @('h3_worker.py','server.py','model-manifest.json','requiremen
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $StageRoot $name) -Force
 }
 $config = [ordered]@{
-  # Keep the generation lease off the intermittent Vercel proxy hop.
+  # The worker talks straight to PGX over HTTPS/Tailscale.  Vercel remains the
+  # browser/media edge but is no longer a generation lease dependency.
   api_base = 'https://thinkstationpgx-11d3.tailccac79.ts.net'
   worker_token_dpapi = $protectedToken
   comfy_url = 'http://127.0.0.1:8188'
   comfy_dir = $comfyDir
+  targeted_interrupt_server_sha256 = '4b910e3579db59053d0fea97b241ae1a99528c6d7fb152f34640a995bcab50d0'
   models_dir = $modelsDir
   comfy_args = @('--lowvram','--reserve-vram','1.5')
 }

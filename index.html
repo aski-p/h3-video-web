@@ -114,6 +114,10 @@ header .sub2 b{color:var(--tx2);font-weight:500}
 .worker-live-bar i{display:block;width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--acc-bg),var(--acc));transition:width .45s ease}
 .worker-live-time{margin-top:7px;color:var(--tx2);font-size:10.5px;line-height:1.45}
 .worker-live-meta{margin-top:3px;color:var(--tx4);font:400 9.5px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.worker-live-cancel{width:100%;margin-top:9px;padding:8px 10px;border:1px solid rgba(255,69,58,.28);border-radius:10px;background:rgba(255,69,58,.08);color:#ff6961;font-size:11px;font-weight:650;cursor:pointer;transition:background .18s,border-color .18s,opacity .18s}
+.worker-live-cancel:hover:not(:disabled){background:rgba(255,69,58,.14);border-color:rgba(255,69,58,.45)}
+.worker-live-cancel:disabled{cursor:default;opacity:.48}
+.worker-live-cancel[hidden]{display:none}
 @media(max-width:560px){
   .worker-progress-board{top:4px;grid-template-columns:1fr;padding:6px;gap:6px}
   .worker-live{padding:9px 10px}
@@ -350,6 +354,13 @@ button:disabled{opacity:.35;cursor:not-allowed}
 .worker-switch[aria-checked="true"] span{transform:translateX(22px)}
 .worker-switch:disabled{opacity:.35}
 .worker-queues{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.worker-pill{font:500 10.5px var(--mono);color:var(--tx3);border:1px solid var(--line-subtle);border-radius:999px;padding:5px 9px}.worker-pill.on{color:var(--ok);border-color:rgba(39,166,68,.25)}
+.power-route{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line-subtle)}
+.power-copy strong{display:block;font-size:13px;color:var(--tx)}.power-copy small{display:block;margin-top:3px;font-size:11px;color:var(--tx4)}
+.power-switch{min-width:82px;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:rgba(255,255,255,.04);color:var(--tx3);font:600 11px var(--sans);cursor:pointer}
+.power-switch.on{color:var(--ok);border-color:rgba(39,166,68,.35);background:rgba(39,166,68,.08)}
+.power-switch.pending{color:var(--warn);border-color:rgba(255,184,77,.35)}.power-switch:disabled{opacity:.45;cursor:not-allowed}
+.power-pin-input{width:100%;box-sizing:border-box;margin:10px 0 6px;padding:13px 14px;border:1px solid var(--line);border-radius:var(--r-sm);background:rgba(255,255,255,.04);color:var(--tx);font:600 18px var(--mono);letter-spacing:.18em;text-align:center}
+.power-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}.power-modal-actions button{padding:9px 14px;border-radius:var(--r-sm);border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--tx2);cursor:pointer}.power-modal-actions .confirm{background:var(--acc);border-color:var(--acc);color:#fff}
 
 /* ── Mode tabs ── */
 .mtabs{display:flex;gap:8px;margin-bottom:16px}
@@ -663,6 +674,7 @@ footer{
       <div class="worker-live-bar" aria-hidden="true"><i></i></div>
       <div class="worker-live-time">예상 완료 —</div>
       <div class="worker-live-meta">최근 서버 확인 대기</div>
+      <button class="worker-live-cancel" type="button" data-worker="pgx" hidden disabled>이 작업 중단</button>
     </article>
     <article class="worker-live" id="rtxLiveProgress" data-worker="rtx5080">
       <div class="worker-live-head"><span class="worker-live-name"><i class="worker-live-dot" aria-hidden="true"></i>RTX 5080</span><strong class="worker-live-pct">대기</strong></div>
@@ -670,6 +682,7 @@ footer{
       <div class="worker-live-bar" aria-hidden="true"><i></i></div>
       <div class="worker-live-time">예상 완료 —</div>
       <div class="worker-live-meta">최근 서버 확인 대기</div>
+      <button class="worker-live-cancel" type="button" data-worker="rtx5080" hidden disabled>이 작업 중단</button>
     </article>
   </section>
 
@@ -692,6 +705,10 @@ footer{
     <div class="worker-queues" aria-live="polite">
       <span class="worker-pill" id="pgxQueueState">PGX · 확인 중</span>
       <span class="worker-pill" id="rtxQueueState">RTX 5080 · 확인 중</span>
+    </div>
+    <div class="power-route">
+      <div class="power-copy"><strong>5080 PC 전원</strong><small id="powerStateText">전원 상태 확인 중…</small></div>
+      <button class="power-switch" id="powerToggle" type="button" aria-label="5080 PC 전원 제어" disabled>확인 중</button>
     </div>
   </div>
 
@@ -927,6 +944,22 @@ footer{
 
 </div>
 
+<!-- 5080 전원 제어 비밀번호는 서버에서만 검증하며 브라우저에 저장하지 않는다. -->
+<div class="modal-overlay" id="powerModal" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="powerModalTitle">
+    <button class="close-btn" id="powerModalClose" type="button" aria-label="전원 제어 닫기">✕</button>
+    <h3 id="powerModalTitle">5080 PC 전원 제어</h3>
+    <p id="powerModalMessage" class="hint"></p>
+    <label class="fld" for="powerPin">비밀번호</label>
+    <input class="power-pin-input" id="powerPin" type="password" inputmode="numeric" autocomplete="off" maxlength="128" aria-describedby="powerModalError">
+    <div class="hint" id="powerModalError" role="status" aria-live="polite"></div>
+    <div class="power-modal-actions">
+      <button id="powerModalCancel" type="button">취소</button>
+      <button class="confirm" id="powerModalConfirm" type="button">확인</button>
+    </div>
+  </div>
+</div>
+
 <!-- 오른쪽 가장자리 탭 또는 왼쪽 스와이프로 최근 작업 드로어를 연다. -->
 <button class="recent-drawer-handle" id="recentModalOpen" type="button" aria-controls="recentModal" aria-expanded="false" aria-label="최근 작업 열기">
   <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false">
@@ -1039,6 +1072,7 @@ const $=s=>document.querySelector(s);
 let W=1344,H=768,S=5,currentJob=null;
 let pollTimer=null,pollDelay=4000,cancelInFlight=false;
 let WORKER_TARGET='pgx', WORKER_STATUS=null;
+let POWER_STATE={state:'unknown',online:false,busy:false}, POWER_ACTION=null, POWER_REQUESTING=false;
 let STRATEGY='single', SEG_SECONDS=4, STEPS=6, REALISM_LORA=false, CAM_MOTION='', REALISM_STRENGTH=1.0, CAM_STRENGTH=1.0;
 const MEDIA_STREAM_VERSION='20260909-playback2';
 const RUNNING_CHARACTERS=["🏃🏻","🏃🏼","🏃🏽","🏃🏾","🏃🏿","🏃🏻‍♀️","🏃🏼‍♀️","🏃🏽‍♀️","🏃🏾‍♀️","🏃🏿‍♀️","🏃🏻‍♂️","🏃🏼‍♂️","🏃🏽‍♂️","🏃🏾‍♂️","🏃🏿‍♂️","🐕","🐈","🐇","🦊","🐼","🐻","🐨","🐯","🦁","🐸","🐵","🐧","🐥","🦄","🐝","🦋","🐿️","🦖","🤖","👻","👽","🥷","🧚","🧜‍♀️","🦸‍♀️","🦸‍♂️"];
@@ -1120,6 +1154,67 @@ $('#workerToggle').onclick=()=>{
   workerToggle.setAttribute('aria-checked',WORKER_TARGET==='rtx5080'?'true':'false');
   $('#workerTargetLabel').textContent=WORKER_TARGET==='rtx5080'?'RTX 5080':'PGX Spark';
   refreshWorkerStatus();
+};
+
+function renderPowerState(power){
+  POWER_STATE=power||{state:'unknown',online:false,busy:false};
+  const button=$('#powerToggle'), label=$('#powerStateText');
+  const state=POWER_STATE.state;
+  button.classList.toggle('on',state==='on');
+  button.classList.toggle('pending',state==='waking'||state==='shutting_down');
+  button.disabled=POWER_REQUESTING||state==='unknown'||state==='waking'||state==='shutting_down'||(state==='on'&&POWER_STATE.busy);
+  if(state==='on'){
+    button.textContent='전원 끄기';
+    label.textContent=POWER_STATE.busy?'켜짐 · 작업 중에는 종료할 수 없음':'켜짐 · 종료 가능';
+  }else if(state==='off'){
+    button.textContent='전원 켜기'; label.textContent='워커 오프라인 · 전원 꺼짐 또는 연결 끊김 · Wake-on-LAN 가능';
+  }else if(state==='waking'){
+    button.textContent='켜는 중'; label.textContent='부팅 신호 전송됨 · 워커 연결 대기 중';
+  }else if(state==='shutting_down'){
+    button.textContent='끄는 중'; label.textContent='안전 종료 명령 전달 중';
+  }else{
+    button.textContent='확인 중'; label.textContent='전원 상태 확인 중…';
+  }
+}
+async function refreshPowerStatus(){
+  try{
+    const data=await fetchJsonWithTimeout('/api/power/rtx5080',{},10000);
+    renderPowerState(data.power);
+  }catch(_){ renderPowerState({state:'unknown',online:false,busy:false}); }
+}
+function closePowerModal(){
+  $('#powerModal').classList.remove('show'); $('#powerModal').setAttribute('aria-hidden','true');
+  $('#powerPin').value=''; $('#powerModalError').textContent=''; POWER_ACTION=null;
+}
+$('#powerToggle').onclick=()=>{
+  if($('#powerToggle').disabled)return;
+  POWER_ACTION=POWER_STATE.state==='on'?'off':'on';
+  $('#powerModalMessage').textContent=POWER_ACTION==='off'
+    ?'열려 있는 작업을 저장해 줘. 확인하면 Windows가 15초 뒤 안전하게 종료돼.'
+    :'확인하면 5080 PC에 부팅 신호를 보낼게.';
+  $('#powerModalConfirm').textContent=POWER_ACTION==='off'?'전원 끄기':'전원 켜기';
+  $('#powerModal').classList.add('show'); $('#powerModal').setAttribute('aria-hidden','false');
+  setTimeout(()=>$('#powerPin').focus(),50);
+};
+$('#powerModalClose').onclick=closePowerModal;
+$('#powerModalCancel').onclick=closePowerModal;
+$('#powerModal').onclick=e=>{if(e.target===$('#powerModal'))closePowerModal();};
+$('#powerPin').addEventListener('keydown',e=>{if(e.key==='Enter')$('#powerModalConfirm').click();});
+$('#powerModalConfirm').onclick=async()=>{
+  if(POWER_REQUESTING||!POWER_ACTION)return;
+  const pin=$('#powerPin').value;
+  if(!pin){$('#powerModalError').textContent='비밀번호를 입력해 줘.';return;}
+  POWER_REQUESTING=true; $('#powerModalConfirm').disabled=true; $('#powerModalError').textContent='확인 중…';
+  try{
+    const data=await fetchJsonWithTimeout('/api/power/rtx5080',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:POWER_ACTION,pin})
+    },15000);
+    $('#powerPin').value=''; renderPowerState(data.power); closePowerModal();
+    setTimeout(refreshPowerStatus,3000);
+  }catch(error){
+    $('#powerPin').value=''; $('#powerModalError').textContent=(error&&error.message)||'전원 요청에 실패했어.';
+    $('#powerPin').focus();
+  }finally{POWER_REQUESTING=false;$('#powerModalConfirm').disabled=false;}
 };
 
 // Completed video bytes remain on NAS and are streamed only through the
@@ -1743,21 +1838,39 @@ function fmtExpectedCompletion(epochSeconds){
   if(!Number.isFinite(value)||value<=0) return '—';
   return new Date(value*1000).toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'});
 }
+const WORKER_CARD_JOBS={pgx:null,rtx5080:null};
+const WORKER_CANCEL_PENDING=new Set();
+let WORKER_PROGRESS_ISSUED=0;
+let WORKER_PROGRESS_APPLIED=0;
+let WORKER_PROGRESS_EPOCH=0;
+function workerProgressResponseIsCurrent(requestId,requestEpoch){
+  return requestEpoch===WORKER_PROGRESS_EPOCH&&requestId>=WORKER_PROGRESS_APPLIED;
+}
 function renderWorkerProgressCard(selector,job,serverTime){
   const card=$(selector);
   if(!card)return;
+  const worker=card.dataset.worker;
   const pctNode=card.querySelector('.worker-live-pct');
   const phaseNode=card.querySelector('.worker-live-phase');
   const bar=card.querySelector('.worker-live-bar i');
   const timeNode=card.querySelector('.worker-live-time');
   const metaNode=card.querySelector('.worker-live-meta');
+  const cancelButton=card.querySelector('.worker-live-cancel');
+  const previousJobId=WORKER_CARD_JOBS[worker];
   if(!job){
+    if(previousJobId)WORKER_CANCEL_PENDING.delete(previousJobId);
+    WORKER_CARD_JOBS[worker]=null;
     card.classList.remove('active');
     pctNode.textContent='대기'; phaseNode.textContent='진행 중인 작업 없음';
     bar.style.width='0%'; timeNode.textContent='예상 완료 —';
     metaNode.textContent='서버 확인 '+fmtExpectedCompletion(serverTime);
+    cancelButton.hidden=true; cancelButton.disabled=true;
+    cancelButton.textContent='이 작업 중단'; cancelButton.removeAttribute('aria-busy');
     return;
   }
+  const jobId=String(job.id||'');
+  if(previousJobId&&previousJobId!==jobId)WORKER_CANCEL_PENDING.delete(previousJobId);
+  WORKER_CARD_JOBS[worker]=jobId;
   card.classList.add('active');
   const measured=finiteProgressNumber(job.pct,0,100);
   const unavailable=job.unavailable===true;
@@ -1774,7 +1887,14 @@ function renderWorkerProgressCard(selector,job,serverTime){
   const maximum=finiteProgressNumber(job.max,1);
   const stepText=step!==null&&maximum!==null?' · '+Math.round(step)+'/'+Math.round(maximum)+' step':'';
   const queueText=job.status==='queued'&&job.queue_position?' · 큐 '+job.queue_position+'번':'';
-  metaNode.textContent=(job.id||'').slice(0,8)+stepText+queueText+' · 서버 갱신 '+fmtExpectedCompletion(serverTime);
+  metaNode.textContent=jobId.slice(0,8)+stepText+queueText+' · 서버 갱신 '+fmtExpectedCompletion(serverTime);
+  const cancelling=WORKER_CANCEL_PENDING.has(jobId);
+  cancelButton.hidden=job.can_cancel!==true||!jobId;
+  cancelButton.disabled=cancelling||cancelButton.hidden;
+  cancelButton.textContent=cancelling?'중단 요청 중…':'이 작업 바로 중단';
+  if(cancelling)cancelButton.setAttribute('aria-busy','true');
+  else cancelButton.removeAttribute('aria-busy');
+  cancelButton.setAttribute('aria-label',(worker==='rtx5080'?'RTX 5080':'PGX Spark')+' 작업 '+jobId.slice(0,8)+' 바로 중단');
 }
 function renderWorkerProgressBoard(workers,serverTime){
   workers=workers||{};
@@ -1782,13 +1902,49 @@ function renderWorkerProgressBoard(workers,serverTime){
   renderWorkerProgressCard('#rtxLiveProgress',workers.rtx5080,serverTime);
 }
 async function refreshWorkerProgress(){
+  const requestId=++WORKER_PROGRESS_ISSUED;
+  const requestEpoch=WORKER_PROGRESS_EPOCH;
   try{
     const data=await fetchJsonWithTimeout('/api/active-progress',{},10000);
+    if(!workerProgressResponseIsCurrent(requestId,requestEpoch))return;
+    WORKER_PROGRESS_APPLIED=requestId;
     if(data&&data.ok)renderWorkerProgressBoard(data.workers,data.server_time);
   }catch(_){
+    if(!workerProgressResponseIsCurrent(requestId,requestEpoch))return;
     document.querySelectorAll('.worker-live-meta').forEach(node=>{node.textContent='서버 진행률 다시 연결 중';});
   }
 }
+async function cancelWorkerCardJob(worker){
+  const jobId=WORKER_CARD_JOBS[worker];
+  if(!jobId||WORKER_CANCEL_PENDING.has(jobId))return;
+  const card=worker==='rtx5080'?$('#rtxLiveProgress'):$('#pgxLiveProgress');
+  const button=card&&card.querySelector('.worker-live-cancel');
+  WORKER_CANCEL_PENDING.add(jobId);
+  if(button){button.disabled=true;button.textContent='중단 요청 중…';button.setAttribute('aria-busy','true');}
+  try{
+    const response=await fetch('/api/cancel/'+encodeURIComponent(jobId),{method:'POST'});
+    const data=await response.json().catch(()=>({ok:false,error:'잘못된 서버 응답'}));
+    if(!response.ok||!data.ok)throw new Error(data.error||'중단 요청 실패');
+    // Invalidate every progress request started before this terminal mutation.
+    // A late pre-cancel response must never repaint this card as running.
+    ++WORKER_PROGRESS_EPOCH;
+    if(WORKER_CARD_JOBS[worker]===jobId){
+      card.querySelector('.worker-live-phase').textContent='중단 요청됨';
+      card.querySelector('.worker-live-meta').textContent=jobId.slice(0,8)+' · 안전하게 중단하는 중';
+    }
+    if(currentJob===jobId)setJobUI({id:jobId,status:'cancelled',progress:{phase:'사용자가 생성을 중단했습니다'}});
+    await refreshWorkerProgress();
+  }catch(error){
+    WORKER_CANCEL_PENDING.delete(jobId);
+    if(WORKER_CARD_JOBS[worker]===jobId&&button){
+      button.disabled=false;button.textContent='중단 다시 시도';button.removeAttribute('aria-busy');
+      card.querySelector('.worker-live-meta').textContent=(error&&error.message)||'중단 요청 실패';
+    }
+  }
+}
+document.querySelectorAll('.worker-live-cancel').forEach(button=>{
+  button.onclick=()=>cancelWorkerCardJob(button.dataset.worker);
+});
 refreshWorkerProgress(); setInterval(refreshWorkerProgress,4000);
 
 function setSaveStatus(message, state=''){
@@ -2594,6 +2750,7 @@ function loadRecent(){
 }
 loadRecent(); setInterval(loadRecent, 15000);
 refreshWorkerStatus(); setInterval(refreshWorkerStatus, 5000);
+refreshPowerStatus(); setInterval(refreshPowerStatus, 5000);
 
 // 고정 이미지와 동영상을 모두 복원한다.
 refreshReferenceState().then(renderSelectedReference);

@@ -13,6 +13,7 @@ Environment=COMFY_TARGETED_INTERRUPT_SHA256=74573b10465505b88b618da86059878e3a56
 EnvironmentFile=/home/aski/h3-web/.env
 ExecStartPre=/bin/sh -c 'test -n "$H3_ORIGIN_SECRET"'
 ExecStartPre=/bin/sh -c 'test -n "$H3_DIRECT_WORKER_TOKEN"'
+ExecStartPre=/bin/sh -c 'test -n "$H3_POWER_PIN_PBKDF2" && test -n "$H3_RTX5080_WOL_MAC"'
 ExecStartPre=/home/aski/h3-web/.venv/bin/python -c 'import websocket'
 ExecStart=/home/aski/h3-web/.venv/bin/python /home/aski/h3-web/server.py
 Restart=always

@@ -1,4 +1,6 @@
 """Vercel 백엔드 프록시 — API 요청을 실제 서버로 전달."""
+import hashlib
+import ipaddress
 import json
 import hmac
 import os
@@ -12,6 +14,7 @@ ORIGIN_HEADER = "X-H3-Origin-Token"
 ORIGIN_SECRET = os.environ.get("H3_ORIGIN_SECRET", "")
 WORKER_HEADER = "X-H3-Worker-Token"
 WORKER_SECRET = os.environ.get("H3_WORKER_TOKEN", "")
+CLIENT_KEY_HEADER = "X-H3-Client-Key"
 
 # Byte ranges must never enter Vercel's shared cache. The CDN can replay a
 # cached partial body as ``200 + Content-Range`` instead of the upstream 206,
@@ -19,6 +22,18 @@ WORKER_SECRET = os.environ.get("H3_WORKER_TOKEN", "")
 PUBLIC_VIDEO_CACHE_CONTROL = "private, no-store"
 PUBLIC_THUMBNAIL_CACHE_CONTROL = "public, max-age=31536000, immutable"
 PRIVATE_CACHE_CONTROL = "private, no-store"
+
+
+def _private_client_key(environ):
+    """Mint a non-reversible limiter key from Vercel's observed client IP."""
+    forwarded = str(environ.get("HTTP_X_VERCEL_FORWARDED_FOR")
+                    or environ.get("HTTP_X_FORWARDED_FOR") or "")
+    raw = forwarded.split(",", 1)[0].strip() or str(environ.get("REMOTE_ADDR") or "unknown")
+    try:
+        canonical = str(ipaddress.ip_address(raw))
+    except ValueError:
+        canonical = "unknown"
+    return hmac.new(ORIGIN_SECRET.encode(), canonical.encode(), hashlib.sha256).hexdigest()
 
 
 def _cache_control_for_path(path):
@@ -91,7 +106,8 @@ def proxy(environ, start_response):
     # This value comes only from Vercel's server-side environment. Never relay
     # a browser-provided header with the same name.
     headers = {"Content-Type": environ.get("CONTENT_TYPE", "application/json"),
-               ORIGIN_HEADER: ORIGIN_SECRET}
+               ORIGIN_HEADER: ORIGIN_SECRET,
+               CLIENT_KEY_HEADER: _private_client_key(environ)}
     if is_worker:
         # Authenticate the internet-facing worker with WORKER_SECRET above, then
         # mint the separate Vercel→PGX credential.  The external bearer must

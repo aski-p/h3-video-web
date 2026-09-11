@@ -15,6 +15,7 @@ import base64
 import copy
 import hashlib
 import hmac
+import ipaddress
 import math
 import os
 import pwd
@@ -43,6 +44,7 @@ HOST = os.environ.get("H3_HOST", "0.0.0.0")
 PORT = int(os.environ.get("H3_PORT") or os.environ.get("PORT") or "8300")
 ORIGIN_HEADER = "X-H3-Origin-Token"
 ORIGIN_SECRET = os.environ.get("H3_ORIGIN_SECRET", "")
+CLIENT_KEY_HEADER = "X-H3-Client-Key"
 COMFY = os.environ.get("COMFY_BASE", "http://127.0.0.1:8188")
 COMFY_SERVER_PATH = os.environ.get("COMFY_SERVER_PATH", "/home/aski/ComfyUI/server.py")
 COMFY_TARGETED_INTERRUPT_SHA256 = os.environ.get("COMFY_TARGETED_INTERRUPT_SHA256", "")
@@ -185,6 +187,236 @@ WORKER_HEARTBEAT_TTL_SECONDS = 15.0
 RTX5080_LEASE_SECONDS = 60.0
 RTX5080_MAX_ATTEMPTS = 2
 WORKERS = {}
+POWER_PIN_PBKDF2 = os.environ.get("H3_POWER_PIN_PBKDF2", "")
+RTX5080_WOL_MAC = os.environ.get("H3_RTX5080_WOL_MAC", "")
+RTX5080_WOL_BROADCAST = os.environ.get("H3_RTX5080_WOL_BROADCAST", "192.168.50.255")
+POWER_PIN_MAX_FAILURES = 5
+POWER_PIN_WINDOW_SECONDS = 300.0
+POWER_PIN_BLOCK_SECONDS = 300.0
+POWER_COMMAND_TTL_SECONDS = 90.0
+POWER_AUTH_LOCK = threading.Lock()
+POWER_COMMAND_LOCK = threading.Lock()
+POWER_AUTH_ATTEMPTS = {}
+POWER_COMMANDS = {}
+
+
+def make_power_pin_descriptor(pin, salt=None, iterations=600_000):
+    """Create a portable PBKDF2 descriptor; only the descriptor is persisted."""
+    if not isinstance(pin, str) or not pin or len(pin) > 128:
+        raise ValueError("invalid power PIN")
+    if isinstance(iterations, bool) or not 1000 <= int(iterations) <= 2_000_000:
+        raise ValueError("invalid PBKDF2 iteration count")
+    salt = os.urandom(16) if salt is None else bytes(salt)
+    if not 16 <= len(salt) <= 64:
+        raise ValueError("invalid PBKDF2 salt")
+    digest = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, int(iterations))
+    return f"pbkdf2_sha256${int(iterations)}${salt.hex()}${digest.hex()}"
+
+
+def _parse_power_pin_descriptor(descriptor):
+    try:
+        algorithm, iterations, salt_hex, digest_hex = str(descriptor or "").split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            raise ValueError
+        iterations = int(iterations)
+        salt, expected = bytes.fromhex(salt_hex), bytes.fromhex(digest_hex)
+        if not 1000 <= iterations <= 2_000_000 or not 16 <= len(salt) <= 64 or len(expected) != 32:
+            raise ValueError
+        return iterations, salt, expected
+    except (TypeError, ValueError):
+        raise RuntimeError("power PIN is not configured") from None
+
+
+def verify_power_pin(pin, descriptor=None, attempts=None, client_key="global", now=None):
+    """Constant-time PIN verification with a bounded per-client failure window."""
+    now = time.time() if now is None else float(now)
+    descriptor = POWER_PIN_PBKDF2 if descriptor is None else descriptor
+    attempts = POWER_AUTH_ATTEMPTS if attempts is None else attempts
+    iterations, salt, expected = _parse_power_pin_descriptor(descriptor)
+    key = str(client_key or "global")[:160]
+    with POWER_AUTH_LOCK:
+        entry = dict(attempts.get(key) or {})
+        if float(entry.get("blocked_until") or 0) > now:
+            return False
+        if entry and now - float(entry.get("window_started") or now) > POWER_PIN_WINDOW_SECONDS:
+            entry = {}
+        supplied = hashlib.pbkdf2_hmac(
+            "sha256", str(pin or "").encode("utf-8")[:128], salt, iterations,
+        )
+        if hmac.compare_digest(supplied, expected):
+            attempts.pop(key, None)
+            return True
+        failures = int(entry.get("failures") or 0) + 1
+        entry.update(failures=failures, window_started=float(entry.get("window_started") or now))
+        if failures >= POWER_PIN_MAX_FAILURES:
+            entry["blocked_until"] = now + POWER_PIN_BLOCK_SECONDS
+        attempts[key] = entry
+        return False
+
+
+def send_wake_on_lan(mac, broadcast=None):
+    compact = re.sub(r"[:-]", "", str(mac or ""))
+    if not re.fullmatch(r"[0-9A-Fa-f]{12}", compact):
+        raise ValueError("invalid Wake-on-LAN MAC")
+    broadcast = str(broadcast or RTX5080_WOL_BROADCAST)
+    address = ipaddress.IPv4Address(broadcast)
+    limited = address == ipaddress.IPv4Address("255.255.255.255")
+    private_broadcast = address.is_private and (int(address) & 0xff) == 0xff
+    if not (limited or private_broadcast):
+        raise ValueError("invalid Wake-on-LAN broadcast")
+    packet = b"\xff" * 6 + bytes.fromhex(compact) * 16
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        for _ in range(3):
+            sock.sendto(packet, (broadcast, 9))
+    finally:
+        sock.close()
+
+
+def rtx5080_power_status(now=None):
+    now = time.time() if now is None else float(now)
+    worker = rtx5080_worker_status(now=now)
+    with QUEUE_LOCK:
+        with LOCK:
+            queued = any(
+                (JOBS.get(jid) or {}).get("status") == "queued"
+                and ((JOBS.get(jid) or {}).get("cfg") or {}).get("worker_target") == "rtx5080"
+                for jid in QUEUE
+            )
+            active_lease = bool(_active_rtx5080_lease_locked(now))
+            reserved = int(QUEUE_RESERVATIONS.get("rtx5080") or 0) > 0
+    busy = bool(worker["busy"] or queued or active_lease or reserved)
+    with POWER_COMMAND_LOCK:
+        command = dict(POWER_COMMANDS.get("current") or {})
+    active = bool(command) and float(command.get("expires_at") or 0) >= now
+    if active and command.get("action") == "shutdown" and command.get("status") in ("pending", "delivered", "scheduled"):
+        state = "shutting_down"
+    elif not worker["online"] and active and command.get("action") == "wake" and command.get("status") == "sent":
+        state = "waking"
+    else:
+        state = "on" if worker["online"] else "off"
+    return {"state": state, "online": worker["online"], "busy": busy,
+            "command_status": command.get("status") if active else None}
+
+
+def _power_command_active(command, now, statuses=("pending", "delivered", "scheduled")):
+    return bool(
+        command
+        and command.get("action") == "shutdown"
+        and command.get("status") in statuses
+        and float(command.get("expires_at") or 0) >= now
+    )
+
+
+def request_rtx5080_power(action, now=None):
+    now = time.time() if now is None else float(now)
+    action = str(action or "").lower()
+    if action == "on":
+        # Serialize ON cancellation with OFF, admission, and claim. A command may
+        # be cancelled only before it has been handed to the worker.
+        with GENERATE_ADMISSION_LOCK:
+            with QUEUE_LOCK:
+                with LOCK:
+                    record = WORKERS.get(RTX5080_WORKER_ID) or {}
+                    last_seen = float(record.get("last_seen") or 0)
+                    online = last_seen > 0 and now - last_seen <= WORKER_HEARTBEAT_TTL_SECONDS
+                    with POWER_COMMAND_LOCK:
+                        command = POWER_COMMANDS.get("current") or {}
+                        if _power_command_active(command, now, statuses=("pending",)):
+                            command["status"] = "cancelled"
+                            command["cancelled_at"] = now
+                        elif _power_command_active(command, now, statuses=("delivered", "scheduled")):
+                            raise RuntimeError("RTX 5080 종료 명령이 이미 전달되어 취소할 수 없습니다")
+                        elif (command.get("action") == "wake" and command.get("status") == "sent"
+                              and float(command.get("expires_at") or 0) >= now and not online):
+                            return {"state": "waking", "online": False, "busy": False,
+                                    "command_status": "sent"}
+                    if online:
+                        return {"state": "on", "online": True,
+                                "busy": bool(record.get("busy")), "command_status": None}
+        if not RTX5080_WOL_MAC:
+            raise RuntimeError("Wake-on-LAN is not configured")
+        send_wake_on_lan(RTX5080_WOL_MAC, RTX5080_WOL_BROADCAST)
+        with POWER_COMMAND_LOCK:
+            POWER_COMMANDS["current"] = {
+                "id": uuid.uuid4().hex, "action": "wake", "status": "sent",
+                "created_at": now, "expires_at": now + POWER_COMMAND_TTL_SECONDS,
+            }
+        return {"state": "waking", "online": False, "busy": False, "command_status": "sent"}
+    if action != "off":
+        raise ValueError("action must be on or off")
+    # Admission owns the outer lock; reservations cover the persistence gap
+    # between JOBS registration and queue insertion. Therefore OFF and a new
+    # RTX request cannot both be accepted.
+    with GENERATE_ADMISSION_LOCK:
+        with QUEUE_LOCK:
+            with LOCK:
+                record = WORKERS.get(RTX5080_WORKER_ID) or {}
+                last_seen = float(record.get("last_seen") or 0)
+                online = last_seen > 0 and now - last_seen <= WORKER_HEARTBEAT_TTL_SECONDS
+                active = _active_rtx5080_lease_locked(now)
+                queued = any(
+                    (JOBS.get(jid) or {}).get("status") == "queued"
+                    and ((JOBS.get(jid) or {}).get("cfg") or {}).get("worker_target") == "rtx5080"
+                    for jid in QUEUE
+                )
+                reserved = int(QUEUE_RESERVATIONS.get("rtx5080") or 0) > 0
+                if not online:
+                    return {"state": "off", "online": False, "busy": False, "command_status": None}
+                if record.get("busy") or active or queued or reserved:
+                    raise RuntimeError("RTX 5080 작업이 끝난 뒤 전원을 꺼 주세요")
+                with POWER_COMMAND_LOCK:
+                    existing = POWER_COMMANDS.get("current") or {}
+                    if _power_command_active(existing, now):
+                        return {"state": "shutting_down", "online": True, "busy": False,
+                                "command_status": existing.get("status")}
+                    command = {"id": uuid.uuid4().hex, "action": "shutdown", "status": "pending",
+                               "created_at": now, "expires_at": now + POWER_COMMAND_TTL_SECONDS}
+                    POWER_COMMANDS["current"] = command
+    return {"state": "shutting_down", "online": True, "busy": False,
+            "command_status": "pending"}
+
+
+def pending_rtx5080_power_command(now=None):
+    now = time.time() if now is None else float(now)
+    with QUEUE_LOCK:
+        with LOCK:
+            record = WORKERS.get(RTX5080_WORKER_ID) or {}
+            unsafe = bool(record.get("busy") or _active_rtx5080_lease_locked(now)) or any(
+                (JOBS.get(jid) or {}).get("status") == "queued"
+                and ((JOBS.get(jid) or {}).get("cfg") or {}).get("worker_target") == "rtx5080"
+                for jid in QUEUE
+            )
+    if unsafe:
+        return None
+    with POWER_COMMAND_LOCK:
+        command = POWER_COMMANDS.get("current") or {}
+        if command.get("status") != "pending" or float(command.get("expires_at") or 0) < now:
+            return None
+        # One-time handoff. If the response is lost the operator can retry after
+        # expiry, but a cancelled command can never execute after ON returned.
+        command["status"] = "delivered"
+        command["delivered_at"] = now
+        return {key: command[key] for key in ("id", "action", "expires_at")}
+
+
+def ack_rtx5080_power_command(command_id, status, now=None):
+    now = time.time() if now is None else float(now)
+    if status not in ("scheduled", "rejected", "error"):
+        raise ValueError("invalid power acknowledgement")
+    with POWER_COMMAND_LOCK:
+        command = POWER_COMMANDS.get("current") or {}
+        if not hmac.compare_digest(str(command.get("id") or ""), str(command_id or "")):
+            raise PermissionError("stale power command")
+        if float(command.get("expires_at") or 0) < now:
+            raise PermissionError("expired power command")
+        if command.get("status") not in ("delivered", "scheduled"):
+            raise PermissionError("power command was not delivered")
+        command["status"] = status
+        command["acknowledged_at"] = now
+    return {"state": "shutting_down" if status == "scheduled" else "on",
+            "command_status": status}
 
 
 def rtx5080_worker_status(now=None):
@@ -322,6 +554,11 @@ def admit_generation_job(job):
                 if not _same_idempotent_generation(existing.get("cfg") or {}, cfg):
                     return "conflict", existing, None
                 return "duplicate", existing, None
+        if worker_target == "rtx5080":
+            now = time.time()
+            with POWER_COMMAND_LOCK:
+                if _power_command_active(POWER_COMMANDS.get("current") or {}, now):
+                    return "powering_off", None, None
         with QUEUE_LOCK:
             pending_total = (
                 queued_jobs_for_target(JOBS, QUEUE, worker_target)
@@ -403,6 +640,7 @@ def worker_progress_dashboard(jobs, now=None):
         result[target] = {
             "id": str(job.get("id") or ""),
             "status": job.get("status"),
+            "can_cancel": job.get("status") in priority,
             "phase": str(progress.get("phase") or ""),
             "pct": pct,
             "eta_seconds": eta,
@@ -453,9 +691,16 @@ def claim_rtx5080_job(now=None, token_factory=None):
     with QUEUE_LOCK:
         with LOCK:
             worker = WORKERS.get(RTX5080_WORKER_ID) or {}
+            with POWER_COMMAND_LOCK:
+                power_command = dict(POWER_COMMANDS.get("current") or {})
+            power_off_pending = bool(
+                power_command.get("action") == "shutdown"
+                and power_command.get("status") in ("pending", "delivered", "scheduled")
+                and float(power_command.get("expires_at") or 0) >= now
+            )
             fresh = now - float(worker.get("last_seen", 0)) <= WORKER_HEARTBEAT_TTL_SECONDS
             ready = (
-                fresh and not worker.get("busy")
+                fresh and not worker.get("busy") and not power_off_pending
                 and _active_rtx5080_lease_locked(now) is None
                 and worker.get("gpu") == "NVIDIA GeForce RTX 5080"
                 and int(worker.get("vram_mib") or 0) >= 15000
@@ -554,16 +799,18 @@ def update_rtx5080_progress(jid, execution_id, lease_token, payload, now=None):
             raise ValueError("sampler progress cannot regress")
         if (segment_index == previous_segment and _finite_real(previous_value)
                 and value < float(previous_value)):
-            # A Comfy graph can emit several sampler progress streams. Clamp a
-            # later node's reset while renewing this authenticated live lease.
+            # One Comfy graph may emit progress from several sampler-like nodes;
+            # a later node can restart at 1 without the overall segment regressing.
+            # Keep the last monotonic public measurement while still renewing the
+            # authenticated execution lease for this fresh worker event.
             value = float(previous_value)
             maximum = float(previous.get("max") or maximum)
             overall = float(previous.get("pct") or overall)
         previous_pct = previous.get("pct")
         if (segment_index == previous_segment and _finite_real(previous_pct)
                 and overall < float(previous_pct)):
-            # Different sampler nodes can also report different maxima. The raw
-            # value may increase while its derived percent falls (2/6 -> 3/100).
+            # A later sampler may increase raw value but change its maximum;
+            # clamp the derived public percentage as well (2/6 -> 3/100).
             overall = float(previous_pct)
         started = float(job.get("started") or now)
         phase = re.sub(r"[^0-9A-Za-z가-힣\s./:_()\-]", "", str(payload.get("phase") or ""))[:80].strip()
@@ -3070,6 +3317,8 @@ class Handler(BaseHTTPRequestHandler):
                     "rtx5080": rtx5080_worker_status(),
                 },
             })
+        elif p == "/api/power/rtx5080":
+            send_json(self, {"ok": True, "power": rtx5080_power_status()})
         elif p == "/api/workers":
             with LOCK:
                 jobs_snapshot = {jid: dict(job) for jid, job in JOBS.items()}
@@ -3442,12 +3691,20 @@ class Handler(BaseHTTPRequestHandler):
                     renewed = bool(lease_job and renew_rtx5080_lease(
                         lease_job, lease_execution, lease_token
                     ))
-                    send_json(self, {"ok": True, "worker": worker, "lease_renewed": renewed})
+                    command = pending_rtx5080_power_command() if not payload.get("busy") else None
+                    send_json(self, {"ok": True, "worker": worker, "lease_renewed": renewed,
+                                     "power_command": command})
                     return
                 if p == "/api/worker/claim":
                     requeue_expired_rtx5080_jobs()
                     claimed = claim_rtx5080_job()
                     send_json(self, {"ok": True, **(claimed or {"job": None})})
+                    return
+                if p == "/api/worker/power/ack":
+                    result = ack_rtx5080_power_command(
+                        str(data.get("command_id") or ""), str(data.get("status") or ""),
+                    )
+                    send_json(self, {"ok": True, "power": result})
                     return
                 jid = str(data.get("job_id") or "")
                 execution_id = str(data.get("execution_id") or "")
@@ -3494,6 +3751,35 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 log(f"worker API error: {type(exc).__name__}: {str(exc)[:180]}")
                 send_json(self, {"ok": False, "error": "worker operation failed"}, 500)
+            return
+        if p == "/api/power/rtx5080":
+            # The authenticated Vercel proxy mints this opaque HMAC. Browser
+            # headers are never relayed, so clients cannot rotate limiter keys.
+            forwarded_key = self.headers.get(CLIENT_KEY_HEADER, "").strip().lower()
+            client_key = (forwarded_key if re.fullmatch(r"[0-9a-f]{64}", forwarded_key)
+                          else self.client_address[0])
+            try:
+                authorized = verify_power_pin(data.get("pin"), client_key=client_key)
+            except RuntimeError:
+                send_json(self, {"ok": False, "error": "전원 인증이 설정되지 않았습니다",
+                                 "code": "POWER_AUTH_UNAVAILABLE"}, 503)
+                return
+            if not authorized:
+                send_json(self, {"ok": False, "error": "비밀번호가 올바르지 않거나 잠시 잠겼습니다",
+                                 "code": "POWER_AUTH_FAILED"}, 403)
+                return
+            try:
+                power = request_rtx5080_power(data.get("action"))
+            except ValueError as exc:
+                send_json(self, {"ok": False, "error": str(exc),
+                                 "code": "INVALID_POWER_ACTION"}, 400)
+                return
+            except RuntimeError as exc:
+                send_json(self, {"ok": False, "error": str(exc),
+                                 "code": "POWER_ACTION_BLOCKED"}, 409)
+                return
+            code = 202 if power["state"] in ("waking", "shutting_down") else 200
+            send_json(self, {"ok": True, "power": power}, code)
             return
         if p == "/api/generate":
             mode = (data.get("mode") or "t2v").strip().lower()
@@ -3689,6 +3975,13 @@ class Handler(BaseHTTPRequestHandler):
                                      "code": "IDEMPOTENCY_CONFLICT", "job": admitted_job.get("id")}, 409)
                 else:
                     send_json(self, generation_receipt(admitted_job, duplicate=True))
+                return
+            if admission == "powering_off":
+                cleanup_job_input_snapshots(image_source_path, video_source_path)
+                send_json(self, {"ok": False,
+                                 "error": "RTX 5080 전원 종료 중에는 새 작업을 접수할 수 없습니다",
+                                 "code": "RTX5080_POWERING_OFF",
+                                 "worker_target": worker_target}, 409)
                 return
             if admission == "full":
                 cleanup_job_input_snapshots(image_source_path, video_source_path)

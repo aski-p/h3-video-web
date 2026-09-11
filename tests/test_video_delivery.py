@@ -1,6 +1,7 @@
 import http.client
 import base64
 import hashlib
+import hmac
 import importlib.util
 import inspect
 import json
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -118,6 +120,41 @@ class VideoDeliveryTests(unittest.TestCase):
             self.assertEqual(b"".join(result), b'{"ok":true}')
         self.assertEqual(started[0], "200")
         self.assertEqual(seen["secret"], self.ORIGIN_SECRET)
+
+    def test_proxy_mints_private_power_rate_limit_key_from_client_ip(self):
+        seen = {}
+
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+            def read(self, _size):
+                if getattr(self, "done", False):
+                    return b""
+                self.done = True
+                return b'{"ok":true}'
+            def close(self):
+                pass
+
+        def fake_open(request, timeout):
+            seen.update(dict((key.lower(), value) for key, value in request.header_items()))
+            return FakeResponse()
+
+        env = {
+            "REQUEST_METHOD": "GET", "PATH_INFO": "/api/power/rtx5080",
+            "QUERY_STRING": "", "wsgi.input": None,
+            "HTTP_X_VERCEL_FORWARDED_FOR": "203.0.113.9, 10.0.0.1",
+            "HTTP_X_FORWARDED_FOR": "198.51.100.88",
+            "HTTP_X_H3_CLIENT_KEY": "attacker-controlled",
+        }
+        with patch.object(backend_proxy, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch("urllib.request.urlopen", fake_open):
+            result = backend_proxy.handler(env, lambda _status, _headers: None)
+            self.assertEqual(b"".join(result), b'{"ok":true}')
+        expected = hmac.new(
+            self.ORIGIN_SECRET.encode(), b"203.0.113.9", hashlib.sha256,
+        ).hexdigest()
+        self.assertEqual(seen["x-h3-client-key"], expected)
+        self.assertNotEqual(seen["x-h3-client-key"], "attacker-controlled")
 
     def test_proxy_authenticates_worker_bearer_and_uses_separate_upstream_secret(self):
         seen = {}
@@ -720,6 +757,267 @@ class VideoDeliveryTests(unittest.TestCase):
                 httpd.server_close()
                 thread.join(timeout=2)
 
+    def test_power_pin_is_pbkdf2_verified_rate_limited_and_never_in_frontend(self):
+        descriptor = server.make_power_pin_descriptor(
+            "test-private-pin", salt=b"0123456789abcdef", iterations=1000,
+        )
+        attempts = {}
+        self.assertTrue(server.verify_power_pin(
+            "test-private-pin", descriptor=descriptor, attempts=attempts,
+            client_key="browser", now=10.0,
+        ))
+        for offset in range(server.POWER_PIN_MAX_FAILURES):
+            self.assertFalse(server.verify_power_pin(
+                "wrong", descriptor=descriptor, attempts=attempts,
+                client_key="attacker", now=20.0 + offset,
+            ))
+        self.assertFalse(server.verify_power_pin(
+            "test-private-pin", descriptor=descriptor, attempts=attempts,
+            client_key="attacker", now=30.0,
+        ))
+        source = (Path(__file__).resolve().parents[1] / "index.html").read_text(encoding="utf-8")
+        self.assertNotIn("".join(("12", "29")), source)
+        self.assertIn('type="password"', source)
+        self.assertNotIn("localStorage.setItem('h3-power", source)
+        unit = (Path(__file__).resolve().parents[1] / "h3-web-backend.service").read_text(encoding="utf-8")
+        self.assertIn('test -n "$H3_POWER_PIN_PBKDF2"', unit)
+        self.assertIn('test -n "$H3_RTX5080_WOL_MAC"', unit)
+
+    def test_rtx_power_off_is_idle_only_and_delivered_once_to_authenticated_worker(self):
+        heartbeat = {
+            "worker_id": server.RTX5080_WORKER_ID,
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True,
+            "busy": False, "modes": ["t2v", "i2v"],
+            "model_profile": server.RTX5080_MODEL_PROFILE,
+        }
+        with patch.dict(server.WORKERS, {}, clear=True), \
+             patch.dict(server.POWER_COMMANDS, {}, clear=True), \
+             patch.dict(server.JOBS, {}, clear=True), \
+             patch.object(server, "QUEUE", []):
+            server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=100.0)
+            requested = server.request_rtx5080_power("off", now=100.0)
+            self.assertEqual(requested["state"], "shutting_down")
+            server.JOBS["queued"] = {"id": "queued", "status": "queued",
+                                      "cfg": {"worker_target": "rtx5080"}}
+            server.QUEUE.append("queued")
+            self.assertIsNone(server.claim_rtx5080_job(now=100.5))
+            server.QUEUE.clear(); server.JOBS.clear()
+            command = server.pending_rtx5080_power_command(now=101.0)
+            self.assertEqual(command["action"], "shutdown")
+            self.assertNotIn("pin", json.dumps(command).lower())
+            acknowledged = server.ack_rtx5080_power_command(
+                command["id"], "scheduled", now=102.0,
+            )
+            self.assertEqual(acknowledged["state"], "shutting_down")
+            self.assertIsNone(server.pending_rtx5080_power_command(now=103.0))
+
+            server.WORKERS[server.RTX5080_WORKER_ID]["busy"] = True
+            with self.assertRaises(RuntimeError):
+                server.request_rtx5080_power("off", now=104.0)
+
+    def test_wake_on_lan_uses_validated_mac_and_broadcast_only(self):
+        sent = []
+        class FakeSocket:
+            def setsockopt(self, *args):
+                pass
+            def sendto(self, payload, target):
+                sent.append((payload, target))
+            def close(self):
+                pass
+        with patch.object(server.socket, "socket", return_value=FakeSocket()):
+            server.send_wake_on_lan("30:56:0F:4A:B5:09", "192.168.50.255")
+        self.assertEqual(len(sent), 3)
+        self.assertTrue(all(len(payload) == 102 for payload, _ in sent))
+        self.assertTrue(all(target == ("192.168.50.255", 9) for _, target in sent))
+        with self.assertRaises(ValueError):
+            server.send_wake_on_lan("not-a-mac", "192.168.50.255")
+        with patch.object(server, "RTX5080_WOL_MAC", "30:56:0F:4A:B5:09"), \
+             patch.object(server, "send_wake_on_lan") as wake, \
+             patch.dict(server.WORKERS, {}, clear=True), \
+             patch.dict(server.POWER_COMMANDS, {}, clear=True):
+            self.assertEqual(server.request_rtx5080_power("on", now=10.0)["state"], "waking")
+            self.assertEqual(server.rtx5080_power_status(now=11.0)["state"], "waking")
+            wake.assert_called_once()
+
+    def test_power_status_marks_queued_or_reserved_rtx_work_as_busy(self):
+        worker = {"last_seen": 100.0, "busy": False}
+        job = {"id": "queued01", "status": "queued", "cfg": {"worker_target": "rtx5080"}}
+        with patch.dict(server.WORKERS, {server.RTX5080_WORKER_ID: worker}, clear=True), \
+             patch.dict(server.JOBS, {"queued01": job}, clear=True), \
+             patch.object(server, "QUEUE", ["queued01"]), \
+             patch.dict(server.QUEUE_RESERVATIONS, {"pgx": 0, "rtx5080": 0}, clear=True), \
+             patch.dict(server.POWER_COMMANDS, {}, clear=True):
+            self.assertTrue(server.rtx5080_power_status(now=100.0)["busy"])
+            server.QUEUE.clear()
+            server.QUEUE_RESERVATIONS["rtx5080"] = 1
+            self.assertTrue(server.rtx5080_power_status(now=100.0)["busy"])
+
+    def test_power_off_and_rtx_admission_are_atomic(self):
+        server.POWER_COMMANDS.clear()
+        server.QUEUE.clear()
+        server.JOBS.clear()
+        server.QUEUE_RESERVATIONS["rtx5080"] = 0
+        server.WORKERS[server.RTX5080_WORKER_ID] = {
+            "last_seen": 100.0, "busy": False,
+        }
+        barrier = threading.Barrier(2)
+        outcomes = []
+        job = {"id": "race0001", "status": "queued", "created": 100.0,
+               "cfg": {"worker_target": "rtx5080"}}
+
+        def request_off():
+            barrier.wait()
+            try:
+                server.request_rtx5080_power("off", now=100.0)
+                outcomes.append("off")
+            except RuntimeError:
+                outcomes.append("off-blocked")
+
+        def admit():
+            barrier.wait()
+            result = server.admit_generation_job(job)[0]
+            outcomes.append("admit" if result == "accepted" else result)
+
+        threads = [threading.Thread(target=request_off), threading.Thread(target=admit)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=3)
+        self.assertTrue(all(not thread.is_alive() for thread in threads), "power/admission deadlock")
+        self.assertFalse({"off", "admit"}.issubset(set(outcomes)), outcomes)
+        self.assertTrue(
+            ({"off", "powering_off"}.issubset(set(outcomes))
+             or {"off-blocked", "admit"}.issubset(set(outcomes))), outcomes,
+        )
+
+    def test_power_on_cancels_only_undelivered_shutdown_and_duplicate_off_is_idempotent(self):
+        server.POWER_COMMANDS.clear()
+        server.QUEUE.clear()
+        server.JOBS.clear()
+        server.QUEUE_RESERVATIONS["rtx5080"] = 0
+        server.WORKERS[server.RTX5080_WORKER_ID] = {"last_seen": 100.0, "busy": False}
+        first = server.request_rtx5080_power("off", now=100.0)
+        command_id = server.POWER_COMMANDS["current"]["id"]
+        second = server.request_rtx5080_power("off", now=101.0)
+        self.assertEqual(first["state"], "shutting_down")
+        self.assertEqual(second["state"], "shutting_down")
+        self.assertEqual(server.POWER_COMMANDS["current"]["id"], command_id)
+        cancelled = server.request_rtx5080_power("on", now=102.0)
+        self.assertEqual(cancelled["state"], "on")
+        self.assertEqual(server.POWER_COMMANDS["current"]["status"], "cancelled")
+        self.assertIsNone(server.pending_rtx5080_power_command(now=102.0))
+
+    def test_worker_rejects_claim_assignment_after_shutdown_wins(self):
+        worker = self.load_windows_worker()
+        state = worker.RuntimeState()
+        self.assertTrue(state.request_shutdown())
+        claim = {"job": {"id": "late"}, "execution_id": "exec", "lease_token": "lease"}
+        self.assertFalse(state.try_set_claim(claim))
+        self.assertIsNone(state.snapshot())
+
+
+    def test_windows_worker_schedules_shutdown_only_while_idle_and_acknowledges(self):
+        worker = self.load_windows_worker()
+        state = worker.RuntimeState()
+        calls = []
+        class Api:
+            def request(self, path, payload, timeout=30):
+                calls.append((path, payload, timeout))
+                return {"ok": True}
+        class Comfy:
+            @staticmethod
+            def busy():
+                return False
+        command = {"id": "a" * 32, "action": "shutdown", "expires_at": time.time() + 60}
+        with patch.object(worker.os, "name", "nt"), \
+             patch.object(worker.subprocess, "run") as run:
+            self.assertTrue(worker.handle_power_command(Api(), Comfy(), state, command))
+        run.assert_called_once_with(
+            ["shutdown.exe", "/s", "/t", "15", "/d", "p:0:0",
+             "/c", "H3 웹에서 요청한 안전한 종료"],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+        self.assertTrue(state.stopping)
+        self.assertEqual(calls[0][0], "/api/worker/power/ack")
+        self.assertEqual(calls[0][1]["status"], "scheduled")
+
+    def test_scheduled_shutdown_stays_fenced_when_ack_network_fails(self):
+        worker = self.load_windows_worker()
+        state = worker.RuntimeState()
+        calls = []
+        class Api:
+            def request(self, path, payload, timeout=30):
+                calls.append((path, payload.get("status"), timeout))
+                raise OSError("ack transport unavailable")
+        class Comfy:
+            @staticmethod
+            def busy():
+                return False
+        command = {"id": "b" * 32, "action": "shutdown", "expires_at": time.time() + 60}
+        with patch.object(worker.os, "name", "nt"), \
+             patch.object(worker.subprocess, "run") as run:
+            self.assertTrue(worker.handle_power_command(Api(), Comfy(), state, command))
+        run.assert_called_once()
+        self.assertTrue(state.stopping)
+        self.assertEqual(calls, [("/api/worker/power/ack", "scheduled", 20)])
+
+    def test_power_http_contract_requires_pin_and_worker_auth_for_shutdown_command(self):
+        descriptor = server.make_power_pin_descriptor(
+            "http-test-pin", salt=b"fedcba9876543210", iterations=1000,
+        )
+        heartbeat = {
+            "worker_id": server.RTX5080_WORKER_ID,
+            "gpu": "NVIDIA GeForce RTX 5080", "vram_mib": 16303,
+            "comfy_up": True, "model_ready": True, "generation_verified": True,
+            "busy": False, "modes": ["t2v", "i2v"],
+            "model_profile": server.RTX5080_MODEL_PROFILE,
+        }
+        def post(port, path, body, worker=False):
+            headers = {"Content-Type": "application/json", server.ORIGIN_HEADER: self.ORIGIN_SECRET}
+            if worker:
+                headers[server.WORKER_HEADER] = "worker-secret"
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("POST", path, json.dumps(body), headers)
+            response = conn.getresponse()
+            payload = json.loads(response.read())
+            conn.close()
+            return response.status, payload
+        with patch.object(server, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch.object(server, "WORKER_PROXY_SECRET", "worker-secret"), \
+             patch.object(server, "POWER_PIN_PBKDF2", descriptor), \
+             patch.dict(server.POWER_AUTH_ATTEMPTS, {}, clear=True), \
+             patch.dict(server.POWER_COMMANDS, {}, clear=True), \
+             patch.dict(server.WORKERS, {}, clear=True), \
+             patch.dict(server.JOBS, {}, clear=True), \
+             patch.object(server, "QUEUE", []):
+            server.record_worker_heartbeat(server.RTX5080_WORKER_ID, heartbeat, now=time.time())
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            try:
+                status, denied = post(httpd.server_port, "/api/power/rtx5080", {
+                    "action": "off", "pin": "wrong",
+                })
+                self.assertEqual(status, 403)
+                self.assertEqual(denied["code"], "POWER_AUTH_FAILED")
+                status, accepted = post(httpd.server_port, "/api/power/rtx5080", {
+                    "action": "off", "pin": "http-test-pin",
+                })
+                self.assertEqual(status, 202)
+                self.assertEqual(accepted["power"]["state"], "shutting_down")
+                status, beat = post(httpd.server_port, "/api/worker/heartbeat", heartbeat, True)
+                self.assertEqual(status, 200)
+                command = beat["power_command"]
+                self.assertEqual(command["action"], "shutdown")
+                status, ack = post(httpd.server_port, "/api/worker/power/ack", {
+                    "command_id": command["id"], "status": "scheduled",
+                }, True)
+                self.assertEqual(status, 200)
+                self.assertEqual(ack["power"]["command_status"], "scheduled")
+            finally:
+                httpd.shutdown(); httpd.server_close(); thread.join(timeout=2)
+
     def test_full_queue_rejection_removes_new_job_input_snapshot(self):
         with tempfile.TemporaryDirectory() as root:
             upload = Path(root) / "upload.png"
@@ -1061,6 +1359,14 @@ class VideoDeliveryTests(unittest.TestCase):
             "Environment=COMFY_TARGETED_INTERRUPT_SHA256="
             "74573b10465505b88b618da86059878e3a56418f84c7dae4073c8824aee35a6c",
             unit,
+        )
+
+    def test_windows_installer_pins_deployed_targeted_interrupt_contract(self):
+        installer = (Path(__file__).resolve().parents[1] / "windows-worker" / "Install-H3Worker.ps1").read_text()
+        self.assertIn(
+            "targeted_interrupt_server_sha256 = "
+            "'4b910e3579db59053d0fea97b241ae1a99528c6d7fb152f34640a995bcab50d0'",
+            installer,
         )
 
     def test_windows_cancel_targets_running_prompt_only_with_pinned_contract(self):
@@ -3224,6 +3530,46 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertIn('renderWorkerProgressBoard', source)
         self.assertIn('expected_complete_at', source)
         self.assertIn('setInterval(refreshWorkerProgress,4000)', source)
+
+    def test_dual_worker_cards_expose_exact_job_cancel_without_stale_reenable(self):
+        source = (Path(__file__).resolve().parents[1] / "index.html").read_text(encoding="utf-8")
+        self.assertEqual(source.count('class="worker-live-cancel"'), 2)
+        self.assertIn('data-worker="pgx"', source)
+        self.assertIn('data-worker="rtx5080"', source)
+        self.assertIn('function cancelWorkerCardJob(worker)', source)
+        self.assertIn("'/api/cancel/'+encodeURIComponent(jobId)", source)
+        self.assertIn('WORKER_CANCEL_PENDING.has(jobId)', source)
+        self.assertIn('WORKER_PROGRESS_APPLIED=requestId', source)
+        self.assertIn('const requestEpoch=WORKER_PROGRESS_EPOCH', source)
+        self.assertIn('++WORKER_PROGRESS_EPOCH', source)
+        self.assertIn('workerProgressResponseIsCurrent(requestId,requestEpoch)', source)
+        self.assertNotIn("'/interrupt'", source)
+
+        start = source.index('function workerProgressResponseIsCurrent')
+        end = source.index('\n}', start) + 2
+        helper = source[start:end]
+        script = (
+            "let WORKER_PROGRESS_EPOCH=0,WORKER_PROGRESS_APPLIED=0;\n" + helper +
+            "\nconst requestId=1,requestEpoch=WORKER_PROGRESS_EPOCH;"
+            "++WORKER_PROGRESS_EPOCH;"
+            "console.log(JSON.stringify({current:workerProgressResponseIsCurrent(requestId,requestEpoch)}));"
+        )
+        result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+        self.assertEqual(json.loads(result.stdout), {"current": False})
+
+    def test_active_progress_returns_two_independently_cancellable_jobs(self):
+        jobs = {
+            "pgx-a": {"id": "pgx-a", "status": "running", "created": 1,
+                      "cfg": {"worker_target": "pgx"}, "progress": {"pct": 10}},
+            "rtx-b": {"id": "rtx-b", "status": "running", "created": 2,
+                      "cfg": {"worker_target": "rtx5080"}, "progress": {"pct": 20}},
+        }
+        dashboard = server.worker_progress_dashboard(jobs, now=100.0)
+        self.assertEqual(dashboard["pgx"]["id"], "pgx-a")
+        self.assertEqual(dashboard["rtx5080"]["id"], "rtx-b")
+        self.assertTrue(dashboard["pgx"]["can_cancel"])
+        self.assertTrue(dashboard["rtx5080"]["can_cancel"])
+
 
 
 if __name__ == "__main__":
