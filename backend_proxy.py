@@ -97,6 +97,15 @@ def proxy(environ, start_response):
         n = int(environ["CONTENT_LENGTH"])
         body = environ.get("wsgi.input", b"").read(n)
 
+    if path == "/api/studio-reference-video":
+        from studio_reference import handle
+        if method != "POST":
+            start_response("405 Method Not Allowed", [("Content-Type", "application/json")])
+            return [b'{"ok":false,"error":"method_not_allowed"}']
+        return handle(body, start_response, backend=BACKEND,
+                      origin_header=ORIGIN_HEADER, origin_secret=ORIGIN_SECRET,
+                      client_header=CLIENT_KEY_HEADER, client_key=_private_client_key(environ))
+
     # Playback and download must retain range semantics through Vercel.
     is_video = (path.startswith("/api/download/") or path.startswith("/api/view/")
                 or path.startswith("/api/worker/input/") or path == "/api/refv")

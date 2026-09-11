@@ -1354,7 +1354,7 @@ function refvUpload(file){
     .then(d=>{
       if(!d.ok){ box.innerHTML=`<span style="color:var(--err)">${d.error||'등록 실패'}</span>`; zone.style.display=''; box.style.display='none'; return; }
       refvActive=true;
-      refvMeta=d.ref||null;
+      refvMeta=d.refv||null;
       refvRender();
     })
     .catch(err=>{ box.innerHTML=`<span style="color:var(--err)">${String(err)}</span>`; zone.style.display=''; box.style.display='none'; });
