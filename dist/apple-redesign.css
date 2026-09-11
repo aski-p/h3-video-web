@@ -40,3 +40,36 @@ header{position:sticky;top:12px;z-index:40;padding:12px 14px;background:rgba(255
 @media(prefers-reduced-motion:reduce){#recentModal,#recentModal .recent-modal{transition:none!important}}
 @media(max-width:520px){.recent-drawer-handle{top:50%;width:44px;min-width:0;height:72px;padding:0;gap:0;margin:0;border-radius:17px 0 0 17px}.recent-drawer-handle svg{width:24px;height:24px}}
 @media(prefers-reduced-motion:reduce){.progress-character{animation:none!important;transition:none!important}.progress-character.pending{left:50%!important}}
+
+/* Warm cream surfaces for the live GPU status board. */
+#workerProgressBoard{
+ background:linear-gradient(135deg,#fffaf0 0%,#f5f0e6 100%);
+ border:1px solid #e4dac8;
+ box-shadow:0 10px 28px rgba(89,74,48,.10),inset 0 1px 0 #fff;
+}
+#workerProgressBoard .worker-live{
+ background:rgba(255,253,247,.94);border-color:#e5dccd;
+ box-shadow:0 2px 6px rgba(89,74,48,.04);
+}
+#workerProgressBoard .worker-live-name{color:#352f26}
+#workerProgressBoard .worker-live-pct{color:#395f86}
+#workerProgressBoard .worker-live-phase{color:#62594b}
+#workerProgressBoard .worker-live-time{color:#665c4e}
+#workerProgressBoard .worker-live-meta{color:#756b5d}
+#workerProgressBoard .worker-live-dot{background:#968b79}
+#workerProgressBoard .worker-live.active{background:#f8fcf6;border-color:#b8d3b0}
+#workerProgressBoard .worker-live.active .worker-live-dot{background:#2d874d;box-shadow:0 0 0 3px rgba(45,135,77,.12)}
+#workerProgressBoard .worker-live-bar{background:#e7dfd1}
+#workerProgressBoard .worker-live-bar i{background:linear-gradient(90deg,#86b9dc,#2875b3)}
+#workerProgressBoard .worker-live-cancel{color:#a33229;background:#fff0ed;border-color:#eac0b9}
+
+/* Reference thumbnails fit the mobile recent-work grid. */
+#recentModal .ritem .refthumb{width:64px;height:64px;max-width:100%;min-width:0;justify-self:start}
+#recentModal .ritem .rmeta{min-width:0}
+#recentModal .ritem .refthumb img,#recentModal .ritem .refthumb video{width:100%;height:100%;object-fit:cover}
+@media(max-width:480px){
+ #recentModal .ritem{grid-template-columns:64px minmax(0,1fr);gap:12px}
+ #recentModal .ritem>.rbtn{grid-column:1 / -1;justify-self:end;margin-top:0}
+ #recentModal .ritem>.refthumb{grid-column:1;grid-row:1}
+ #recentModal .ritem>.rmeta{grid-column:2;grid-row:1}
+}
