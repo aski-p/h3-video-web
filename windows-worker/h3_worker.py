@@ -386,9 +386,15 @@ def model_files_unchanged(models_dir: Path) -> bool:
         return False
 
 
+def run_hidden(*args, **kwargs):
+    """Capture worker subprocess output without opening a Windows console."""
+    kwargs["creationflags"] = kwargs.get("creationflags", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return subprocess.run(*args, **kwargs)
+
+
 def nvidia_info() -> tuple[str, int]:
     command = ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=15, check=True)
+    result = run_hidden(command, capture_output=True, text=True, timeout=15, check=True)
     first = result.stdout.strip().splitlines()[0]
     name, memory = [part.strip() for part in first.rsplit(",", 1)]
     return name, int(float(memory))
@@ -401,7 +407,7 @@ def assert_comfy_loopback_only(port: int = 8188) -> None:
         f"@(Get-NetTCPConnection -State Listen -LocalPort {port} "
         "-ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalAddress) -join \"`n\""
     )
-    result = subprocess.run(
+    result = run_hidden(
         ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", query],
         capture_output=True, text=True, timeout=15,
     )
@@ -585,7 +591,7 @@ def ensure_comfy(comfy_root: Path, client: ComfyClient, config: dict) -> None:
     main = comfy_root / "main.py"
     if not main.is_file():
         raise RuntimeError("ComfyUI main.py not found")
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     configured_args = config.get("comfy_args")
     extra_args = validate_comfy_args(
         configured_args if configured_args is not None else ["--lowvram", "--reserve-vram", "1.5"]
@@ -623,7 +629,7 @@ def ffmpeg_executable() -> str:
 
 
 def run_ffmpeg(arguments: list[str], timeout: int = 600, cwd: str | None = None) -> None:
-    result = subprocess.run([ffmpeg_executable(), "-y", *arguments], capture_output=True, text=True,
+    result = run_hidden([ffmpeg_executable(), "-y", *arguments], capture_output=True, text=True,
                             timeout=timeout, cwd=cwd)
     if result.returncode:
         raise RuntimeError("ffmpeg failed: " + result.stderr[-500:])
@@ -963,7 +969,7 @@ def handle_power_command(api: ApiClient, comfy: ComfyClient, state: RuntimeState
         }, timeout=20)
         return False
     try:
-        subprocess.run(
+        run_hidden(
             ["shutdown.exe", "/s", "/t", "15", "/d", "p:0:0",
              "/c", "H3 웹에서 요청한 안전한 종료"],
             check=True, capture_output=True, text=True, timeout=10,
