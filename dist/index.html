@@ -759,6 +759,7 @@ footer{
       </div>
       <div class="phint" id="phint" style="display:none"></div>
     </div>
+    <label style="display:flex;gap:10px;align-items:center;margin:12px 0"><input type="checkbox" id="scriptLoraAuto"> 스크립트의 [LORA] 설정 자동 적용</label><p id="scriptLoraPreview" class="hint" role="status" style="white-space:pre-wrap">체크하면 스크립트의 LoRA 설정이 수동 설정보다 우선합니다. 미기재 LoRA는 OFF · Spatial Physics는 3000 버전.</p>
     <div id="promptwrap">
       <label class="fld">본문 (영문 권장)</label>
       <textarea id="prompt" placeholder="A golden retriever puppy running through a sunlit meadow, cinematic shot, soft bokeh..."></textarea>
@@ -2140,9 +2141,44 @@ function setJobUI(j){
   }
 }
 
+function parseLoraBlock(text){
+ const blocks=[...String(text).matchAll(/\[LORA\]([\s\S]*?)\[\/LORA\]/gi)];
+ if(blocks.length!==1)throw Error('[LORA] … [/LORA] 블록을 정확히 하나 넣어 주세요.');
+ const names={'better human motion':'better_motion','insta/tiktok aesthetics':'insta_tiktok','motion continuity repair':'motion_repair','spatial physics':'spatial_physics','realism people':'realism','realism':'realism','camera motion 1000':'camera1000','camera motion 3000':'camera3000','camera movement':'movement'};
+ const values={};
+ for(const line of blocks[0][1].split(/\r?\n/).map(x=>x.trim()).filter(Boolean)){
+  const m=line.match(/^([^:]+):\s*(.+)$/);const key=m&&names[m[1].trim().toLowerCase()];
+  if(!key)throw Error('알 수 없는 LoRA 항목: '+line);
+  if(Object.hasOwn(values,key))throw Error('중복된 LoRA 항목: '+m[1]);
+  const raw=m[2].trim().toLowerCase();
+  if(key==='movement'){
+   if(!['handheld','tracking','pan_left','pan_right','push_in','pull_out'].includes(raw))throw Error('지원하지 않는 Camera Movement: '+raw);
+   values[key]=raw;
+  }else{
+   if(raw!=='off'&&!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw))throw Error(m[1]+' 값은 off 또는 0~2 숫자여야 합니다.');
+   const n=raw==='off'?0:Number(raw);if(!Number.isFinite(n)||n<0||n>2)throw Error(m[1]+' 강도는 0~2입니다.');values[key]=n;
+  }
+ }
+ if(!Object.keys(values).some(k=>k!=='movement'))throw Error('LoRA 강도 항목이 없습니다.');
+ if(values.camera1000>0&&values.camera3000>0)throw Error('Camera Motion 1000과 3000은 하나만 켜 주세요.');
+ const options={};for(const id of ['realism','better_motion','insta_tiktok','motion_repair','spatial_physics'])options[id]={enabled:(values[id]||0)>0,strength:values[id]||0};
+ options.spatial_physics.version='3000';
+ const version=values.camera3000>0?'3000':'1000',strength=values['camera'+version]||0;
+ options.camera_motion={enabled:strength>0,strength,version,movement:values.movement||'handheld'};
+ return {options,prompt:String(text).replace(blocks[0][0],'').replace(/^\s*=+\s*LORA SETTINGS\s*=+\s*$/gim,'').trim()};
+}
+function loraBlockSummary(options){return Object.entries(options).map(([id,x])=>id+(x.version?' '+x.version:'')+': '+(x.enabled?x.strength:'OFF')+(x.movement?' · '+x.movement:'')).join(' / ');}
+function inspectScriptLora(){
+ const checked=$('#scriptLoraAuto').checked;
+ try {const parsed=checked?parseLoraBlock($('#prompt').value):null;$('#scriptLoraPreview').textContent=parsed?loraBlockSummary(parsed.options):'수동 LoRA 설정을 사용합니다.';return parsed;}
+ catch(e){$('#scriptLoraPreview').textContent=e.message;throw e;}
+}
+$('#scriptLoraAuto').addEventListener('change',()=>{try{inspectScriptLora();}catch{}});
+$('#prompt').addEventListener('input',()=>{if($('#scriptLoraAuto').checked)try{inspectScriptLora();}catch{}});
 // 생성 버튼
 $('#go').onclick=async()=>{
-  const prompt=$('#prompt').value.trim();
+  let scriptLora;try{scriptLora=inspectScriptLora();}catch(e){alert(e.message);return;}
+  const prompt=scriptLora?scriptLora.prompt:$('#prompt').value.trim();
   if(prompt.length<3){ alert('프롬프트를 3자 이상 입력하세요'); return; }
   if(MODE==='i2v' && window.__imgBlob && (imgUploading || !imgNonce)){
     alert('선택한 이미지 업로드·검증이 끝날 때까지 잠시 기다려 주세요'); return;
@@ -2159,9 +2195,10 @@ $('#go').onclick=async()=>{
   setProgressCharacter('request-'+Date.now(),'running',null);
 
   const body={prompt, negative, width:W, height:H, seconds:S, steps:STEPS, strategy:STRATEGY, seg_seconds:SEG_SECONDS, seed, mode:MODE, filename:fname, realism_lora:REALISM_LORA, cam_motion:CAM_MOTION};
+  if(scriptLora){body.lora_options=scriptLora.options;body.realism_lora=scriptLora.options.realism.enabled;body.realism_strength=scriptLora.options.realism.strength;body.cam_motion=scriptLora.options.camera_motion.enabled?scriptLora.options.camera_motion.version:'';body.cam_strength=scriptLora.options.camera_motion.strength;}
   body.worker_target=WORKER_TARGET;
-  if(REALISM_LORA) body.realism_strength=REALISM_STRENGTH;
-  if(CAM_MOTION) body.cam_strength=CAM_STRENGTH;
+  if(!scriptLora && REALISM_LORA) body.realism_strength=REALISM_STRENGTH;
+  if(!scriptLora && CAM_MOTION) body.cam_strength=CAM_STRENGTH;
   if(MODE==='i2v'){
     if(imgNonce){
       body.image=imgNonce;
@@ -2800,3 +2837,4 @@ if(recoveredJob){
 </script>
 </body>
 </html>
+
