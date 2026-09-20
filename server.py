@@ -11,6 +11,7 @@
 - 생성 방식: 연속 단일 생성 / 세그먼트 분할 선택
 """
 import json
+from pgx_mode import controller as PGX_MODE, ModeError
 import base64
 import copy
 import hashlib
@@ -132,17 +133,16 @@ REFV_META = os.path.join(REFV_DIR, "meta.json")
 STRATEGY_CHOICES = ("single", "split")
 STRATEGY_SINGLE = "single"  # 연속 단일 생성 (장면 연속성 우선)
 STRATEGY_SPLIT = "split"   # 세그먼트 분할 (정확한 길이 우선)
-RTX5080_MAX_SINGLE_SECONDS = 5
+RTX5080_MAX_SINGLE_SECONDS = 15
 RTX5080_SAFE_SEG_SECONDS = 4
 
 
 def normalize_worker_strategy(worker_target, seconds, strategy, seg_seconds):
     """Keep long RTX 5080 H3 jobs inside the 16 GB VRAM envelope.
 
-    Five-second generation is the largest profile verified on the desktop RTX
-    5080. Longer graphs can allocate too many requested frames at once—even
-    when the generic split planner optimizes for exact duration—so the
-    coordinator persists a deterministic four-second RTX safety plan instead.
+    Allow requested continuous takes through 15 seconds on RTX 5080.
+    This is an experimental memory-heavy profile, not a hardware guarantee.
+    Longer T2V jobs retain the segmented plan.
     """
     if worker_target == "rtx5080" and float(seconds) > RTX5080_MAX_SINGLE_SECONDS:
         return STRATEGY_SPLIT, RTX5080_SAFE_SEG_SECONDS
@@ -780,6 +780,8 @@ def admit_generation_job(job):
                 if not _same_idempotent_generation(existing.get("cfg") or {}, cfg):
                     return "conflict", existing, None
                 return "duplicate", existing, None
+        if worker_target == "pgx" and not PGX_MODE.video_allowed():
+            return "pgx_mode", None, None
         if worker_target == "rtx5080":
             now = time.time()
             with POWER_COMMAND_LOCK:
@@ -2053,6 +2055,8 @@ def run_asu(cmd, timeout=300, check=True):
 
 
 def ensure_comfyui():
+    if not PGX_MODE.video_allowed():
+        raise RuntimeError("PGX Qwen 전용 모드 또는 전환 중에는 ComfyUI를 시작할 수 없습니다.")
     deadline = time.monotonic() + 300.0
 
     def ready_within_deadline():
@@ -3429,6 +3433,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
         elif p.startswith("/api/") and not self._require_origin():
             return
+        if p == "/api/pgx-mode":
+            send_json(self, {"ok": True, "mode": PGX_MODE.status()})
+            return
         if p.startswith("/api/worker/input/"):
             parts = p.split("/")
             if len(parts) != 6 or parts[5] not in ("image", "video"):
@@ -3536,7 +3543,7 @@ class Handler(BaseHTTPRequestHandler):
                 "queues": {"pgx": queues["pgx"], "rtx5080": queues["rtx5080"]},
                 "workers": {
                     "pgx": {"id": "pgx", "label": "PGX Spark", "online": comfy_up(),
-                            "eligible": comfy_up(), "busy": bool(active_id)},
+                            "eligible": comfy_up() and PGX_MODE.video_allowed(), "busy": bool(active_id)},
                     "rtx5080": rtx5080_worker_status(),
                 },
             })
@@ -3551,7 +3558,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "workers": {
                     "pgx": {"id": "pgx", "label": "PGX Spark", "online": pgx_online,
-                            "eligible": pgx_online, "busy": bool(queues["pgx"]["active_job"]),
+                            "eligible": pgx_online and PGX_MODE.video_allowed(), "busy": bool(queues["pgx"]["active_job"]),
                             **queues["pgx"]},
                     "rtx5080": {**rtx5080_worker_status(), **queues["rtx5080"]},
                 },
@@ -3976,6 +3983,30 @@ class Handler(BaseHTTPRequestHandler):
                 log(f"worker API error: {type(exc).__name__}: {str(exc)[:180]}")
                 send_json(self, {"ok": False, "error": "worker operation failed"}, 500)
             return
+        if p == "/api/pgx-mode":
+            forwarded = self.headers.get(CLIENT_KEY_HEADER, "").strip().lower()
+            client_key = forwarded if re.fullmatch(r"[0-9a-f]{64}", forwarded) else self.client_address[0]
+            try:
+                # Independent configured hash, with the existing shared rate limiter.
+                descriptor = os.environ.get("H3_MODE_PIN_PBKDF2", "")
+                if not verify_power_pin(data.get("pin"), descriptor=descriptor, client_key=client_key):
+                    send_json(self, {"ok":False,"error":"비밀번호가 올바르지 않거나 잠시 잠겼습니다."}, 403)
+                    return
+                with GENERATE_ADMISSION_LOCK:
+                    with LOCK:
+                        busy = bool(ACTIVE[0]) or any(
+                            (j.get("cfg") or {}).get("worker_target", "pgx") == "pgx"
+                            and j.get("status") in ("queued", "starting", "running", "unavailable")
+                            for j in JOBS.values())
+                    state = PGX_MODE.request(data.get("mode"), busy=busy)
+                send_json(self, {"ok":True,"mode":state}, 202 if state.get("switching") else 200)
+            except ValueError as exc:
+                send_json(self, {"ok":False,"error":str(exc)}, 400)
+            except ModeError as exc:
+                send_json(self, {"ok":False,"error":str(exc)}, 409)
+            except RuntimeError:
+                send_json(self, {"ok":False,"error":"PGX 모드 전환 인증 설정이 필요합니다."}, 503)
+            return
         if p == "/api/power/rtx5080":
             # The authenticated Vercel proxy mints this opaque HMAC. Browser
             # headers are never relayed, so clients cannot rotate limiter keys.
@@ -4217,6 +4248,11 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     send_json(self, generation_receipt(admitted_job, duplicate=True))
                 return
+            if admission == "pgx_mode":
+                cleanup_job_input_snapshots(image_source_path, video_source_path)
+                send_json(self, {"ok":False,"code":"PGX_MODE_BLOCKED",
+                                 "error":"PGX 영상 모드가 아닙니다. 영상 생성 모드로 전환해 주세요."}, 409)
+                return
             if admission == "powering_off":
                 cleanup_job_input_snapshots(image_source_path, video_source_path)
                 send_json(self, {"ok": False,
@@ -4407,4 +4443,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

@@ -674,6 +674,13 @@ footer{
 }
 
 </style>
+
+<style>
+.pgx-mode-panel{padding:16px;margin:14px 0;border:1px solid #9ba5b633;border-radius:20px;background:var(--card,transparent)}
+.pgx-mode-panel h2{font-size:16px;margin:0 0 10px}.pgx-mode-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.pgx-mode-options button{min-height:46px;white-space:nowrap;font-size:14px;padding:10px;border-radius:12px}.pgx-mode-options button[aria-pressed=true]{background:#087bf0;color:#fff}.pgx-mode-panel p{font-size:13px;margin:10px 0 0;line-height:1.5}
+#pgxModeDialog{width:min(400px,calc(100% - 40px));box-sizing:border-box;border:1px solid #8d99ac55;border-radius:20px;padding:24px;background:#f5f5f7;color:#1d1d1f}#pgxModeDialog::backdrop{background:#0008}#pgxModeDialog input{box-sizing:border-box;width:100%;min-height:46px;margin:10px 0}#pgxModeDialog .pgx-dialog-actions{display:flex;gap:10px;justify-content:flex-end}#pgxModeError{color:#b32929;font-size:13px}
+</style>
 </head>
 <body>
 <a class="skip-link" href="#main-controls">생성 설정으로 바로가기</a>
@@ -702,6 +709,20 @@ footer{
       <div class="sub2" id="csub"></div>
     </div>
   </header>
+<section class="pgx-mode-panel" aria-label="PGX 모델 모드">
+<h2>PGX 모델 모드</h2>
+<div class="pgx-mode-options" role="group" aria-label="모델 선택">
+<button type="button" data-pgx-mode="video" aria-pressed="false" disabled>영상 생성 모드</button>
+<button type="button" data-pgx-mode="qwen" aria-pressed="false" disabled>Qwen 3.8 전용</button>
+</div><p id="pgxModeStatus" role="status">서버 모드 확인 중…</p>
+<p>PGX의 모델을 전환합니다. RTX 5080은 그대로 유지됩니다.</p>
+</section>
+<dialog id="pgxModeDialog" aria-labelledby="pgxModeTitle">
+<form id="pgxModeForm"><h3 id="pgxModeTitle">PGX 모델 전환</h3><p id="pgxModeDescription"></p>
+<label for="pgxModePin">전환 비밀번호</label><input id="pgxModePin" type="password" inputmode="numeric" autocomplete="off" maxlength="128" required>
+<p id="pgxModeError" role="alert"></p><div class="pgx-dialog-actions"><button id="pgxModeClose" type="button">취소</button><button id="pgxModeConfirm" type="submit">전환</button></div></form>
+</dialog>
+
 
   <section class="worker-progress-board" id="workerProgressBoard" aria-label="생성 장비별 실시간 진행률" aria-live="polite">
     <article class="worker-live" id="pgxLiveProgress" data-worker="pgx">
@@ -1445,7 +1466,7 @@ function syncI2VDurationLimit(){
   }
   const hint=$('#durationHint');
   if(hint) hint.textContent=isI2V
-    ? `사진 I2V는 인물 참조 품질을 위해 최대 ${I2V_REFERENCE_MAX_SECONDS}초까지만 생성합니다.`
+    ? `사진 I2V는 최대 ${I2V_REFERENCE_MAX_SECONDS}초입니다. RTX 5080도 10·15초 연속 생성이 가능하도록 요청하며, 메모리 부족 시 실패할 수 있습니다.`
     : '세그먼트 분할 방식: 길이만큼 세그먼트 분할. 단일 생성: 한 번에 전체 프레임 생성.';
 }
 
@@ -2835,6 +2856,21 @@ if(recoveredJob){
   scheduleJobPoll(0);
 }
 </script>
+
+<script>
+(()=>{
+ const buttons=[...document.querySelectorAll('[data-pgx-mode]')],status=document.getElementById('pgxModeStatus'),dialog=document.getElementById('pgxModeDialog'),pin=document.getElementById('pgxModePin'),error=document.getElementById('pgxModeError');
+ let target=null,pending=false,refreshBusy=false;
+ const render=m=>{for(const b of buttons){b.disabled=pending||!m.configured||m.switching||b.dataset.pgxMode===m.mode;b.setAttribute('aria-pressed',String(b.dataset.pgxMode===m.mode));}status.textContent=m.message||'서버 상태 확인 필요';};
+ async function request(body){const r=await fetch('/api/pgx-mode',{method:body?'POST':'GET',cache:'no-store',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(15000)});let d;try{d=await r.json();}catch{throw Error('PGX 모드 전환 서버 설치 또는 연결이 필요합니다.');}if(!r.ok||!d.ok)throw Error(d.error||'서버 연결 실패');return d.mode;}
+ async function refresh(){if(pending||refreshBusy)return;refreshBusy=true;try{const m=await request();if(!pending)render(m);}catch(e){if(!pending)render({configured:false,message:e.message});}finally{refreshBusy=false;}}
+ buttons.forEach(b=>b.onclick=()=>{target=b.dataset.pgxMode;pin.value='';error.textContent='';document.getElementById('pgxModeDescription').textContent=target==='qwen'?'ComfyUI를 종료하고 Qwen 3.8을 불러옵니다. PGX에 생성·대기 작업이 있으면 전환하지 않습니다.':'Qwen 3.8을 종료하고 ComfyUI를 시작합니다. 진행 중인 Qwen 응답은 중단될 수 있습니다.';dialog.showModal();pin.focus();});
+ document.getElementById('pgxModeClose').onclick=()=>dialog.close();dialog.addEventListener('close',()=>{pin.value='';});
+ document.getElementById('pgxModeForm').onsubmit=async e=>{e.preventDefault();if(pending)return;pending=true;document.getElementById('pgxModeConfirm').disabled=true;try{const m=await request({mode:target,pin:pin.value});pin.value='';dialog.close();render(m);}catch(e){error.textContent=e.message;pin.value='';}finally{pending=false;document.getElementById('pgxModeConfirm').disabled=false;refresh();}};
+ refresh();setInterval(refresh,10000);
+})();
+</script>
 </body>
 </html>
+
 

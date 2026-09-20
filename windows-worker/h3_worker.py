@@ -747,14 +747,15 @@ def generate_segment(api, comfy: ComfyClient, server, claim: dict, cfg: dict,
         raise RuntimeError("ComfyUI queue rejected workflow: " + json.dumps(queued)[:800])
     prompt_id = queued["prompt_id"]
     last_history = 0.0
-    deadline = time.monotonic() + 6 * 60 * 60
+    segment_timeout = max(6 * 60 * 60, min(24 * 60 * 60, (float(frames) / 124) * 6 * 60 * 60))
+    deadline = time.monotonic() + segment_timeout
     completed = False
     try:
         while True:
             if state is not None and not state.lease_ok(claim):
                 raise WorkerJobCancelled("coordinator cancelled or fenced this execution")
             if time.monotonic() >= deadline:
-                raise RuntimeError("ComfyUI segment exceeded the 6 hour safety timeout")
+                raise RuntimeError(f"ComfyUI segment exceeded the {segment_timeout / 3600:.1f} hour safety timeout")
             if ws is not None:
                 try:
                     raw = ws.recv()
@@ -1222,3 +1223,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

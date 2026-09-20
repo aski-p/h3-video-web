@@ -123,7 +123,7 @@ function Ensure-Python {
 }
 
 Write-Step 'Checking private package files'
-$required = @('h3_worker.py','server.py','model-manifest.json','requirements.txt','README.md','Uninstall-H3Worker.ps1','worker-token.txt')
+$required = @('h3_worker.py','server.py','pgx_mode.py','model-manifest.json','requirements.txt','README.md','Uninstall-H3Worker.ps1','worker-token.txt')
 foreach ($name in $required) {
   if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $name) -PathType Leaf)) { throw "Package file missing: $name" }
 }
@@ -153,7 +153,7 @@ Remove-Item -LiteralPath $StageRoot -Recurse -Force -ErrorAction SilentlyContinu
 Remove-Item -LiteralPath $BackupRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $StageRoot | Out-Null
 Set-PrivateAcl $StageRoot
-foreach ($name in @('h3_worker.py','server.py','model-manifest.json','requirements.txt','README.md','Uninstall-H3Worker.ps1')) {
+foreach ($name in @('h3_worker.py','server.py','pgx_mode.py','model-manifest.json','requirements.txt','README.md','Uninstall-H3Worker.ps1')) {
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $StageRoot $name) -Force
 }
 $config = [ordered]@{
@@ -243,3 +243,4 @@ try {
   Write-Warning "New worker is running locally, but production heartbeat is not eligible yet: $($_.Exception.Message)"
   Write-Host "See $InstallRoot\worker.log"
 }
+
