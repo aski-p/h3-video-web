@@ -2374,6 +2374,7 @@ $('#go').onclick=async()=>{
 // 중단
 $('#stop').onclick=async()=>{
   if(!currentJob||cancelInFlight) return;
+  if(!confirm('영상 생성을 중단할까요?\n중단하면 현재 작업을 이어서 생성할 수 없습니다.')) return;
   const jobId=currentJob;
   const button=$('#stop');
   const previousText=button.textContent;
