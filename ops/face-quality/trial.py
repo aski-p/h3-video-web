@@ -10,6 +10,20 @@ import threading
 
 os.environ.setdefault('OMP_NUM_THREADS','1')
 
+def configure_cpu():
+    import cv2
+    import onnxruntime as ort
+    from facefusion import inference_manager
+    cv2.setNumThreads(1)
+    original=ort.InferenceSession
+    def bounded_session(*args,**kwargs):
+        options=ort.SessionOptions();options.intra_op_num_threads=2;options.inter_op_num_threads=1
+        options.add_session_config_entry('session.intra_op.allow_spinning','0')
+        options.add_session_config_entry('session.inter_op.allow_spinning','0')
+        kwargs['sess_options']=options
+        return original(*args,**kwargs)
+    inference_manager.InferenceSession=bounded_session
+
 def robust_delta(values):
     import numpy as np
     if not values:return [0.,0.,0.]
@@ -36,6 +50,7 @@ def main():
     import cv2
     import numpy as np
     from facefusion import conda,core
+    configure_cpu()
     from facefusion.processors.modules.face_swapper import core as swapper
     from facefusion.face_masker import create_region_mask
     tone=robust_delta(json.loads(a.tone_from.read_text())['rawSkinDeltas']) if a.tone_from else None

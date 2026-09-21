@@ -7,6 +7,8 @@ os.environ.setdefault('OMP_NUM_THREADS','1')
 p=argparse.ArgumentParser();p.add_argument('--engine',type=Path,required=True);p.add_argument('--source',type=Path,required=True);p.add_argument('--portrait',type=Path,required=True);p.add_argument('--folder',type=Path,required=True);a=p.parse_args()
 a.source=a.source.resolve();a.portrait=a.portrait.resolve();a.folder=a.folder.resolve();sys.path.insert(0,str(a.engine.resolve()));os.chdir(a.engine)
 import cv2,numpy as np
+from trial import configure_cpu
+configure_cpu()
 from facefusion.program import create_program
 from facefusion.args import apply_args
 from facefusion import state_manager
