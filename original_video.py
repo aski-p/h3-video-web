@@ -110,7 +110,12 @@ def quality_gate(report,workflow,stats):
     if len(stats.get('rawSkinDeltas',[]))!=workflow['source']['frames']:raise ValueError('face_coverage_gate_failed')
     if stats.get('model')!='hyperswap_1b_256' or stats.get('expressionFactor')!=0 or stats.get('appliedLabDelta') is not None:raise ValueError('profile_gate_failed')
     if result.get('lowerBodyMAE',999)>8 and not workflow.get('overlayROI'):raise ValueError('original_pixels_gate_failed')
-    return {'policy':POLICY,'timingVerified':True,'faceCoverage':1,'sampleIdentityMean':sum(scores)/len(scores),'sampleIdentityMin':min(scores),'visualReview':'required','publishApproved':False}
+    source_expressions=report.get('source',{}).get('expressionSamples',[])
+    output_expressions=result.get('expressionSamples',[])
+    pairs=[(a,b) for a,b in zip(source_expressions,output_expressions) if a and b and a['eyeAspectRatio']<.6]
+    # Profile landmarks are unreliable; compare only usable frontal samples.
+    if len(pairs)<3 or any(abs(a['eyeAspectRatio']-b['eyeAspectRatio'])>.05 or abs(a['mouthAspectRatio']-b['mouthAspectRatio'])>.15 for a,b in pairs):raise ValueError('expression_gate_failed')
+    return {'policy':POLICY,'timingVerified':True,'faceCoverage':1,'expressionVerified':True,'sampleIdentityMean':sum(scores)/len(scores),'sampleIdentityMin':min(scores),'visualReview':'required','publishApproved':False}
 
 def process(f,repo):
     s=read(f/'state.json')
