@@ -1,4 +1,5 @@
 """Authenticated, durable original-motion jobs. No synthesis fallback."""
+import math
 import base64, fcntl, hashlib, hmac, json, os, re, signal, subprocess, sys, time
 from pathlib import Path
 
@@ -31,11 +32,33 @@ def healthy():
     try:return time.time()-(ROOT/'heartbeat').stat().st_mtime<90
     except OSError:return False
 
+def source_key(c):
+    match=re.search(r'/(?:reel|p|tv)/([^/?#]+)',c.get('sourceUrl',''))
+    return match.group(1) if match else None
+
+def used_source(candidate, exclude=None):
+    for path in ROOT.glob('*/state.json'):
+        if path.parent.name==exclude:continue
+        state=read(path)
+        if state['status'] not in ('queued','running','done'):continue
+        if state.get('sourceSha256')==candidate['sha256']:return True
+        prior=path.parent/'candidate.json'
+        if source_key(candidate) and prior.exists() and source_key(read(prior))==source_key(candidate):return True
+    return False
+
+def requested_segment(candidate,data):
+    start=float(data.get('start',candidate.get('start',0)))
+    duration=float(data.get('duration',candidate['duration']))
+    reviewed_start=float(candidate.get('start',0));reviewed_end=reviewed_start+float(candidate['duration'])
+    if not math.isfinite(start) or not math.isfinite(duration) or start<reviewed_start or not 2<=duration<=15 or start+duration>reviewed_end+1e-6:raise ValueError('unreviewed_segment')
+    return {**candidate,'start':start,'duration':duration}
+
 def submit(data):
     request=data.get('requestId','')
     if not re.fullmatch(r'[a-f0-9-]{36}:\d{1,6}',request):raise ValueError('invalid_request')
     candidate=next((v for v in catalog() if v['sha256']==data.get('sourceSha256')),None)
     if not candidate:raise ValueError('source_not_reviewed')
+    candidate=requested_segment(candidate,data)
     portrait=data.get('portrait','')
     if not isinstance(portrait,str) or not portrait.startswith('data:image/jpeg;base64,') or len(portrait)>700000:raise ValueError('fixed_portrait_required')
     image=base64.b64decode(portrait.split(',')[1],validate=True)
@@ -45,11 +68,13 @@ def submit(data):
     ROOT.mkdir(parents=True,exist_ok=True)
     with (ROOT/'.submit.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
-        f=folder(jid);binding={'sourceSha256':candidate['sha256'],'portraitSha256':image_hash}
+        f=folder(jid);binding={'sourceSha256':candidate['sha256'],'portraitSha256':image_hash,'start':candidate['start'],'duration':candidate['duration']}
         if (f/'state.json').exists():
             state=read(f/'state.json')
-            if any(state[k]!=v for k,v in binding.items()):raise ValueError('request_input_conflict')
+            stored=read(f/'candidate.json')
+            if any(state.get(k,stored.get(k,0 if k=='start' else None))!=v for k,v in binding.items()):raise ValueError('request_input_conflict')
             return public(state)
+        if used_source(candidate):raise ValueError('source_already_used')
         if not healthy():raise ValueError('original_worker_offline')
         if sum(read(p).get('status') not in TERMINAL for p in ROOT.glob('*/state.json'))>=12:raise ValueError('original_queue_full')
         f.mkdir();(f/'portrait.jpg').write_bytes(image)
@@ -67,7 +92,7 @@ def handle(handler,path,send_json,post=False):
     try:
         parts=path.strip('/').split('/')
         if path=='/api/original-video/catalog' and not post:
-            send_json(handler,{'ok':True,'policy':POLICY,'workerOnline':healthy(),'sources':[{k:v[k] for k in ('sha256','sourceUrl','duration','width','height','fps','username')} for v in catalog()]});return
+            send_json(handler,{'ok':True,'policy':POLICY,'workerOnline':healthy(),'sources':[{**{k:v[k] for k in ('sha256','sourceUrl','duration','width','height','fps','username')},'start':v.get('start',0),'used':used_source(v)} for v in catalog()]});return
         if path=='/api/original-video/generate' and post:
             size=int(handler.headers.get('Content-Length',0))
             if not 0<size<750000:raise ValueError('invalid_request_size')
@@ -106,7 +131,8 @@ def quality_gate(report,workflow,stats):
     result=report.get('output',{})
     scores=result.get('referenceSimilaritySamples',[])
     if not workflow.get('timingVerified') or workflow.get('source')!=workflow.get('output'):raise ValueError('timing_gate_failed')
-    if len(scores)!=5 or any(v is None or v<.45 for v in scores) or sum(scores)/len(scores)<.65:raise ValueError('identity_gate_failed')
+    expected=max(5,math.ceil(workflow['source']['frames']/workflow['source']['fps']))
+    if len(scores)!=expected or any(v is None or v<.45 for v in scores) or sum(scores)/len(scores)<.65:raise ValueError('identity_gate_failed')
     if len(stats.get('rawSkinDeltas',[]))!=workflow['source']['frames']:raise ValueError('face_coverage_gate_failed')
     if stats.get('model')!='hyperswap_1b_256' or stats.get('expressionFactor')!=0 or stats.get('appliedLabDelta') is not None:raise ValueError('profile_gate_failed')
     if result.get('lowerBodyMAE',999)>8 and not workflow.get('overlayROI'):raise ValueError('original_pixels_gate_failed')
@@ -114,7 +140,7 @@ def quality_gate(report,workflow,stats):
     output_expressions=result.get('expressionSamples',[])
     pairs=[(a,b) for a,b in zip(source_expressions,output_expressions) if a and b and a['eyeAspectRatio']<.6]
     # Profile landmarks are unreliable; compare only usable frontal samples.
-    if len(pairs)<3 or any(abs(a['eyeAspectRatio']-b['eyeAspectRatio'])>.05 or abs(a['mouthAspectRatio']-b['mouthAspectRatio'])>.15 for a,b in pairs):raise ValueError('expression_gate_failed')
+    if len(source_expressions)!=expected or len(output_expressions)!=expected or len(pairs)<math.ceil(expected*.6) or any(abs(a['eyeAspectRatio']-b['eyeAspectRatio'])>.05 or abs(a['mouthAspectRatio']-b['mouthAspectRatio'])>.15 for a,b in pairs):raise ValueError('expression_gate_failed')
     return {'policy':POLICY,'timingVerified':True,'faceCoverage':1,'expressionVerified':True,'sampleIdentityMean':sum(scores)/len(scores),'sampleIdentityMin':min(scores),'visualReview':'required','publishApproved':False}
 
 def process(f,repo):

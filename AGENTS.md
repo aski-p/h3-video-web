@@ -17,3 +17,8 @@ Changes to this path require the original-video quality gate tests. Push to
 GitHub before runtime application. The PGX runtime server can contain separate
 changes: compare it with GitHub and apply scoped changes rather than overwriting
 its whole file without inspection.
+
+New daily work must not reuse completed or active source hashes/post IDs across
+requests. Idempotent delivery of the same request is allowed. Reviewed variable
+segments up to 15 seconds must receive at least one quality sample per second
+(minimum five); never assume the initial four-second test covers longer footage.

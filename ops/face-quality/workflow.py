@@ -56,7 +56,10 @@ def main():
     portrait = Path(config['portrait'])
     if digest(portrait) != config['portraitSha256']:
         raise ValueError('Fixed portrait changed; update configuration deliberately')
-    duration = a.duration or profile['testDurationSeconds']
+    original_meta=video_meta(original)
+    available=original_meta['frames']/original_meta['fps']-a.start
+    duration = min(15,available) if a.duration is None else a.duration
+    if duration>available+1/original_meta['fps']:raise ValueError('Requested segment exceeds source duration')
     if a.start < 0 or not 2 <= duration <= 15:
         p.error('Use a 2–15 second segment with nonnegative start')
     r = a.output_dir.resolve()
@@ -65,6 +68,7 @@ def main():
     source, swapped, output = r/'source.mp4', r/'swapped.mp4', r/'output.mp4'
     subprocess.run(['ffmpeg','-v','error','-ss',str(a.start),'-i',str(original),'-t',str(duration),'-map','0:v:0','-map','0:a?','-c:v','libx264','-crf','18','-preset','fast','-c:a','aac','-movflags','+faststart',str(source)],check=True)
     source_meta = video_meta(source)
+    if abs(source_meta['frames']/source_meta['fps']-duration)>1/source_meta['fps']+1e-6:raise ValueError('Extracted duration differs from requested segment')
     reference = a.reference_frame if a.reference_frame is not None else min(round(source_meta['fps']*profile['referenceTimeSeconds']),source_meta['frames']-1)
     if not 0 <= reference < source_meta['frames']:
         raise ValueError('Reference frame outside clip')

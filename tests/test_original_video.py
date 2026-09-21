@@ -1,5 +1,8 @@
 import copy
 import unittest
+import tempfile,json
+from pathlib import Path
+from unittest.mock import patch
 import original_video as v
 
 class QualityGateTests(unittest.TestCase):
@@ -28,4 +31,32 @@ class QualityGateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'expression'):v.quality_gate(self.report,self.workflow,self.stats)
     def test_path_traversal_blocks(self):
         with self.assertRaises(ValueError):v.folder('../secret')
+class NoveltyTests(unittest.TestCase):
+    def test_used_hash_and_post_survive_card_deletion(self):
+        with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+            f=Path(tmp)/('orig_'+'a'*32);f.mkdir()
+            (f/'state.json').write_text(json.dumps({'status':'done','sourceSha256':'old'}))
+            (f/'candidate.json').write_text(json.dumps({'sourceUrl':'https://instagram.com/user/reel/POST/'}))
+            self.assertTrue(v.used_source({'sha256':'old','sourceUrl':'other'}))
+            self.assertTrue(v.used_source({'sha256':'new','sourceUrl':'https://instagram.com/reel/POST/?x=1'}))
+            self.assertFalse(v.used_source({'sha256':'new','sourceUrl':'https://instagram.com/reel/NEW/'}))
+    def test_segment_cannot_exceed_reviewed_bounds(self):
+        c={'start':2,'duration':12}
+        self.assertEqual(v.requested_segment(c,{'start':2,'duration':10})['duration'],10)
+        for d in [{'start':1,'duration':10},{'start':2,'duration':13},{'duration':float('nan')}]:
+            with self.assertRaises(ValueError):v.requested_segment(c,d)
+    def test_same_request_idempotent_but_other_request_cannot_reuse(self):
+        c={'sha256':'abc','sourceUrl':'https://instagram.com/reel/POST/','duration':10,'start':0}
+        with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)),patch.object(v,'catalog',return_value=[c]),patch.object(v,'healthy',return_value=True):
+            d={'requestId':'11111111-1111-1111-1111-111111111111:1','sourceSha256':'abc','portrait':'data:image/jpeg;base64,/9j/'}
+            first=v.submit(d);self.assertEqual(v.submit(d)['id'],first['id'])
+            with self.assertRaisesRegex(ValueError,'already_used'):v.submit({**d,'requestId':'22222222-2222-2222-2222-222222222222:1'})
+            with self.assertRaisesRegex(ValueError,'conflict'):v.submit({**d,'duration':8})
+    def test_long_clip_needs_more_than_five_samples(self):
+        base=QualityGateTests();base.setUp();base.meta['frames']=300;base.stats['rawSkinDeltas']=[[0,0,0]]*300
+        with self.assertRaisesRegex(ValueError,'identity'):v.quality_gate(base.report,base.workflow,base.stats)
+        for key in ('source','output'):base.report[key]['expressionSamples']*=2
+        base.report['output']['referenceSimilaritySamples']*=2
+        self.assertTrue(v.quality_gate(base.report,base.workflow,base.stats)['expressionVerified'])
+
 if __name__=='__main__':unittest.main()

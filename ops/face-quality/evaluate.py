@@ -1,7 +1,7 @@
 """Compare timing, outside-face pixels, and sampled reference-face similarity.
 Similarity is only a relative diagnostic, never a pass/fail identity guarantee.
 """
-import argparse,json,os,sys
+import argparse,json,os,sys,math
 from pathlib import Path
 os.environ.setdefault('OMP_NUM_THREADS','1')
 p=argparse.ArgumentParser();p.add_argument('--engine',type=Path,required=True);p.add_argument('--source',type=Path,required=True);p.add_argument('--portrait',type=Path,required=True);p.add_argument('--folder',type=Path,required=True);a=p.parse_args()
@@ -24,7 +24,7 @@ def read(path):
   if not ok:break
   out.append(f)
  cap.release();return out,fps
-original,fps=read(a.source);indices=[0,30,60,90,119] if len(original)==120 else np.linspace(0,len(original)-1,5,dtype=int).tolist();report={};columns=[]
+original,fps=read(a.source);indices=[0,30,60,90,119] if len(original)==120 else np.linspace(0,len(original)-1,max(5,math.ceil(len(original)/fps)),dtype=int).tolist();report={};columns=[]
 paths=[a.source]+[x for x in sorted(a.folder.glob('*.mp4')) if x.stem not in ('comparison','best') and x.resolve()!=a.source.resolve()]
 for path in paths:
  frames,rate=read(path)
