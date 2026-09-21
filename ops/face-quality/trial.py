@@ -2,7 +2,6 @@
 Run using FaceFusion's Python environment. Engine checks and filters remain active.
 """
 import argparse
-import faulthandler
 import json
 import os
 from pathlib import Path
@@ -35,6 +34,7 @@ def apply_tone(crop,skin,delta,strength=.7):
     import numpy as np
     # Constant shot-level correction avoids independently changing color each frame.
     # Only skin inside the eventual face mask is changed; eyes/lips are excluded.
+    crop=np.rint(crop).clip(0,255).astype(np.uint8)
     lab=cv2.cvtColor(crop,cv2.COLOR_BGR2LAB).astype(np.float32)
     corrected=cv2.cvtColor(np.clip(lab+np.asarray(delta,dtype=np.float32)*strength,0,255).astype(np.uint8),cv2.COLOR_LAB2BGR)
     alpha=np.clip(skin,0,1)[...,None]
@@ -62,7 +62,8 @@ def main():
         valid=skin>.8
         if np.count_nonzero(valid)>100:
             target_lab=cv2.cvtColor(target,cv2.COLOR_BGR2LAB).astype(float)
-            crop_lab=cv2.cvtColor(crop,cv2.COLOR_BGR2LAB).astype(float)
+            crop_crop=np.rint(crop).clip(0,255).astype(np.uint8)
+    lab=cv2.cvtColor(crop,cv2.COLOR_BGR2LAB).astype(float)
             delta=np.median(target_lab[valid]-crop_lab[valid],axis=0).tolist()
             with lock:stats.append(delta)
         if tone is not None:crop=apply_tone(crop,skin,tone)
@@ -77,7 +78,6 @@ def main():
       '--execution-providers','cpu','--execution-thread-count','4','--temp-path',str(a.output.parent/'temp'/a.output.stem),'--jobs-path',str(a.output.parent/'jobs'/a.output.stem),'--log-level','info']
     if a.expression:sys.argv+=['--expression-restorer-model','live_portrait','--expression-restorer-factor',str(a.expression)]
     conda.setup()
-    faulthandler.dump_traceback_later(45,repeat=False)
     try:core.cli()
     finally:
         a.output.with_suffix('.stats.json').write_text(json.dumps({'model':a.model,'rawSkinDeltas':stats,'recommendedLabDelta':robust_delta(stats),'appliedLabDelta':tone,'expressionFactor':a.expression,'command':sys.argv},indent=2))
