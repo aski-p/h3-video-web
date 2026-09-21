@@ -937,6 +937,7 @@ class VideoDeliveryTests(unittest.TestCase):
             ["shutdown.exe", "/s", "/t", "15", "/d", "p:0:0",
              "/c", "H3 웹에서 요청한 안전한 종료"],
             check=True, capture_output=True, text=True, timeout=10,
+            creationflags=getattr(worker.subprocess, "CREATE_NO_WINDOW", 0),
         )
         self.assertTrue(state.stopping)
         self.assertEqual(calls[0][0], "/api/worker/power/ack")
@@ -3012,7 +3013,7 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertIn('id="workerToggle"', html)
         self.assertIn("let WORKER_TARGET='pgx'", html)
         self.assertIn("body.worker_target=WORKER_TARGET;", html)
-        self.assertIn("workerToggle.disabled=!rtx.eligible", html)
+        self.assertIn("(!rtx.eligible&&WORKER_TARGET==='pgx')", html)
         self.assertIn("RTX 5080 실제 H3 생성 검증 대기", html)
         self.assertIn("const workerLabel=", html)
         self.assertIn("j.queue_position", html)
