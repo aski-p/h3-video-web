@@ -55,7 +55,7 @@ def main():
     processors=['face_swapper']+(['expression_restorer'] if a.expression else [])
     sys.argv=['facefusion.py','headless-run','-s',str(a.portrait),'-t',str(a.source),'-o',str(a.output),'--processors',*processors,
       '--face-swapper-model',a.model,'--face-swapper-weight','0.5','--face-swapper-pixel-boost','512x512',
-      '--face-selector-mode','reference','--reference-frame-number','30','--reference-face-position','0','--reference-face-distance','0.6','--face-selector-gender','female',
+      '--face-selector-mode','reference','--reference-frame-number','30','--reference-face-position','0','--reference-face-distance','0.3','--face-selector-gender','female',
       '--face-mask-types','box','occlusion','region','--face-occluder-model','xseg_1','--face-parser-model','bisenet_resnet_34','--face-mask-blur','0.3',
       '--face-detector-model','retinaface','--face-landmarker-model','2dfan4','--output-video-scale','1','--output-video-fps','30','--output-video-quality','95','--output-video-preset','fast',
       '--execution-providers','cpu','--execution-thread-count','4','--temp-path',str(a.output.parent/'temp'/a.output.stem),'--jobs-path',str(a.output.parent/'jobs'/a.output.stem),'--log-level','info']
