@@ -2,6 +2,7 @@
 Run using FaceFusion's Python environment. Engine checks and filters remain active.
 """
 import argparse
+import faulthandler
 import json
 import os
 from pathlib import Path
@@ -76,6 +77,7 @@ def main():
       '--execution-providers','cpu','--execution-thread-count','4','--temp-path',str(a.output.parent/'temp'/a.output.stem),'--jobs-path',str(a.output.parent/'jobs'/a.output.stem),'--log-level','info']
     if a.expression:sys.argv+=['--expression-restorer-model','live_portrait','--expression-restorer-factor',str(a.expression)]
     conda.setup()
+    faulthandler.dump_traceback_later(45,repeat=False)
     try:core.cli()
     finally:
         a.output.with_suffix('.stats.json').write_text(json.dumps({'model':a.model,'rawSkinDeltas':stats,'recommendedLabDelta':robust_delta(stats),'appliedLabDelta':tone,'expressionFactor':a.expression,'command':sys.argv},indent=2))
