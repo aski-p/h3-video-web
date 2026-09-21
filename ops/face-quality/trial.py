@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import sys
 import threading
+import subprocess
+from fractions import Fraction
 
 os.environ.setdefault('OMP_NUM_THREADS','1')
 
@@ -47,6 +49,8 @@ def main():
     for path in (a.source,a.portrait):
         if not path.is_file():p.error('input missing')
     a.output=a.output.resolve();a.source=a.source.resolve();a.portrait=a.portrait.resolve();a.engine=a.engine.resolve();a.output.parent.mkdir(parents=True,exist_ok=True)
+    video=json.loads(subprocess.check_output(['ffprobe','-v','error','-select_streams','v:0','-show_entries','stream=avg_frame_rate','-of','json',str(a.source)]))['streams'][0]
+    source_fps=str(float(Fraction(video['avg_frame_rate'])))
     sys.path.insert(0,str(a.engine));os.chdir(a.engine)
     import cv2
     import numpy as np
@@ -73,7 +77,7 @@ def main():
       '--face-swapper-model',a.model,'--face-swapper-weight','0.5','--face-swapper-pixel-boost','512x512',
       '--face-selector-mode','reference','--reference-frame-number',str(a.reference_frame),'--reference-face-position','0','--reference-face-distance','0.3','--face-selector-gender','female',
       '--face-mask-types','box','occlusion','region','--face-occluder-model','xseg_1','--face-parser-model','bisenet_resnet_34','--face-mask-blur','0.3',
-      '--face-detector-model','retinaface','--face-landmarker-model','2dfan4','--output-video-scale','1','--output-video-fps','30','--output-video-quality','95','--output-video-preset','fast',
+      '--face-detector-model','retinaface','--face-landmarker-model','2dfan4','--output-video-scale','1','--output-video-fps',source_fps,'--output-video-quality','95','--output-video-preset','fast',
       '--execution-providers','cpu','--execution-thread-count','4','--temp-path',str(a.output.parent/'temp'/a.output.stem),'--jobs-path',str(a.output.parent/'jobs'/a.output.stem),'--log-level','info']
     if a.expression:sys.argv+=['--expression-restorer-model','live_portrait','--expression-restorer-factor',str(a.expression)]
     conda.setup()

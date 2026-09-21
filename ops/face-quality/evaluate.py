@@ -41,7 +41,7 @@ for path in paths:
   scores.append(float(np.dot(f.embedding_norm,source_face.embedding_norm)))
   x1,y1,x2,y2=np.rint(f.bounding_box).astype(int);pad=30;h,w=frames[idx].shape[:2]
   crop=frames[idx][max(0,y1-pad):min(h,y2+pad),max(0,x1-pad):min(w,x2+pad)]
-  tile=cv2.resize(crop,(240,280));cv2.putText(tile,f'{idx/30:.1f}s / {scores[-1]:.2f}',(8,22),cv2.FONT_HERSHEY_SIMPLEX,.5,(255,255,255),1);tiles.append(tile)
+  tile=cv2.resize(crop,(240,280));cv2.putText(tile,f'{idx/fps:.1f}s / {scores[-1]:.2f}',(8,22),cv2.FONT_HERSHEY_SIMPLEX,.5,(255,255,255),1);tiles.append(tile)
  header=np.zeros((48,240,3),np.uint8);cv2.putText(header,path.stem.replace('hyperswap_','hyper_')[:25],(5,28),cv2.FONT_HERSHEY_SIMPLEX,.48,(255,255,255),1);columns.append(np.concatenate([header,*tiles],axis=0))
  outside=[float(np.abs(x[650:].astype(float)-y[650:].astype(float)).mean()) for x,y in zip(original,frames)]
  stats=path.with_suffix('.stats.json');data=json.loads(stats.read_text()) if stats.exists() else {}

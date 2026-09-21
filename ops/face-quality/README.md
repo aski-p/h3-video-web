@@ -19,3 +19,19 @@ other footage. Do not treat female/largest-face selection as identity verificati
 Verify the selected person and each output visually before use.
 
 Tests: `python ops/face-quality/test_tone.py` in the FaceFusion environment.
+
+## Approved repeatable workflow
+
+`default-profile.json` is the saved default for local original-video face edits:
+HyperSwap 1b, reference-person tracking, original fps/resolution/audio, no extra
+expression restoration or tone correction, and account-text restoration when
+present. This does not turn H3 text-to-video synthesis into face replacement.
+
+Run `workflow.py --manifest <verified-NAS-manifest> --output-dir <new-directory>`
+using FaceFusion's Python environment. Local `~/.config/aski-face/workflow.json`
+holds the engine/NAS paths and SHA-256-pinned fixed portrait. Inspect each source
+and pass either `--no-account-overlay` or the source-specific `--overlay-roi x y w h`.
+The latter uses tracked LaMa inpainting, not rectangular blur. No coordinates are
+copied from another account. The output retains a pending visual review until
+inspected. Original provenance remains in `workflow.json`, even when account
+text is removed. Source video and portrait files are not uploaded to GitHub.
