@@ -62,8 +62,7 @@ def main():
         valid=skin>.8
         if np.count_nonzero(valid)>100:
             target_lab=cv2.cvtColor(target,cv2.COLOR_BGR2LAB).astype(float)
-            crop_crop=np.rint(crop).clip(0,255).astype(np.uint8)
-    lab=cv2.cvtColor(crop,cv2.COLOR_BGR2LAB).astype(float)
+            crop_lab=cv2.cvtColor(np.rint(crop).clip(0,255).astype(np.uint8),cv2.COLOR_BGR2LAB).astype(float)
             delta=np.median(target_lab[valid]-crop_lab[valid],axis=0).tolist()
             with lock:stats.append(delta)
         if tone is not None:crop=apply_tone(crop,skin,tone)
