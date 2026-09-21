@@ -3433,6 +3433,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
         elif p.startswith("/api/") and not self._require_origin():
             return
+        if p.startswith("/api/original-video/"):
+            import original_video
+            original_video.handle(self, p, send_json)
+            return
         if p == "/api/pgx-mode":
             send_json(self, {"ok": True, "mode": PGX_MODE.status()})
             return
@@ -3751,6 +3755,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self._require_worker():
                 return
         elif p.startswith("/api/") and not self._require_origin():
+            return
+        if p.startswith("/api/original-video/"):
+            import original_video
+            original_video.handle(self, p, send_json, post=True)
             return
         if p == "/api/ref/set":
             # 고정 참조 등록 (multipart/form-data: file=이미지)

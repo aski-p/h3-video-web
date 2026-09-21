@@ -92,6 +92,11 @@ def proxy(environ, start_response):
             start_response("401", [("Content-Type", "application/json"),
                                    ("Cache-Control", PRIVATE_CACHE_CONTROL)])
             return [err]
+    if path.startswith("/api/original-video/"):
+        token = os.environ.get("ORIGINAL_VIDEO_TOKEN", "")
+        if not token or not hmac.compare_digest(environ.get("HTTP_X_ASKI_ORIGINAL_TOKEN", ""), token):
+            start_response("401 Unauthorized", [("Content-Type", "application/json"), ("Cache-Control", "private, no-store")])
+            return [b'{"ok":false,"error":"unauthorized"}']
     body = b""
     if environ.get("CONTENT_LENGTH"):
         n = int(environ["CONTENT_LENGTH"])
@@ -108,7 +113,7 @@ def proxy(environ, start_response):
 
     # Playback and download must retain range semantics through Vercel.
     is_video = (path.startswith("/api/download/") or path.startswith("/api/view/")
-                or path.startswith("/api/worker/input/") or path == "/api/refv")
+                or path.startswith("/api/worker/input/") or path.startswith("/api/original-video/jobs/") or path == "/api/refv")
     cache_control = _cache_control_for_path(path)
     query = environ.get("QUERY_STRING", "")
     url = BACKEND + path + (("?" + query) if query else "")
@@ -117,6 +122,8 @@ def proxy(environ, start_response):
     headers = {"Content-Type": environ.get("CONTENT_TYPE", "application/json"),
                ORIGIN_HEADER: ORIGIN_SECRET,
                CLIENT_KEY_HEADER: _private_client_key(environ)}
+    if path.startswith("/api/original-video/"):
+        headers["X-Aski-Original-Token"] = os.environ["ORIGINAL_VIDEO_TOKEN"]
     if is_worker:
         # Authenticate the internet-facing worker with WORKER_SECRET above, then
         # mint the separate Vercel→PGX credential.  The external bearer must

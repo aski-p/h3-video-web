@@ -1,0 +1,12 @@
+[Unit]
+Description=Aski original-motion fixed-face video worker
+After=network-online.target
+[Service]
+Type=simple
+WorkingDirectory=/home/aski/h3-video-web-src
+ExecStart=/usr/bin/python3 /home/aski/h3-video-web-src/original_video.py
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+[Install]
+WantedBy=default.target
