@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "mode": "original-video-face-replacement",
+  "model": "hyperswap_1b_256",
+  "expression": 0,
+  "toneCorrection": false,
+  "testDurationSeconds": 4,
+  "referenceTimeSeconds": 1,
+  "overlayPolicy": "review-each-source-and-inpaint-tracked-account-text",
+  "preserve": ["source-motion", "source-fps", "source-resolution", "source-audio", "body", "clothing", "background"],
+  "requireVisualReview": true
+}
