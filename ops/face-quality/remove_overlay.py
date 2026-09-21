@@ -48,7 +48,7 @@ ex, ey = min(w,x+rw+120), min(h,y+rh+120)
 positions=[]
 for frame in frames:
     gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
-    match=cv2.matchTemplate(gray[sy:ey,sx:ex],template,cv2.TM_CCOEFF_NORMED)
+    match=cv2.matchTemplate((gray[sy:ey,sx:ex]>210).astype(np.uint8),(template>210).astype(np.uint8),cv2.TM_CCOEFF_NORMED)
     _,confidence,_,loc=cv2.minMaxLoc(match)
     if confidence < .55:
         raise ValueError(f'Overlay tracking confidence too low: {confidence}')
