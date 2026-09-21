@@ -674,6 +674,13 @@ footer{
 }
 
 </style>
+
+<style>
+.pgx-mode-panel{padding:16px;margin:14px 0;border:1px solid #9ba5b633;border-radius:20px;background:var(--card,transparent)}
+.pgx-mode-panel h2{font-size:16px;margin:0 0 10px}.pgx-mode-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.pgx-mode-options button{min-height:46px;white-space:nowrap;font-size:14px;padding:10px;border-radius:12px}.pgx-mode-options button[aria-pressed=true]{background:#087bf0;color:#fff}.pgx-mode-panel p{font-size:13px;margin:10px 0 0;line-height:1.5}
+#pgxModeDialog{width:min(400px,calc(100% - 40px));box-sizing:border-box;border:1px solid #8d99ac55;border-radius:20px;padding:24px;background:#f5f5f7;color:#1d1d1f}#pgxModeDialog::backdrop{background:#0008}#pgxModeDialog input{box-sizing:border-box;width:100%;min-height:46px;margin:10px 0}#pgxModeDialog .pgx-dialog-actions{display:flex;gap:10px;justify-content:flex-end}#pgxModeError{color:#b32929;font-size:13px}
+</style>
 </head>
 <body>
 <a class="skip-link" href="#main-controls">생성 설정으로 바로가기</a>
@@ -702,6 +709,20 @@ footer{
       <div class="sub2" id="csub"></div>
     </div>
   </header>
+<section class="pgx-mode-panel" aria-label="PGX 모델 모드">
+<h2>PGX 모델 모드</h2>
+<div class="pgx-mode-options" role="group" aria-label="모델 선택">
+<button type="button" data-pgx-mode="video" aria-pressed="false" disabled>영상 생성 모드</button>
+<button type="button" data-pgx-mode="qwen" aria-pressed="false" disabled>Qwen 3.8 전용</button>
+</div><p id="pgxModeStatus" role="status">서버 모드 확인 중…</p>
+<p>PGX의 모델을 전환합니다. RTX 5080은 그대로 유지됩니다.</p>
+</section>
+<dialog id="pgxModeDialog" aria-labelledby="pgxModeTitle">
+<form id="pgxModeForm"><h3 id="pgxModeTitle">PGX 모델 전환</h3><p id="pgxModeDescription"></p>
+<label for="pgxModePin">전환 비밀번호</label><input id="pgxModePin" type="password" inputmode="numeric" autocomplete="off" maxlength="128" required>
+<p id="pgxModeError" role="alert"></p><div class="pgx-dialog-actions"><button id="pgxModeClose" type="button">취소</button><button id="pgxModeConfirm" type="submit">전환</button></div></form>
+</dialog>
+
 
   <section class="worker-progress-board" id="workerProgressBoard" aria-label="생성 장비별 실시간 진행률" aria-live="polite">
     <article class="worker-live" id="pgxLiveProgress" data-worker="pgx">
@@ -725,7 +746,7 @@ footer{
   <!-- 모드 -->
   <div class="mtabs">
     <div class="mtab on" data-mode="t2v">문자 → 영상<span class="msub">T2V · 텍스트만으로 생성</span></div>
-    <div class="mtab" data-mode="i2v">이미지 → 영상<span class="msub">I2V · 첫 프레임 지정</span></div>
+    <div class="mtab" data-mode="i2v">이미지 → 영상<span class="msub">I2V · 인물 참조</span></div>
   </div>
 
   <!-- 신규 작업 라우팅: OFF=PGX, ON=RTX. 기존 양쪽 큐는 서로 독립 실행된다. -->
@@ -784,9 +805,11 @@ footer{
     </div>
   </div>
 
+  <p><a class="btn" data-portrait-library href="https://reelradar-5.vercel.app/?view=portraits" target="_blank" rel="noopener noreferrer" style="display:inline-flex;text-decoration:none;max-width:100%;white-space:normal">인물 사진 선택 · 즐겨찾기</a></p>
+
   <!-- I2V 이미지 -->
   <div class="card" id="imgwrap" style="display:none">
-    <h2>참조 이미지 (I2V · 첫 프레임)</h2>
+    <h2>인물 사진</h2>
     <div class="imgzone" id="imgzone">
       <div class="zicon">+</div>
       <div class="ztxt">클릭해서 이미지 선택<br>
@@ -800,14 +823,13 @@ footer{
   <!-- 고정 참조 (인물 고정) — I2V 모드에서만 표시 -->
   <div class="card" id="refwrap" style="display:none">
     <h2>고정 참조 (인물 · 사진/동영상)</h2>
-    <div class="hint" style="margin-bottom:10px">
-      참조를 한 번 등록하면 서버에 <b>영구 보관</b>됩니다. 삭제하지 않는 이상 다음 생성부터 자동으로 동일 인물이 유지되고 배경은 자유롭게 변경됩니다.
-    </div>
     <div class="chips" id="refkind" style="margin-bottom:10px">
       <div class="chip on" data-kind="image">이미지 참조</div>
       <div class="chip" data-kind="video">인물 동영상</div>
+      <div class="chip" data-kind="motion">인물 사진 + 동작 영상</div>
     </div>
     <div id="refbox" style="display:none;margin-top:8px"></div>
+    <div id="motionPerson" hidden><a data-portrait-library href="https://reelradar-5.vercel.app/?view=portraits" target="_blank" rel="noopener noreferrer" title="인물 보관함 열기"><img src="/api/ref" alt="등록된 인물 사진" style="width:120px;height:150px;object-fit:contain"></a></div>
     <div id="refzone" style="margin-top:8px">
       <div class="imgzone" id="refzone_inner" style="cursor:pointer">
         <div class="zicon">+</div>
@@ -817,7 +839,14 @@ footer{
       <input type="file" id="refvfile" accept="video/mp4,video/webm,video/quicktime" style="display:none">
     </div>
     <div class="hint" id="refhint" style="margin-top:8px">등록된 참조가 있으면 I2V 생성 시 자동으로 사용됩니다.</div>
-    <div class="hint" id="refvhint" style="margin-top:6px;display:none">인물 동영상은 첫 프레임 기준으로 인물 외관이 유지됩니다. mp4 · webm — 100MB 이하</div>
+    <div class="hint" id="refvhint" style="margin-top:6px;display:none">Ref2VA · 시간 정보 포함 영상 참조 · 모델 규격에 따라 끝 구간이 잘릴 수 있음</div>
+    <div class="field-row" id="motionRange" style="display:none;margin-top:8px;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;align-items:center"><label style="min-width:0">구간 시작(초)<input id="motionStart" type="number" min="0" step="0.1" value="0"></label><label style="min-width:0">구간 종료(초)<input id="motionEnd" type="number" min="2" step="0.1" value="5"></label><button type="button" class="btn" id="motionReplace">동작 영상 선택</button><span style="font-size:12px">PGX · 20 steps · LoRA OFF</span></div>
+    <div id="motionMasters" hidden style="margin-top:12px">
+      <p>얼굴: 사진 고정</p>
+        <p>복장·행동·카메라·배경: 동영상 고정</p>
+        <p>RTX 5080: 720×1280 · 20 steps · 2초 시험 통과 · 운영 연결 대기</p>
+      <span>세로 9:16 · 720×1280 · 20 steps</span>
+    </div>
   </div>
 
   <!-- 화면 비율 -->
@@ -852,13 +881,12 @@ footer{
   <div class="card">
     <h2>생성 방식</h2>
     <div class="chips" id="strategy">
-      <div class="chip on" data-strat="single">연속 단일 생성 <span class="sub">· 장면 연속성 우선</span></div>
-      <div class="chip" data-strat="split">세그먼트 분할 <span class="sub">· 정확한 길이 우선</span></div>
+      <button type="button" class="chip on" data-strat="single" aria-pressed="true">연속 단일 생성</button>
+      <button type="button" class="chip" data-strat="split" aria-pressed="false">세그먼트 분할</button>
     </div>
     <div class="chips" id="segsel" style="margin-top:10px">
-      <div class="chip on" data-s="4">4초/개</div>
-      <div class="chip" data-s="2">2초/개</div>
-      <div class="chip" data-s="8">8초/개</div>
+      <button type="button" class="chip on" data-s="4" aria-pressed="true">124프레임 · 약 5.17초</button>
+      <button type="button" class="chip" data-s="8" aria-pressed="false">192프레임 · 8초</button>
     </div>
     <div class="hint" id="strategyHint">한 번에 전체 프레임을 생성합니다.</div>
   </div>
@@ -876,7 +904,7 @@ footer{
         <input type="text" id="fname" value="video" placeholder="video">
       </div>
     </div>
-    <div class="hint">세그먼트마다 시드+1, +2… 순으로 적용되어 연속성이 유지됩니다.</div>
+    <div class="hint">분할 생성은 구간마다 시드가 달라집니다. 구간 경계의 동작·인물 연속성은 보장되지 않습니다.</div>
   </div>
 
   <!-- 샘플링 스텝 -->
@@ -926,7 +954,15 @@ footer{
       <span id="camStrengthVal" style="font-size:12px;min-width:42px;text-align:right;flex:0 0 auto">100%</span>
     </div>
     <div class="hint" id="camHint">카메라 움직임(팬·틸트·돌림 등) 표현을 강화합니다. H3 전용 LoRA입니다.</div>
+    <label for="cameraMovement">카메라 이동</label>
+    <select id="cameraMovement" disabled><option value="handheld">핸드헬드</option><option value="tracking">트래킹</option><option value="pan_left">왼쪽 팬</option><option value="pan_right">오른쪽 팬</option><option value="push_in">다가가기</option><option value="pull_out">멀어지기</option></select>
   </div>
+
+  <section id="extraLoraPanel" style="padding:16px 0;min-width:0">
+    <h2>추가 LoRA</h2>
+    <div id="extraLoraControls"></div>
+    <div id="loraInstallStatus" class="hint" role="status">LoRA 설치 상태 확인 중</div>
+  </section>
 
   <!-- 고정 설정 (접기 카드 — 접힌 상태에서는 카드 내부 스크립트가 화면에 표시되지 않음) -->
   <div class="card collapsible" id="cfgcard">
@@ -1068,6 +1104,7 @@ footer{
   </div>
 </div>
 
+<script src="/reference-contract.js"></script>
 <script>
 /* Preserve every existing control while grouping the dense card stack into a
    focused Configure / Operate workspace. This runs before behavior binding. */
@@ -1165,7 +1202,7 @@ async function refreshWorkerStatus(){
     const rtx=workers.rtx5080||{online:false,eligible:false,generation_verified:false};
     const rtxVerificationPending=rtx.online&&!rtx.generation_verified;
     const workerToggle=$('#workerToggle');
-    workerToggle.disabled=!rtx.eligible&&WORKER_TARGET==='pgx';
+    workerToggle.disabled=(MODE==='i2v'&&refKind==='motion')||(!rtx.eligible&&WORKER_TARGET==='pgx');
     workerToggle.setAttribute('aria-checked',WORKER_TARGET==='rtx5080'?'true':'false');
     $('#workerTargetLabel').textContent=WORKER_TARGET==='rtx5080'?'RTX 5080':'PGX Spark';
     $('#workerStateText').textContent=rtx.eligible
@@ -1185,11 +1222,13 @@ async function refreshWorkerStatus(){
   }
 }
 $('#workerToggle').onclick=()=>{
+  if(MODE==='i2v'&&refKind==='motion')return;
   const workerToggle=$('#workerToggle');
   if(workerToggle.disabled)return;
   WORKER_TARGET=WORKER_TARGET==='rtx5080'?'pgx':'rtx5080';
   workerToggle.setAttribute('aria-checked',WORKER_TARGET==='rtx5080'?'true':'false');
   $('#workerTargetLabel').textContent=WORKER_TARGET==='rtx5080'?'RTX 5080':'PGX Spark';
+  updateStrategyHint();
   refreshWorkerStatus();
 };
 
@@ -1305,10 +1344,42 @@ const I2V_REFERENCE_MAX_SECONDS=15;
 let imgUploadSeq=0, imgUploading=false, imgUploadController=null;
 let imgSha256='', imgSize=0, imgLastModified=0;
 let refKind='image', refvActive=false, refvMeta=null;
+let motionPreviousSteps=null;
+let refvUploading=false;
+let previousManualPrompt=null;
+function refreshMotionContract(){
+  const active=MODE==='i2v'&&refKind==='motion';
+  const area=$('#prompt');
+  if(active){
+    if(previousManualPrompt===null)previousManualPrompt=area.value;
+    area.value=H3ReferenceContract.build().prompt;
+  }else if(previousManualPrompt!==null){area.value=previousManualPrompt;previousManualPrompt=null;}
+  area.readOnly=active;
+  $('#motionMasters').hidden=!active;
+  $('#ar').closest('.card').hidden=active;
+  $('#refhint').textContent=active?'얼굴: 사진 · 복장·행동·카메라·배경: 동영상':'등록된 참조가 있으면 I2V 생성 시 자동으로 사용됩니다.';
+}
+function syncMotionUI(){
+  const active=MODE==='i2v'&&refKind==='motion';
+  $('#scriptLoraAuto').disabled=active;
+  try{inspectScriptLora();}catch{}
+  if(active){
+    if(motionPreviousSteps===null)motionPreviousSteps=STEPS;
+    STEPS=20;WORKER_TARGET='pgx';STRATEGY='single';
+    $('#workerTargetLabel').textContent='PGX Spark';
+  }else if(motionPreviousSteps!==null){STEPS=motionPreviousSteps;motionPreviousSteps=null;}
+  $('#steps').value=STEPS;$('#stepval').textContent=STEPS;$('#steps').disabled=active;
+  for(const selector of ['#realismToggle','#camOffChip'])$(selector).closest('.card').hidden=active;
+  updateStrategyHint();
+  $('#extraLoraPanel').hidden=active;
+  $('#motionPerson').hidden=!(active&&refActive&&!imgNonce);
+  refreshMotionContract();
+}
 
 function renderSelectedReference(){
   refClearUI();
-  if(refKind==='video') refvRender();
+  syncMotionUI();
+  if(refKind==='video'||refKind==='motion') refvRender();
   else refRender();
 }
 function refreshReferenceState(){
@@ -1327,38 +1398,47 @@ document.querySelectorAll('#refkind .chip').forEach(c=>c.onclick=()=>{
   document.querySelectorAll('#refkind .chip').forEach(x=>x.classList.remove('on'));
   c.classList.add('on');
   refKind=c.dataset.kind;
+  syncMotionUI();
   // zone 텍스트 업데이트
   const ztxt=document.getElementById('refzone_txt');
   if(ztxt){
-    if(refKind==='video'){
-      ztxt.innerHTML='고정 참조 동영상 등록하기<br><small>인물 동영상 — 100MB 이하';
+    if(refKind==='video'||refKind==='motion'){
+      ztxt.innerHTML=refKind==='motion'?'동작 참조 동영상 등록하기<br><small>2~15초 구간 · 100MB 이하':'고정 참조 동영상 등록하기<br><small>인물 동영상 — 100MB 이하';
     } else {
       ztxt.innerHTML='고정 참조 이미지 등록하기<br><small>인물 사진 — 15MB 이하';
     }
   }
   // 탭 전환으로 고정 상태를 지우지 않고 서버의 영구 상태를 다시 동기화한다.
+  const range=document.getElementById('motionRange'); if(range) range.style.display=refKind==='motion'?'grid':'none';
   refreshReferenceState().then(renderSelectedReference);
 });
 
 // 고정 참조 영상 업로드
-function refvUpload(file){
+async function refvUpload(file){
   if(!file) return;
+  if(refvUploading)return;
   const box=document.getElementById('refbox');
   const zone=document.getElementById('refzone');
+  const start=Number($('#motionStart').value),end=Number($('#motionEnd').value);
+  if(refKind==='motion'&&(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end-start<2||end-start>15)){
+    box.style.display='block';box.textContent='시작·종료 구간은 2~15초여야 합니다.';return;
+  }
+  refvUploading=true;refvActive=false;refvMeta=null;
+  box.style.color='';
   box.style.display='block';
   zone.style.display='none';
   box.innerHTML='<span class="spin"></span> 고정 동영상 참조 등록 중…';
   const fd=new FormData();
   fd.append('file', file, file.name);
-  fetch('/api/refv/set',{method:'POST', body:fd})
-    .then(r=>r.json())
-    .then(d=>{
-      if(!d.ok){ box.innerHTML=`<span style="color:var(--err)">${d.error||'등록 실패'}</span>`; zone.style.display=''; box.style.display='none'; return; }
+  try{
+      const r=await fetch('/api/refv/set'+(refKind==='motion'?`?start=${start}&end=${end}`:''),{method:'POST',body:fd});
+      const d=await r.json().catch(()=>({ok:false,error:`서버 응답 오류 (HTTP ${r.status})`}));
+      if(!r.ok||!d.ok)throw new Error(d.error||`등록 실패 (HTTP ${r.status})`);
       refvActive=true;
       refvMeta=d.refv||null;
       refvRender();
-    })
-    .catch(err=>{ box.innerHTML=`<span style="color:var(--err)">${String(err)}</span>`; zone.style.display=''; box.style.display='none'; });
+  }catch(err){box.style.display='block';box.style.color='var(--err)';box.textContent='동영상 등록 실패: '+err.message;zone.style.display='';}
+  finally{refvUploading=false;document.getElementById('refvfile').value='';}
 }
 function refvRender(){
   const box=document.getElementById('refbox');
@@ -1366,7 +1446,7 @@ function refvRender(){
   const hint=document.getElementById('refhint');
   const vhint=document.getElementById('refvhint');
   // 이미지 참조로 전환 중이면 영상 UI는 표시하지 않음
-  if(refKind!=='video'){
+  if(refKind!=='video'&&refKind!=='motion'){
     box.style.display='none';
     if(vhint) vhint.style.display='none';
     return;
@@ -1376,14 +1456,14 @@ function refvRender(){
     zone.style.display='none';
     const url=`/api/refv?t=${Date.now()}`;
     const dur=refvMeta && refvMeta.duration_s ? `${refvMeta.duration_s}s` : '';
-    box.innerHTML=`<div class="imghost"><video src="${url}" controls style="width:160px;max-width:100%;height:auto;border-radius:var(--r-sm);background:#000"></video><div class="imgmeta">고정 동영상 참조<br><small id="refvmeta">${(refvMeta && refvMeta.size ? (refvMeta.size/1048576).toFixed(1)+'MB' : '?')}${dur ? ' · '+dur : ''} · 첫 프레임 기준 인물 유지</small></div><button class="btn-rmimg" id="rmrefv">삭제</button></div>`;
+    box.innerHTML=`<div class="imghost"><video src="${url}" controls style="width:160px;max-width:100%;height:auto;border-radius:var(--r-sm);background:#000"></video><div class="imgmeta">${refKind==='motion'?'동작·순서·타이밍 참조':'고정 동영상 참조'}<br><small id="refvmeta">${(refvMeta && refvMeta.size ? (refvMeta.size/1048576).toFixed(1)+'MB' : '?')}${dur ? ' · '+dur : ''}${refKind==='motion'?' · 시간 정보 포함':' · 첫 프레임 기준 인물 유지'}</small></div><button class="btn-rmimg" id="rmrefv">삭제</button></div>`;
     if(vhint) vhint.style.display='';
     box.querySelector('#rmrefv').onclick=refvDelete;
     fetch('/api/refv/status').then(r=>r.json()).then(d=>{
       const r=d.refv;
       if(r){
         const mm=document.getElementById('refvmeta');
-        if(mm) mm.textContent=`${r.name||'동영상'} · ${(r.size/1048576).toFixed(1)}MB${r.duration_s ? ' · '+r.duration_s+'s' : ''} · 첫 프레임 기준 인물 유지`;
+        if(mm) mm.textContent=`${r.name||'동영상'} · ${(r.size/1048576).toFixed(1)}MB${r.duration_s ? ' · '+r.duration_s+'s' : ''}${refKind==='motion'?' · 시간 정보 포함':' · 첫 프레임 기준 인물 유지'}`;
       }
     }).catch(()=>{});
   } else {
@@ -1410,11 +1490,14 @@ function updateStrategyHint(){
   const hint=document.getElementById('strategyHint');
   const segsel=document.getElementById('segsel');
   if(!hint) return;
+  const motion=MODE==='i2v'&&refKind==='motion';
+  document.querySelectorAll('#strategy .chip').forEach(c=>{c.classList.toggle('on',c.dataset.strat===STRATEGY);c.setAttribute('aria-pressed',String(c.dataset.strat===STRATEGY));c.disabled=motion&&c.dataset.strat==='split';});
+  document.querySelectorAll('#segsel .chip').forEach(c=>{c.classList.toggle('on',Number(c.dataset.s)===SEG_SECONDS);c.setAttribute('aria-pressed',String(Number(c.dataset.s)===SEG_SECONDS));c.disabled=WORKER_TARGET==='rtx5080'&&Number(c.dataset.s)!==4;});
   if(STRATEGY==='single'){
-    hint.textContent='한 번에 전체 프레임을 생성합니다. 장면 연속성이 최우선입니다. 60초 초과 시 모델 오버플로우 위험.';
+    hint.textContent=motion?'Ref2VA · PGX · 단일 생성 고정':WORKER_TARGET==='rtx5080'?'RTX 5080 · 최대 15초를 한 번에 생성해 장면 연속성을 우선합니다.':'전체 프레임을 한 번에 생성해 장면 연속성을 우선합니다.';
     if(segsel) segsel.style.display='none';
   } else {
-    hint.textContent=''+SEG_SECONDS+'초씩 분할 생성 후 자동으로 이어붙입니다. 정확한 길이 보장, 세그먼트 경계에서 경직 가능.';
+    hint.textContent=(SEG_SECONDS===8?'최대 192프레임(8초)':'최대 124프레임(약 5.17초)')+'씩 별도로 생성·연결합니다. 마지막 구간은 요청 길이에 맞춰 자릅니다. 구간 경계의 연속성은 보장되지 않습니다.';
     if(segsel) segsel.style.display='flex';
   }
 }
@@ -1445,7 +1528,7 @@ function syncI2VDurationLimit(){
   }
   const hint=$('#durationHint');
   if(hint) hint.textContent=isI2V
-    ? `사진 I2V는 인물 참조 품질을 위해 최대 ${I2V_REFERENCE_MAX_SECONDS}초까지만 생성합니다.`
+    ? `사진 I2V는 최대 ${I2V_REFERENCE_MAX_SECONDS}초입니다. RTX 5080도 10·15초 연속 생성이 가능하도록 요청하며, 메모리 부족 시 실패할 수 있습니다.`
     : '세그먼트 분할 방식: 길이만큼 세그먼트 분할. 단일 생성: 한 번에 전체 프레임 생성.';
 }
 
@@ -1454,14 +1537,57 @@ document.querySelectorAll('#dur .chip').forEach(c=>c.onclick=()=>{
   if(c.getAttribute('aria-disabled')==='true') return;
   document.querySelectorAll('#dur .chip').forEach(x=>x.classList.remove('on'));
   c.classList.add('on'); S=+c.dataset.s;
+  updateStrategyHint();
 });
 
 // 카메라 모션 LoRA (H3 전용). UI는 퍼센트, API/워크플로는 0.0~2.0 배율이다.
+const EXTRA_H3_LORAS=[
+  {id:'better_motion',label:'Better Human Motion',strength:.6},
+  {id:'insta_tiktok',label:'Insta/TikTok Aesthetics',strength:.6},
+  {id:'motion_repair',label:'Motion Continuity Repair',strength:.9},
+  {id:'spatial_physics',label:'Spatial Physics',strength:.4,version:'3000'}
+];
+$('#extraLoraControls').innerHTML=EXTRA_H3_LORAS.map(item=>`<div data-h3-lora="${item.id}" style="padding:12px 0;border-bottom:1px solid #d4d4d8;min-width:0">
+  <label style="display:flex;gap:8px;align-items:center;overflow-wrap:anywhere"><input type="checkbox" data-enabled aria-label="${item.label}">${item.label}</label>
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
+    <input data-strength type="range" min="0" max="2" step="0.05" value="${item.strength}" aria-label="${item.label} 강도" disabled style="flex:1;min-width:100px;max-width:100%">
+    <output style="width:40px;text-align:right">${item.strength.toFixed(2)}</output>
+    ${item.version?'<select data-version aria-label="Spatial Physics 버전" disabled><option value="1000">1000</option><option value="3000" selected>3000</option></select>':''}
+  </div></div>`).join('');
+document.querySelectorAll('[data-h3-lora]').forEach(row=>{
+  row.querySelector('[data-enabled]').onchange=()=>row.querySelectorAll('[data-strength],[data-version]').forEach(input=>input.disabled=!row.querySelector('[data-enabled]').checked);
+  row.querySelector('[data-strength]').oninput=()=>row.querySelector('output').textContent=Number(row.querySelector('[data-strength]').value).toFixed(2);
+});
+function readH3LoraOptions(){
+  const options={realism:{enabled:REALISM_LORA,strength:REALISM_STRENGTH},camera_motion:{enabled:!!CAM_MOTION,strength:CAM_STRENGTH,version:CAM_MOTION||'1000',movement:$('#cameraMovement').value}};
+  document.querySelectorAll('[data-h3-lora]').forEach(row=>{
+    const item={enabled:row.querySelector('[data-enabled]').checked,strength:Number(row.querySelector('[data-strength]').value)};
+    const version=row.querySelector('[data-version]');if(version)item.version=version.value;
+    options[row.dataset.h3Lora]=item;
+  });
+  return options;
+}
+fetchJsonWithTimeout('/api/workers',{},10000).then(data=>{
+  const catalog=data.lora_catalog;
+  if(!catalog?.items?.length)throw new Error('catalog unavailable');
+  $('#loraInstallStatus').textContent=catalog.items.map(item=>{
+    const status=['pgx','rtx5080'].map(target=>{
+      const installed=item.installed?.[target];
+      const current=catalog.devices?.[target]?.inventory_current;
+      const present=typeof installed==='object'?Object.values(installed).every(Boolean):installed;
+      return (target==='pgx'?'PGX':'5080')+' '+(!current?'확인 대기':present?'설치됨':'미설치');
+    }).join(' · ');
+    return item.label+': '+status;
+  }).join('\n');
+  $('#loraInstallStatus').style.whiteSpace='pre-line';
+}).catch(()=>{$('#loraInstallStatus').textContent='LoRA 설치 상태 확인 실패';});
+
 function percentToLoraStrength(percent){
   return Math.max(0, Math.min(200, Number(percent)||0))/100;
 }
 function setCamMotion(val){
   CAM_MOTION=val;
+  $('#cameraMovement').disabled=!val;
   const chips={off:$('#camOffChip'), '1000':$('#cam1000Chip'), '3000':$('#cam3000Chip')};
   Object.keys(chips).forEach(k=>{
     const on=(k===val)||(k==='off'&&val==='');
@@ -1620,6 +1746,7 @@ updatePromptCardUI();
 
 document.querySelectorAll('.mtab').forEach(t=>t.onclick=()=>{
   MODE=t.dataset.mode;
+  syncMotionUI();
   document.querySelectorAll('.mtab').forEach(x=>x.classList.remove('on'));
   t.classList.add('on');
   // I2V 카드: i2v 모드일 때만 표시, t2v면 숨김
@@ -1737,7 +1864,7 @@ function refRender(){
     box.style.display='block';
     zone.style.display='none';
     box.innerHTML=`<div class="imghost">
-      <img id="refprev" src="/api/ref" alt="고정 참조">
+      <a data-portrait-library href="https://reelradar-5.vercel.app/?view=portraits" target="_blank" rel="noopener noreferrer" title="인물 보관함 열기"><img id="refprev" src="/api/ref" alt="고정 참조"></a>
       <div class="imgmeta" id="refmeta"></div>
       <button class="btn-rmimg" id="refdel">✕ 삭제</button>
     </div>`;
@@ -1762,12 +1889,13 @@ function refDelete(){
     .then(d=>{ if(d.ok){ refActive=false; refRender(); } });
 }
 function openReferencePicker(){
-  const input=document.getElementById(refKind==='video' ? 'refvfile' : 'reffile');
+  const input=document.getElementById(refKind==='video'||refKind==='motion' ? 'refvfile' : 'reffile');
   // iOS는 같은 파일을 다시 고르면 change를 발생시키지 않으므로 열기 전에 초기화한다.
   input.value='';
   input.click();
 }
 document.getElementById('refzone_inner').onclick=openReferencePicker;
+document.getElementById('motionReplace').onclick=openReferencePicker;
 document.getElementById('reffile').onchange=e=>{
   const f=e.target.files[0];
   if(!f) return;
@@ -2064,7 +2192,7 @@ function setJobUI(j){
     $('#eta').textContent=unavailable?'ComfyUI 상태 확인 불가':(measuredEta!==null?fmtEta(measuredEta)+' 남음':'실측 속도 산정 중');
     $('#jobid').textContent=j.id;
     $('#seedv').textContent=(j.seed!=null&&j.seed>=0)?j.seed:'랜덤';
-    const stratLine=(j.strategy&&j.strategy!=='single')?('세그먼트 '+(j.segments||1)+'개 · '):(j.strategy==='single'?'단일생성 · ':'');
+    const stratLine=generationPlanText(j)+' · ';
     m.innerHTML='<b>'+fmtElapsed(p.elapsed)+'</b> 경과 · '+
       (hasMeasuredProgress?'실측 '+Math.round(measuredPct)+'%':'샘플러 준비 중')+'<br>'+
       stratLine+
@@ -2085,7 +2213,7 @@ function setJobUI(j){
     const dl=media.download;
     const view=media.view;
     const nasWarn=(j.nas_saved===false)?'<br><span style="color:var(--warn)">NAS 저장 실패 — 로컬에만 저장됨</span>':'';
-    const stratLine=(j.strategy==='single')?'단일생성 · ':'세그먼트 '+(j.segments||1)+'개 ('+(j.cfg&&j.cfg.seg_seconds?j.cfg.seg_seconds:SEG_SECONDS)+'초/개) · ';
+    const stratLine=generationPlanText(j)+' · ';
     m.innerHTML='소요 '+fmtElapsed(j.elapsed)+' · '+activeWorker+' · '+stratLine+(j.total_seconds||S)+'초 · 24fps<br>'+
       (j.nas_saved===false?'NAS 저장 실패 · ':'NAS 저장 완료 · ')+'파일: '+(j.file||'')+nasWarn;
     const resultPlayer=$('#player');
@@ -2169,6 +2297,7 @@ function parseLoraBlock(text){
 }
 function loraBlockSummary(options){return Object.entries(options).map(([id,x])=>id+(x.version?' '+x.version:'')+': '+(x.enabled?x.strength:'OFF')+(x.movement?' · '+x.movement:'')).join(' / ');}
 function inspectScriptLora(){
+ if(MODE==='i2v' && refKind==='motion'){$('#scriptLoraPreview').textContent='동작 영상 참조 모드는 LoRA OFF 고정입니다.';return null;}
  const checked=$('#scriptLoraAuto').checked;
  try {const parsed=checked?parseLoraBlock($('#prompt').value):null;$('#scriptLoraPreview').textContent=parsed?loraBlockSummary(parsed.options):'수동 LoRA 설정을 사용합니다.';return parsed;}
  catch(e){$('#scriptLoraPreview').textContent=e.message;throw e;}
@@ -2177,13 +2306,16 @@ $('#scriptLoraAuto').addEventListener('change',()=>{try{inspectScriptLora();}cat
 $('#prompt').addEventListener('input',()=>{if($('#scriptLoraAuto').checked)try{inspectScriptLora();}catch{}});
 // 생성 버튼
 $('#go').onclick=async()=>{
+  if(WORKER_TARGET==='rtx5080'&&((STRATEGY==='single'&&S>15)||(STRATEGY==='split'&&SEG_SECONDS!==4))){alert('RTX 5080은 단일 최대 15초 또는 124프레임 분할만 지원합니다. 생성 방식이나 장비를 직접 변경해 주세요.');return;}
   let scriptLora;try{scriptLora=inspectScriptLora();}catch(e){alert(e.message);return;}
   const prompt=scriptLora?scriptLora.prompt:$('#prompt').value.trim();
+  if(refvUploading){alert('동작 참조 동영상 등록이 진행 중입니다');return;}
   if(prompt.length<3){ alert('프롬프트를 3자 이상 입력하세요'); return; }
   if(MODE==='i2v' && window.__imgBlob && (imgUploading || !imgNonce)){
     alert('선택한 이미지 업로드·검증이 끝날 때까지 잠시 기다려 주세요'); return;
   }
-  if(MODE==='i2v' && !imgNonce && !refActive){ alert('I2V 모드: 이미지를 업로드하거나 고정 참조를 등록해 주세요'); return; }
+  if(MODE==='i2v' && refKind==='motion' && ((!imgNonce && !refActive) || !refvActive)){ alert('인물 사진과 2~15초 동작 참조 동영상을 모두 준비해 주세요'); return; }
+  if(MODE==='i2v' && refKind!=='motion' && !imgNonce && !refActive){ alert('I2V 모드: 이미지를 업로드하거나 고정 참조를 등록해 주세요'); return; }
   const negative=$('#negative').value.trim();
   const seed=parseInt($('#seed').value)||-1;
   const fname=$('#fname').value.trim()||'video';
@@ -2194,9 +2326,19 @@ $('#go').onclick=async()=>{
   $('#bar').style.width='0%'; $('#pct').textContent='—'; $('#eta').textContent='진행 정보 수신 대기';
   setProgressCharacter('request-'+Date.now(),'running',null);
 
-  const body={prompt, negative, width:W, height:H, seconds:S, steps:STEPS, strategy:STRATEGY, seg_seconds:SEG_SECONDS, seed, mode:MODE, filename:fname, realism_lora:REALISM_LORA, cam_motion:CAM_MOTION};
+  const body={prompt, negative, width:W, height:H, seconds:S, steps:STEPS, strategy:STRATEGY, strategy_contract:1, seg_seconds:SEG_SECONDS, seed, mode:MODE, filename:fname, realism_lora:REALISM_LORA, cam_motion:CAM_MOTION, lora_options:readH3LoraOptions()};
   if(scriptLora){body.lora_options=scriptLora.options;body.realism_lora=scriptLora.options.realism.enabled;body.realism_strength=scriptLora.options.realism.strength;body.cam_motion=scriptLora.options.camera_motion.enabled?scriptLora.options.camera_motion.version:'';body.cam_strength=scriptLora.options.camera_motion.strength;}
   body.worker_target=WORKER_TARGET;
+  if(MODE==='i2v' && refKind==='motion'){
+    const contract=H3ReferenceContract.build();
+    body.prompt=contract.prompt;body.negative=contract.negative;
+    body.width=720;body.height=1280;
+    body.reference_contract=contract.version;
+    body.clothing_master=contract.clothing;body.background_master=contract.background;
+    body.worker_target='pgx';body.steps=20;body.strategy='single';
+    body.realism_lora=false;body.cam_motion='';body.lora_options={};
+    body.video_sha256=refvMeta?.sha256||'';
+  }
   if(!scriptLora && REALISM_LORA) body.realism_strength=REALISM_STRENGTH;
   if(!scriptLora && CAM_MOTION) body.cam_strength=CAM_STRENGTH;
   if(MODE==='i2v'){
@@ -2206,8 +2348,9 @@ $('#go').onclick=async()=>{
       body.image_size=imgSize;
       body.image_last_modified=imgLastModified;
       body.image_sha256=imgSha256;
+      if(refKind==='motion') body.ref_mode='ref2va';
     } else if(refActive){
-      body.ref_mode='fixed';  // 고정 참조 자동 사용 (인물 유지)
+      body.ref_mode=refKind==='motion'?'ref2va':'fixed';
     } else {
       alert('I2V 모드: 이미지를 업로드하거나 고정 참조를 등록해 주세요');
       return;
@@ -2258,6 +2401,13 @@ $('#stop').onclick=async()=>{
 
 // 스크립트 팝업 (Modal)
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
+function generationPlanText(j){
+  const c=j.cfg||{},a=c.applied_generation_options||{},requested=c.requested_generation_options?.strategy;
+  const selected=a.strategy||c.strategy||j.strategy;
+  const name=x=>x==='single'?'연속 단일 생성':x==='split'?'세그먼트 분할':'기록 없음';
+  const frames=a.segment_frames||c.segment_frames;
+  return '요청: '+name(requested)+' · 적용: '+name(selected)+' · '+(j.segments||a.segments||'?')+'회'+(frames?' · '+frames.join('+')+'프레임':'');
+}
 function showPrompt(j){
   if(!j||!j.prompt) return;
   const c=j.cfg||{};
@@ -2269,11 +2419,14 @@ function showPrompt(j){
     const cfgLines=[
       c.width+'×'+c.height+' · '+(j.mode||c.mode||'t2v')+' · '+(c.strategy==='single'?'단일생성':'세그먼트 분할')+' · seed '+(j.seed!=null&&j.seed>=0?j.seed:(c.seed!=null?c.seed:'-1'))+' · '+(j.steps||c.steps||6)+'스텝 · '+(j.segments||1)+'세그먼트 · 24fps'
     ];
-    if(c.strategy!=='single'&&c.seg_seconds) cfgLines.push((c.seg_seconds)+'초/세그먼트');
+    cfgLines.push(generationPlanText(j));
     cfgLines.push('체크포인트: minimax_h3_fl2va_pruned_int8_convrot.safetensors');
     cfgLines.push('LoRA: minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors (strength 1.0)');
     cfgLines.push(c.realism_lora ? '리얼리즘 LoRA: h3-realism-people-t2v-i2v-r2v.safetensors (strength '+(c.realism_strength!=null?c.realism_strength:1.0)+')' : '리얼리즘 LoRA: 사용 안 함');
     const cStrength=c.cam_motion?(c.cam_strength!=null?c.cam_strength:1.0):null; cfgLines.push(c.cam_motion==='1000' ? '카메라 모션 LoRA: cam_motion_1000.safetensors (strength '+cStrength+')' : c.cam_motion==='3000' ? '카메라 모션 LoRA: cam_motion_3000.safetensors (strength '+cStrength+')' : '카메라 모션 LoRA: 사용 안 함');
+    for(const [id,option] of Object.entries(c.lora_options||{})){
+      if(option.enabled)cfgLines.push(id+': strength '+option.strength+(option.version?' · '+option.version:'')+(option.movement?' · '+option.movement:''));
+    }
     cfgLines.push('인코더: Qwen3-VL 32B (PGX 로컬)');
     cfgLines.push('저장: NAS (aski_main/comfyui/h3_videos)');
     cfgLines.push(c.strategy==='single'?'분할: 단일 생성':'분할: 선택된 세그먼트 길이 → 자동 ffconcat 스티치');
@@ -2517,7 +2670,7 @@ function renderTracking(j){
   h+=trackValue('해상도',c.width&&c.height?c.width+'×'+c.height:null);
   h+=trackValue('총 길이',j.total_seconds||c.seconds?(j.total_seconds||c.seconds)+'초':null);
   h+=trackValue('샘플링',((j.steps||c.steps)||'—')+' step · seed '+seed);
-  h+=trackValue('생성 방식',strategy+(c.strategy!=='single'?(j.segments?' · '+j.segments+' 세그먼트':'')+(c.seg_seconds?' · '+c.seg_seconds+'초/세그먼트':''):''));
+  h+=trackValue('생성 방식',generationPlanText(j));
   const camLabel=c.cam_motion==='1000'?'카메라 LoRA(경도) ':c.cam_motion==='3000'?'카메라 LoRA(강도) ':'';
   const cStrengthV=c.cam_motion?(c.cam_strength!=null?c.cam_strength:1.0):null;
   const rStrength=c.realism_lora?(c.realism_strength!=null?c.realism_strength:1.0):null;
@@ -2789,7 +2942,7 @@ function loadRecent(){
               :''}
             ${res?' · '+res:''}
             ${j.total_seconds?' · '+j.total_seconds+'초':''}
-            ${c.strategy===undefined?'':' · '+(c.strategy==='single'?'단일':'분할 '+(j.segments||1)+'개'+((c.seg_seconds)?' · '+c.seg_seconds+'초/개':''))}
+            ${c.strategy===undefined?'':' · '+esc(generationPlanText(j))}
             ${c.steps&&c.steps!=6?' · '+c.steps+'스텝':''}
             ${mode==='I2V'?' · I2V':''}
             ${size?' · '+size:''}
@@ -2827,6 +2980,21 @@ refreshPowerStatus(); setInterval(refreshPowerStatus, 5000);
 
 // 고정 이미지와 동영상을 모두 복원한다.
 refreshReferenceState().then(renderSelectedReference);
+// The shared picker stores the fixed reference; returning only refreshes its preview.
+let portraitLibraryOpened=false;
+document.addEventListener('click',event=>{if(event.target.closest('[data-portrait-library]'))portraitLibraryOpened=true;});
+window.addEventListener('focus',async()=>{
+  if(!portraitLibraryOpened)return;
+  portraitLibraryOpened=false;
+  try{
+    const response=await fetch('/api/ref/status',{cache:'no-store',signal:AbortSignal.timeout(12000)});
+    if(!response.ok)return;
+    const data=await response.json();refActive=!!data.ref;
+    if(refKind==='image')refRender();
+    if(refKind==='motion')$('#motionPerson').hidden=!(refActive&&!imgNonce);
+    document.querySelectorAll('#refprev,#motionPerson img').forEach(img=>img.src='/api/ref?v='+Date.now());
+  }catch{}
+});
 // 새로고침/일시적 네트워크 단절 뒤에도 서버 작업을 다시 추적한다.
 const recoveredJob=localStorage.getItem('h3-active-job');
 if(recoveredJob){
@@ -2835,6 +3003,21 @@ if(recoveredJob){
   scheduleJobPoll(0);
 }
 </script>
+
+<script>
+(()=>{
+ const buttons=[...document.querySelectorAll('[data-pgx-mode]')],status=document.getElementById('pgxModeStatus'),dialog=document.getElementById('pgxModeDialog'),pin=document.getElementById('pgxModePin'),error=document.getElementById('pgxModeError');
+ let target=null,pending=false,refreshBusy=false;
+ const render=m=>{for(const b of buttons){b.disabled=pending||!m.configured||m.switching||b.dataset.pgxMode===m.mode;b.setAttribute('aria-pressed',String(b.dataset.pgxMode===m.mode));}status.textContent=m.message||'서버 상태 확인 필요';};
+ async function request(body){const r=await fetch('/api/pgx-mode',{method:body?'POST':'GET',cache:'no-store',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(15000)});let d;try{d=await r.json();}catch{throw Error('PGX 모드 전환 서버 설치 또는 연결이 필요합니다.');}if(!r.ok||!d.ok)throw Error(d.error||'서버 연결 실패');return d.mode;}
+ async function refresh(){if(pending||refreshBusy)return;refreshBusy=true;try{const m=await request();if(!pending)render(m);}catch(e){if(!pending)render({configured:false,message:e.message});}finally{refreshBusy=false;}}
+ buttons.forEach(b=>b.onclick=()=>{target=b.dataset.pgxMode;pin.value='';error.textContent='';document.getElementById('pgxModeDescription').textContent=target==='qwen'?'ComfyUI를 종료하고 Qwen 3.8을 불러옵니다. PGX에 생성·대기 작업이 있으면 전환하지 않습니다.':'Qwen 3.8을 종료하고 ComfyUI를 시작합니다. 진행 중인 Qwen 응답은 중단될 수 있습니다.';dialog.showModal();pin.focus();});
+ document.getElementById('pgxModeClose').onclick=()=>dialog.close();dialog.addEventListener('close',()=>{pin.value='';});
+ document.getElementById('pgxModeForm').onsubmit=async e=>{e.preventDefault();if(pending)return;pending=true;document.getElementById('pgxModeConfirm').disabled=true;try{const m=await request({mode:target,pin:pin.value});pin.value='';dialog.close();render(m);}catch(e){error.textContent=e.message;pin.value='';}finally{pending=false;document.getElementById('pgxModeConfirm').disabled=false;refresh();}};
+ refresh();setInterval(refresh,10000);
+})();
+</script>
 </body>
 </html>
+
 
