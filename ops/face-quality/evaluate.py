@@ -25,7 +25,7 @@ def read(path):
   out.append(f)
  cap.release();return out,fps
 original,fps=read(a.source);indices=[0,30,60,90,119] if len(original)==120 else np.linspace(0,len(original)-1,5,dtype=int).tolist();report={};columns=[]
-paths=[a.source]+[x for x in sorted(a.folder.glob('*.mp4')) if x.stem not in ('comparison','best')]
+paths=[a.source]+[x for x in sorted(a.folder.glob('*.mp4')) if x.stem not in ('comparison','best') and x.resolve()!=a.source.resolve()]
 for path in paths:
  frames,rate=read(path)
  if len(frames)!=len(original) or rate!=fps or frames[0].shape!=original[0].shape:raise ValueError('timing or dimensions differ: '+path.name)
