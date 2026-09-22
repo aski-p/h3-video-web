@@ -28,7 +28,8 @@ def graph(image,video,prefix,frames=121):
       '14':node('CLIPVisionEncode',clip_vision=['13',0],image=['10',0],crop='none'),
       '15':node('WanAnimate2ToVideo',positive=['6',0],negative=['7',0],vae=['8',0],width=432,height=768,length=frames,batch_size=1,video_frame_offset=0,pose_strength=1,pose_start_percent=0,pose_end_percent=1,reference_image_strength=1,reference_image=['10',0],pose_video=['12',0],clip_vision_output=['14',0]),
       '16':node('KSampler',model=['4',0],seed=9222026,steps=6,cfg=1,sampler_name='lcm',scheduler='simple',positive=['15',0],negative=['15',1],latent_image=['15',2],denoise=1),
-      '17':node('VAEDecode',samples=['16',0],vae=['8',0]),
+      '21':node('TrimVideoLatent',samples=['16',0],trim_amount=['15',3]),
+      '17':node('VAEDecode',samples=['21',0],vae=['8',0]),
       '18':node('ImageFromBatch',image=['17',0],batch_index=0,length=frames-1),
       '19':node('CreateVideo',images=['18',0],fps=30),
       '20':node('SaveVideo',video=['19',0],filename_prefix=prefix,format='mp4',**{'format.codec':'h264'})}
