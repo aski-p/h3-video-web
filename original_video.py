@@ -1,5 +1,6 @@
 """Authenticated, durable original-motion jobs. No synthesis fallback."""
 import math
+import wardrobe_video
 import base64, fcntl, hashlib, hmac, json, os, re, signal, subprocess, sys, time
 from pathlib import Path
 
@@ -26,7 +27,7 @@ def folder(jid):
     if not JOB.fullmatch(jid): raise ValueError('invalid_job')
     return ROOT/jid
 def public(s):
-    return {k:s.get(k) for k in ('id','status','progress','error','policy','sourceSha256','portraitSha256','verification','createdAt')}
+    return {k:s.get(k) for k in ('id','status','progress','error','policy','sourceSha256','portraitSha256','verification','createdAt','wardrobe')}
 def status(jid): return public(read(folder(jid)/'state.json'))
 def healthy():
     try:return time.time()-(ROOT/'heartbeat').stat().st_mtime<90
@@ -54,6 +55,7 @@ def requested_segment(candidate,data):
     return {**candidate,'start':start,'duration':duration}
 
 def submit(data):
+    wardrobe=wardrobe_video.normalize(data.get('wardrobe'))
     request=data.get('requestId','')
     if not re.fullmatch(r'[a-f0-9-]{36}:\d{1,6}',request):raise ValueError('invalid_request')
     candidate=next((v for v in catalog() if v['sha256']==data.get('sourceSha256')),None)
@@ -68,18 +70,18 @@ def submit(data):
     ROOT.mkdir(parents=True,exist_ok=True)
     with (ROOT/'.submit.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
-        f=folder(jid);binding={'sourceSha256':candidate['sha256'],'portraitSha256':image_hash,'start':candidate['start'],'duration':candidate['duration']}
+        f=folder(jid);binding={'sourceSha256':candidate['sha256'],'portraitSha256':image_hash,'start':candidate['start'],'duration':candidate['duration'],'wardrobe':wardrobe}
         if (f/'state.json').exists():
             state=read(f/'state.json')
             stored=read(f/'candidate.json')
-            if any(state.get(k,stored.get(k,0 if k=='start' else None))!=v for k,v in binding.items()):raise ValueError('request_input_conflict')
+            if any(state.get(k,stored.get(k,'original' if k=='wardrobe' else 0 if k=='start' else None))!=v for k,v in binding.items()):raise ValueError('request_input_conflict')
             return public(state)
         if used_source(candidate):raise ValueError('source_already_used')
         if not healthy():raise ValueError('original_worker_offline')
         if sum(read(p).get('status') not in TERMINAL for p in ROOT.glob('*/state.json'))>=12:raise ValueError('original_queue_full')
         f.mkdir();(f/'portrait.jpg').write_bytes(image)
         save(f/'candidate.json',candidate)
-        state={'id':jid,'status':'queued','progress':0,'policy':POLICY,'createdAt':time.time(),**binding}
+        state={'id':jid,'status':'queued','progress':0,'policy':POLICY if wardrobe=='original' else wardrobe_video.POLICY,'createdAt':time.time(),**binding}
         save(f/'state.json',state)
         return public(state)
 
@@ -92,7 +94,7 @@ def handle(handler,path,send_json,post=False):
     try:
         parts=path.strip('/').split('/')
         if path=='/api/original-video/catalog' and not post:
-            send_json(handler,{'ok':True,'policy':POLICY,'workerOnline':healthy(),'sources':[{**{k:v[k] for k in ('sha256','sourceUrl','duration','width','height','fps','username')},'start':v.get('start',0),'used':used_source(v)} for v in catalog()]});return
+            send_json(handler,{'ok':True,'policy':POLICY,'workerOnline':healthy(),'wardrobeChoices':list(wardrobe_video.CHOICES),'sources':[{**{k:v[k] for k in ('sha256','sourceUrl','duration','width','height','fps','username')},'start':v.get('start',0),'used':used_source(v)} for v in catalog()]});return
         if path=='/api/original-video/generate' and post:
             size=int(handler.headers.get('Content-Length',0))
             if not 0<size<750000:raise ValueError('invalid_request_size')
@@ -160,6 +162,13 @@ def process(f,repo):
         run_child(command,f,'worker.log',35)
         run_child([str(python),str(script/'evaluate.py'),'--engine',cfg['engine'],'--source',str(f/'render/source.mp4'),'--portrait',str(f/'portrait.jpg'),'--folder',str(f/'render')],f,'quality.log',85)
         verification=quality_gate(read(f/'render/metrics.json'),read(f/'render/workflow.json'),read(f/'render/swapped.stats.json'))
+        wardrobe=wardrobe_video.normalize(s.get('wardrobe'))
+        if wardrobe!='original':
+            def check():
+                (ROOT/'heartbeat').touch()
+                if (f/'cancel').exists():raise ValueError('cancelled')
+                current=read(f/'state.json');current['progress']=70;save(f/'state.json',current)
+            verification=wardrobe_video.process(f,repo,cfg,wardrobe,run_child,check)
         if (f/'cancel').exists():raise ValueError('cancelled')
         s.update(status='done',progress=100,verification=verification,error=None)
     except Exception as e:

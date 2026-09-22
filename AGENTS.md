@@ -22,3 +22,8 @@ New daily work must not reuse completed or active source hashes/post IDs across
 requests. Idempotent delivery of the same request is allowed. Reviewed variable
 segments up to 15 seconds must receive at least one quality sample per second
 (minimum five); never assume the initial four-second test covers longer footage.
+
+Explicit wardrobe changes are opt-in through `wardrobe` (dress/sportswear/casual),
+with separate `wardrobe-motion-v1-20260922` receipts. They may regenerate frames
+and use declared comparison resolution; never label them as original-pixel
+preserving. Default original-face work and novelty/length checks remain unchanged.
