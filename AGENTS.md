@@ -27,3 +27,5 @@ Explicit wardrobe changes are opt-in through `wardrobe` (dress/sportswear/casual
 with separate `wardrobe-motion-v1-20260922` receipts. They may regenerate frames
 and use declared comparison resolution; never label them as original-pixel
 preserving. Default original-face work and novelty/length checks remain unchanged.
+
+Wardrobe choices also include bikini (비키니), swimsuit (원피스 수영복), and yoga (요가복), explicitly requested on 2026-09-22. These are non-sexual adult fashion presets with opaque, secure garments. The existing mix assignment remains dress/sportswear/casual.

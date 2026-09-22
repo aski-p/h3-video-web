@@ -4,7 +4,10 @@ from pathlib import Path
 POLICY='wardrobe-motion-v1-20260922'
 CHOICES={'dress':'an opaque navy blue knee-length short-sleeved dress with a crew neckline',
          'sportswear':'an opaque dark teal athletic crew-neck T-shirt and full-length black leggings',
-         'casual':'an opaque white crew-neck T-shirt and relaxed blue jeans'}
+         'casual':'an opaque white crew-neck T-shirt and relaxed blue jeans',
+         'bikini':'an opaque navy blue two-piece bikini with secure straps and standard-coverage bottoms, ordinary swimwear',
+         'swimsuit':'an opaque navy blue one-piece swimsuit with secure shoulder straps and standard coverage',
+         'yoga':'an opaque muted sage fitted sleeveless yoga top and full-length high-waisted charcoal yoga leggings'}
 COMFY=Path('/home/aski/ComfyUI');OUTPUT=Path('/home/aski/minimax-h3/output');URL='http://127.0.0.1:8188'
 def normalize(value):
     if value is None:return 'original'
@@ -28,7 +31,7 @@ def node(kind,**inputs):return {'class_type':kind,'inputs':inputs}
 def anchor_graph(image,choice,width,height,prefix):
     choice=normalize(choice)
     if choice=='original':raise ValueError('wardrobe_choice_required')
-    prompt='Edit only the clothing of this adult woman (25–28): replace her outfit with '+CHOICES[choice]+'. Preserve exactly her face, hair, pose, hands, body proportions, skin tone, background, lighting, framing and camera. Natural opaque fabric and realistic folds. Fully clothed everyday fashion. Do not add people, text or accessories.'
+    prompt='Edit only the clothing of this adult woman (25–28): replace her outfit with '+CHOICES[choice]+'. Preserve exactly her face, hair, pose, hands, body proportions, skin tone, background, lighting, framing and camera. Natural opaque fabric and realistic folds. Non-sexual adult fashion presentation. Secure garment coverage, no nudity. Do not add people, text or accessories.'
     return {
      '1':node('UNETLoader',unet_name='qwen_image_edit_2511_fp8mixed.safetensors',weight_dtype='default'),
      '2':node('CLIPLoader',clip_name='qwen_2.5_vl_7b_fp8_scaled.safetensors',type='qwen_image',device='default'),
@@ -50,7 +53,7 @@ def motion_graph(repo,image,video,continuation,width,height,fps,part,prefix):
     g['15']['inputs'].update(width=width,height=height,length=part['length'],video_frame_offset=part['offset'])
     g['18']['inputs'].update(batch_index=part['overlap'],length=part['take'])
     g['19']['inputs']['fps']=fps
-    g['6']['inputs']['text']='The same fully clothed adult woman and clothing as the reference image. Exactly follow the driving video movement and timing. Preserve the reference background, lighting and camera framing. Realistic hands and stable garment texture, no new action, no text.'
+    g['6']['inputs']['text']='The same adult woman wearing exactly the outfit from the reference image. Non-sexual fashion presentation, secure garment coverage, no nudity. Exactly follow the driving video movement and timing. Preserve the reference background, lighting and camera framing. Realistic hands and stable garment texture, no new action, no text.'
     if continuation:
         g['22']=node('LoadImage',image=continuation);g['15']['inputs']['continue_motion']=['22',0]
     return g

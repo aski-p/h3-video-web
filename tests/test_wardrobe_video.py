@@ -8,6 +8,13 @@ class WardrobeTests(unittest.TestCase):
   self.assertEqual(w.normalize(None),'original')
   for x in [['dress','casual'],'mix','unknown',{},True]:
    with self.assertRaises(ValueError):w.normalize(x)
+ def test_new_outfits_have_distinct_anchor_prompts(self):
+  prompts=[]
+  for choice in ['bikini','swimsuit','yoga']:
+   self.assertEqual(w.normalize(choice),choice)
+   prompt=w.anchor_graph('adult.png',choice,432,768,'test')['5']['inputs']['prompt']
+   self.assertIn(w.CHOICES[choice],prompt);self.assertIn('adult woman',prompt);prompts.append(prompt)
+  self.assertEqual(len(set(prompts)),3)
  def test_chunks_cover_full_length_without_repeated_motion(self):
   for frames in [61,81,82,120,156,300,450,900]:
    parts=list(w.chunks(frames));self.assertEqual(sum(x['take'] for x in parts),frames)
