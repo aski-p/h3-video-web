@@ -70,6 +70,17 @@ def used_source(candidate, exclude=None):
         if source_key(candidate) and prior.exists() and source_key(read(prior))==source_key(candidate):return True
     return False
 
+def catalog_sources():
+    hashes=set();posts=set()
+    for path in ROOT.glob('*/state.json'):
+        state=read(path)
+        if state.get('status') not in ('queued','running','done'):continue
+        hashes.add(state.get('sourceSha256'))
+        prior=path.parent/'candidate.json'
+        if prior.exists():posts.add(source_key(read(prior)))
+    return [{**{k:v[k] for k in ('sha256','sourceUrl','duration','width','height','fps','username')},
+             'start':v.get('start',0),'used':v['sha256'] in hashes or bool(source_key(v) and source_key(v) in posts)} for v in catalog()]
+
 def requested_segment(candidate,data):
     start=float(data.get('start',candidate.get('start',0)))
     duration=float(data.get('duration',candidate['duration']))
@@ -118,7 +129,7 @@ def handle(handler,path,send_json,post=False):
     try:
         parts=path.strip('/').split('/')
         if path=='/api/original-video/catalog' and not post:
-            send_json(handler,{'ok':True,'policy':POLICY,'workerOnline':healthy(),'wardrobePolicy':wardrobe_video.POLICY,'wardrobeChoices':list(wardrobe_video.CHOICES),'sources':[{**{k:v[k] for k in ('sha256','sourceUrl','duration','width','height','fps','username')},'start':v.get('start',0),'used':used_source(v)} for v in catalog()]});return
+            send_json(handler,{'ok':True,'policy':POLICY,'workerOnline':healthy(),'wardrobePolicy':wardrobe_video.POLICY,'wardrobeChoices':list(wardrobe_video.CHOICES),'sources':catalog_sources()});return
         if path=='/api/original-video/generate' and post:
             size=int(handler.headers.get('Content-Length',0))
             if not 0<size<750000:raise ValueError('invalid_request_size')
