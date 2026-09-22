@@ -44,6 +44,7 @@ def main():
     p.add_argument('--start', type=float, default=0)
     p.add_argument('--duration', type=float)
     p.add_argument('--reference-frame', type=int)
+    p.add_argument('--reference-distance',type=float,default=.3)
     p.add_argument('--overlay-roi', nargs=4, type=int)
     p.add_argument('--no-account-overlay', action='store_true', help='Explicitly record that this source was inspected and has no account-name overlay')
     a = p.parse_args()
@@ -75,7 +76,7 @@ def main():
     record = {'profile':profile,'sourceUrl':manifest['sourceUrl'],'originalSha256':digest(original),'portraitSha256':digest(portrait),'start':a.start,'duration':duration,'referenceFrame':reference,'overlayROI':a.overlay_roi,'overlayReviewed':True,'visualReview':'pending','source':source_meta}
     (r/'workflow.json').write_text(json.dumps(record,ensure_ascii=False,indent=2))
     with (r/'render.log').open('w') as log:
-        subprocess.run([sys.executable,str(HERE/'trial.py'),'--engine',config['engine'],'--source',str(source),'--portrait',str(r/'portrait.jpg'),'--output',str(swapped),'--model',profile['model'],'--reference-frame',str(reference)],stdout=log,stderr=subprocess.STDOUT,check=True)
+        subprocess.run([sys.executable,str(HERE/'trial.py'),'--engine',config['engine'],'--source',str(source),'--portrait',str(r/'portrait.jpg'),'--output',str(swapped),'--model',profile['model'],'--reference-frame',str(reference),'--reference-distance',str(a.reference_distance)],stdout=log,stderr=subprocess.STDOUT,check=True)
     if a.overlay_roi:
         with (r/'restoration.log').open('w') as log:
             subprocess.run([config['inpaintPython'],str(HERE/'remove_overlay.py'),'--source',str(swapped),'--output',str(output),'--model',config['inpaintModel'],'--roi',*map(str,a.overlay_roi)],stdout=log,stderr=subprocess.STDOUT,check=True)

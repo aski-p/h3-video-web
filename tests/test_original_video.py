@@ -60,3 +60,13 @@ class NoveltyTests(unittest.TestCase):
         self.assertTrue(v.quality_gate(base.report,base.workflow,base.stats)['expressionVerified'])
 
 if __name__=='__main__':unittest.main()
+
+class CoverageInstrumentationTests(unittest.TestCase):
+    def test_skin_measurement_is_not_face_coverage(self):
+        self.assertTrue(v.face_coverage({'frameSwapCounts':[1,1,1],'rawSkinDeltas':[]},3))
+        self.assertFalse(v.face_coverage({'frameSwapCounts':[1,0,1],'rawSkinDeltas':[[0]]*3},3))
+        self.assertFalse(v.face_coverage({'frameSwapCounts':[1,2,1]},3))
+    def test_only_visual_quality_errors_are_retryable(self):
+        self.assertTrue(v.repairable('identity_gate_failed'))
+        for code in ['content_blocked','quality_pipeline_failed','cancelled','source_integrity_failed']:
+            self.assertFalse(v.repairable(code))

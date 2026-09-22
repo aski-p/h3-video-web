@@ -45,7 +45,7 @@ def apply_tone(crop,skin,delta,strength=.7):
     return result
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--engine',type=Path,required=True);p.add_argument('--source',type=Path,required=True);p.add_argument('--portrait',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--model',choices=['ghost_1_256','hyperswap_1a_256','hyperswap_1b_256','hyperswap_1c_256'],required=True);p.add_argument('--tone-from',type=Path);p.add_argument('--reference-frame',type=int,default=30);p.add_argument('--expression',type=int,default=0);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--engine',type=Path,required=True);p.add_argument('--source',type=Path,required=True);p.add_argument('--portrait',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--model',choices=['ghost_1_256','hyperswap_1a_256','hyperswap_1b_256','hyperswap_1c_256'],required=True);p.add_argument('--reference-distance',type=float,default=.3);p.add_argument('--tone-from',type=Path);p.add_argument('--reference-frame',type=int,default=30);p.add_argument('--expression',type=int,default=0);a=p.parse_args()
     for path in (a.source,a.portrait):
         if not path.is_file():p.error('input missing')
     a.output=a.output.resolve();a.source=a.source.resolve();a.portrait=a.portrait.resolve();a.engine=a.engine.resolve();a.output.parent.mkdir(parents=True,exist_ok=True)
@@ -60,7 +60,15 @@ def main():
     from facefusion.face_masker import create_region_mask
     tone=robust_delta(json.loads(a.tone_from.read_text())['rawSkinDeltas']) if a.tone_from else None
     original=swapper.paste_back;stats=[];lock=threading.Lock()
+    frame_stats=[];local=threading.local();original_process=swapper.process_frame
+    def process_frame(inputs):
+        local.swaps=0
+        result=original_process(inputs)
+        with lock:frame_stats.append(local.swaps)
+        return result
+    swapper.process_frame=process_frame
     def paste(frame,crop,mask,affine):
+        local.swaps=getattr(local,"swaps",0)+1
         target=cv2.warpAffine(frame,affine,(crop.shape[1],crop.shape[0]),borderMode=cv2.BORDER_REPLICATE)
         skin=np.minimum(create_region_mask(target,['skin']),create_region_mask(crop,['skin']))*mask
         valid=skin>.8
@@ -75,7 +83,7 @@ def main():
     processors=['face_swapper']+(['expression_restorer'] if a.expression else [])
     sys.argv=['facefusion.py','headless-run','-s',str(a.portrait),'-t',str(a.source),'-o',str(a.output),'--processors',*processors,
       '--face-swapper-model',a.model,'--face-swapper-weight','0.5','--face-swapper-pixel-boost','512x512',
-      '--face-selector-mode','reference','--reference-frame-number',str(a.reference_frame),'--reference-face-position','0','--reference-face-distance','0.3','--face-selector-gender','female',
+      '--face-selector-mode','reference','--reference-frame-number',str(a.reference_frame),'--reference-face-position','0','--reference-face-distance',str(a.reference_distance),'--face-selector-gender','female',
       '--face-mask-types','box','occlusion','region','--face-occluder-model','xseg_1','--face-parser-model','bisenet_resnet_34','--face-mask-blur','0.3',
       '--face-detector-model','retinaface','--face-landmarker-model','2dfan4','--output-video-scale','1','--output-video-fps',source_fps,'--output-video-quality','95','--output-video-preset','fast',
       '--execution-providers','cpu','--execution-thread-count','4','--temp-path',str(a.output.parent/'temp'/a.output.stem),'--jobs-path',str(a.output.parent/'jobs'/a.output.stem),'--log-level','info']
@@ -83,5 +91,5 @@ def main():
     conda.setup()
     try:core.cli()
     finally:
-        a.output.with_suffix('.stats.json').write_text(json.dumps({'model':a.model,'rawSkinDeltas':stats,'recommendedLabDelta':robust_delta(stats),'appliedLabDelta':tone,'expressionFactor':a.expression,'command':sys.argv},indent=2))
+        a.output.with_suffix('.stats.json').write_text(json.dumps({'model':a.model,'rawSkinDeltas':stats,'frameSwapCounts':frame_stats,'recommendedLabDelta':robust_delta(stats),'appliedLabDelta':tone,'expressionFactor':a.expression,'command':sys.argv},indent=2))
 if __name__=='__main__':main()

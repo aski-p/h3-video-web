@@ -164,13 +164,21 @@ def run_child(command,f,logname,progress):
                 try:child.wait(timeout=10)
                 except subprocess.TimeoutExpired:os.killpg(child.pid,signal.SIGKILL);child.wait()
 
+def face_coverage(stats,frames):
+    counts=stats.get('frameSwapCounts')
+    # Old receipts lack per-frame instrumentation; new runs must record every frame.
+    return (len(counts)==frames and all(n==1 for n in counts)) if counts is not None else len(stats.get('rawSkinDeltas',[]))==frames
+
+def repairable(code):
+    return code in ('identity_gate_failed','face_coverage_gate_failed','expression_gate_failed')
+
 def quality_gate(report,workflow,stats):
     result=report.get('output',{})
     scores=result.get('referenceSimilaritySamples',[])
     if not workflow.get('timingVerified') or workflow.get('source')!=workflow.get('output'):raise ValueError('timing_gate_failed')
     expected=max(5,math.ceil(workflow['source']['frames']/workflow['source']['fps']))
     if len(scores)!=expected or any(v is None or v<.45 for v in scores) or sum(scores)/len(scores)<.65:raise ValueError('identity_gate_failed')
-    if len(stats.get('rawSkinDeltas',[]))!=workflow['source']['frames']:raise ValueError('face_coverage_gate_failed')
+    if not face_coverage(stats,workflow['source']['frames']):raise ValueError('face_coverage_gate_failed')
     if stats.get('model')!='hyperswap_1b_256' or stats.get('expressionFactor')!=0 or stats.get('appliedLabDelta') is not None:raise ValueError('profile_gate_failed')
     if result.get('lowerBodyMAE',999)>8 and not workflow.get('overlayROI'):raise ValueError('original_pixels_gate_failed')
     source_expressions=report.get('source',{}).get('expressionSamples',[])
@@ -195,9 +203,22 @@ def process(f,repo):
         script=repo/'ops/face-quality';python=Path(cfg['engine'])/'.venv/bin/python'
         command=[str(python),str(script/'workflow.py'),'--manifest',str(manifest),'--config',str(f/'config.json'),'--output-dir',str(f/'render'),'--start',str(c.get('start',0)),'--duration',str(c['duration'])]
         command+=['--overlay-roi',*map(str,c['overlayROI'])] if c.get('overlayROI') else ['--no-account-overlay']
-        run_child(command,f,'worker.log',35)
-        run_child([str(python),str(script/'evaluate.py'),'--engine',cfg['engine'],'--source',str(f/'render/source.mp4'),'--portrait',str(f/'portrait.jpg'),'--folder',str(f/'render')],f,'quality.log',85)
-        verification=quality_gate(read(f/'render/metrics.json'),read(f/'render/workflow.json'),read(f/'render/swapped.stats.json'))
+        # Keep failed artifacts and adjust matching; never lower output acceptance thresholds.
+        import shutil
+        for attempt,distance in enumerate((.3,.45,.6)):
+            if (f/'cancel').exists():raise ValueError('cancelled')
+            current=read(f/'state.json');current.update(repairAttempt=attempt+1,repairLimit=3);save(f/'state.json',current)
+            run_child(command+['--reference-distance',str(distance)],f,f'worker-{attempt+1}.log',35)
+            run_child([str(python),str(script/'evaluate.py'),'--engine',cfg['engine'],'--source',str(f/'render/source.mp4'),'--portrait',str(f/'portrait.jpg'),'--folder',str(f/'render')],f,f'quality-{attempt+1}.log',85)
+            try:
+                verification=quality_gate(read(f/'render/metrics.json'),read(f/'render/workflow.json'),read(f/'render/swapped.stats.json'))
+                break
+            except ValueError as error:
+                if not repairable(str(error)) or attempt==2:raise
+                shutil.move(str(f/'render'),str(f/f'repair-attempt-{attempt+1}'))
+                current=read(f/'state.json');history=current.get('repairHistory',[])
+                history.append({'attempt':attempt+1,'reason':str(error),'nextReferenceDistance':(.45,.6)[attempt]})
+                current.update(repairHistory=history,error='얼굴 매칭 설정 조정 후 자동 재처리 중');save(f/'state.json',current)
         wardrobe=wardrobe_video.normalize(s.get('wardrobe'))
         if wardrobe!='original':
             def check():
@@ -206,8 +227,9 @@ def process(f,repo):
                 current=read(f/'state.json');current['progress']=70;save(f/'state.json',current)
             verification=wardrobe_video.process(f,repo,cfg,wardrobe,run_child,check)
         if (f/'cancel').exists():raise ValueError('cancelled')
-        s.update(status='done',progress=100,verification=verification,error=None)
+        s={**s,**read(f/'state.json')};s.update(status='done',progress=100,verification=verification,error=None)
     except Exception as e:
+        s={**s,**read(f/'state.json')}
         code=str(e) if isinstance(e,ValueError) else type(e).__name__
         s.update(status='cancelled' if code=='cancelled' else 'error',error='원본 기반 품질 검사 미통과 · '+code,progress=0)
     save(f/'state.json',s)
