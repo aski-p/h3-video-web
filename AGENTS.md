@@ -35,3 +35,6 @@ Keep content filters active and publication approval separate from technical che
 Existing completed v1 wardrobe results remain readable; never rewrite old snapshots.
 Push to GitHub before runtime application. See the wardrobe quality contract and
 ops/wardrobe-h3/README.md in h3-video-web for the approved sample evidence.
+
+## Explicit user-approved replacement: registered archive selection (2026-09-22)
+The user explicitly approved abolishing the manual source-review requirement and replacing it with random selection from downloaded registered-account videos. This supersedes the manual reviewed-source/segment requirements above. Use 2–15 second source-bounded intervals; preserve archive integrity, active-account eligibility, historical source deduplication, output quality checks and content filters. Manual catalog registration is no longer required. Do not claim unknown overlays have been removed.

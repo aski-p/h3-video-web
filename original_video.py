@@ -22,7 +22,30 @@ def authorized(headers):
     except OSError:return False
     return bool(token) and hmac.compare_digest(headers.get('X-Aski-Original-Token',''),token)
 def catalog():
-    return [v for v in read(CONFIG/'catalog.json') if v.get('reviewed') and v.get('policy')==POLICY]
+    # User-approved archive eligibility, independent of manual source reviews.
+    from fractions import Fraction
+    from urllib.parse import urlparse
+    root=Path(read(CONFIG/'workflow.json')['nasRoot']).resolve()
+    legacy={v['sha256']:v for v in read(CONFIG/'catalog.json')} if (CONFIG/'catalog.json').exists() else {}
+    sources={}
+    for manifest in (root/'instagram').glob('*/*/*/manifest.json'):
+        try:
+            m=read(manifest);a=m['assets'][0];path=(root/a['path']).resolve()
+            if not manifest.resolve().is_relative_to(root) or not path.is_relative_to(root) or not path.is_file() or not a.get('decodeVerified'):continue
+            if path.stat().st_size!=a['bytes'] or not re.fullmatch(r'[a-f0-9]{64}',a['sha256']):continue
+            fps=float(Fraction(a['fps']));duration=min(float(a['duration']),int(a['frames'])/fps,15)
+            if not math.isfinite(duration) or duration<2 or fps<=0:continue
+            url=urlparse(m['sourceUrl']);parts=url.path.strip('/').split('/')
+            if url.hostname not in ('instagram.com','www.instagram.com') or len(parts)<3 or parts[1] not in ('reel','p','tv'):continue
+            c={'policy':POLICY,'selectionBasis':'registered_archive','manifest':str(manifest.relative_to(root)),
+               'sha256':a['sha256'],'sourceUrl':m['sourceUrl'],'username':parts[0],
+               'duration':duration,'start':0,'width':int(a['width']),'height':int(a['height']),'fps':fps,'overlayROI':None}
+            old=legacy.get(a['sha256'],{})
+            if old.get('overlayROI'):
+                c.update(overlayROI=old['overlayROI'],start=old.get('start',0),duration=min(duration,old['duration']))
+            sources[a['sha256']]=c
+        except (ValueError,KeyError,TypeError,OSError,ZeroDivisionError):continue
+    return list(sources.values())
 def folder(jid):
     if not JOB.fullmatch(jid): raise ValueError('invalid_job')
     return ROOT/jid
@@ -60,7 +83,7 @@ def submit(data):
     request=data.get('requestId','')
     if not re.fullmatch(r'[a-f0-9-]{36}:\d{1,6}',request):raise ValueError('invalid_request')
     candidate=next((v for v in catalog() if v['sha256']==data.get('sourceSha256')),None)
-    if not candidate:raise ValueError('source_not_reviewed')
+    if not candidate:raise ValueError('source_not_archived')
     candidate=requested_segment(candidate,data)
     portrait=data.get('portrait','')
     if not isinstance(portrait,str) or not portrait.startswith('data:image/jpeg;base64,') or len(portrait)>700000:raise ValueError('fixed_portrait_required')
