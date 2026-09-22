@@ -56,6 +56,7 @@ def requested_segment(candidate,data):
 
 def submit(data):
     wardrobe=wardrobe_video.normalize(data.get('wardrobe'))
+    if wardrobe!='original' and data.get('wardrobePolicy')!=wardrobe_video.POLICY:raise ValueError('wardrobe_policy_update_required')
     request=data.get('requestId','')
     if not re.fullmatch(r'[a-f0-9-]{36}:\d{1,6}',request):raise ValueError('invalid_request')
     candidate=next((v for v in catalog() if v['sha256']==data.get('sourceSha256')),None)
@@ -94,7 +95,7 @@ def handle(handler,path,send_json,post=False):
     try:
         parts=path.strip('/').split('/')
         if path=='/api/original-video/catalog' and not post:
-            send_json(handler,{'ok':True,'policy':POLICY,'workerOnline':healthy(),'wardrobeChoices':list(wardrobe_video.CHOICES),'sources':[{**{k:v[k] for k in ('sha256','sourceUrl','duration','width','height','fps','username')},'start':v.get('start',0),'used':used_source(v)} for v in catalog()]});return
+            send_json(handler,{'ok':True,'policy':POLICY,'workerOnline':healthy(),'wardrobePolicy':wardrobe_video.POLICY,'wardrobeChoices':list(wardrobe_video.CHOICES),'sources':[{**{k:v[k] for k in ('sha256','sourceUrl','duration','width','height','fps','username')},'start':v.get('start',0),'used':used_source(v)} for v in catalog()]});return
         if path=='/api/original-video/generate' and post:
             size=int(handler.headers.get('Content-Length',0))
             if not 0<size<750000:raise ValueError('invalid_request_size')
@@ -150,6 +151,7 @@ def process(f,repo):
     if (f/'cancel').exists():s.update(status='cancelled',error='사용자가 작업을 취소했습니다.');save(f/'state.json',s);return
     s.update(status='running',progress=5);save(f/'state.json',s)
     try:
+        if s.get('wardrobe','original')!='original' and s.get('policy')!=wardrobe_video.POLICY:raise ValueError('legacy_wardrobe_job_requires_new_run')
         c=read(f/'candidate.json');cfg=read(CONFIG/'workflow.json')
         if sha(f/'portrait.jpg')!=s['portraitSha256']:raise ValueError('portrait_integrity_failed')
         manifest=Path(cfg['nasRoot'])/c['manifest']

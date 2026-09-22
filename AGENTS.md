@@ -23,9 +23,15 @@ requests. Idempotent delivery of the same request is allowed. Reviewed variable
 segments up to 15 seconds must receive at least one quality sample per second
 (minimum five); never assume the initial four-second test covers longer footage.
 
-Explicit wardrobe changes are opt-in through `wardrobe` (dress/sportswear/casual),
-with separate `wardrobe-motion-v1-20260922` receipts. They may regenerate frames
-and use declared comparison resolution; never label them as original-pixel
-preserving. Default original-face work and novelty/length checks remain unchanged.
-
-Wardrobe choices also include bikini (비키니), swimsuit (원피스 수영복), and yoga (요가복), explicitly requested on 2026-09-22. These are non-sexual adult fashion presets with opaque, secure garments. The existing mix assignment remains dress/sportswear/casual.
+Explicit wardrobe changes are authorized via original (default), dress, sportswear,
+casual, bikini, swimsuit, yoga, or Studio mix (dress/sportswear/casual).
+New wardrobe work MUST use the user-approved H3 Ref2VA + HyperSwap 1b pipeline,
+policy wardrobe-h3-ref2va-v2-20260922, 20 steps, no Turbo/optional LoRA.
+Do not use Qwen Image Edit/Wan or silently fall back to another pipeline.
+Declare regenerated motion, maximum 1280px/24fps and floor-to-frame output duration.
+Native source FPS, exact movement or original pixels are NOT preserved in this
+explicit opt-in path. Original-face mode, novelty and reviewed intervals remain intact.
+Keep content filters active and publication approval separate from technical checks.
+Existing completed v1 wardrobe results remain readable; never rewrite old snapshots.
+Push to GitHub before runtime application. See the wardrobe quality contract and
+ops/wardrobe-h3/README.md in h3-video-web for the approved sample evidence.
