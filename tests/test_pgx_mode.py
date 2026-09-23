@@ -64,6 +64,14 @@ class ModeTests(unittest.TestCase):
         c._ctl=ctl;c.switching=True;c._switch('qwen','video')
         self.assertNotIn(('start','qwen'),self.calls)
 
+    def test_qwen_status_exposes_exact_flash_route_and_context(self):
+        c=self.make();self.states={'video':'inactive','qwen':'active'}
+        status=c.status()
+        self.assertEqual(status['mode'],'qwen')
+        self.assertEqual(status['model'],'Qwen3.8-Flash-Next-EXL3')
+        self.assertEqual(status['base_url'],'http://127.0.0.1:8899/v1')
+        self.assertEqual(status['context_length'],262144)
+
     def test_duration_keeps_long_i2v_single_take(self):
         source=Path(__file__).resolve().parents[1]/'server.py'
         tree=ast.parse(source.read_text())

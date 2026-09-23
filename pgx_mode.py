@@ -1,4 +1,5 @@
 """Exclusive PGX services; no browser-supplied commands or unit names."""
+import json
 import os
 import re
 import subprocess
@@ -15,6 +16,12 @@ class PgxMode:
     def __init__(self, run=subprocess.run, healthy=None):
         self.enabled = os.environ.get('H3_PGX_MODE_ENABLED') == '1'
         self.units = {'video': 'comfyui-minimax-h3.service', 'qwen': 'qwen38-exl3.service'}
+        self.qwen_model = os.environ.get('H3_QWEN_MODEL_NAME', 'Qwen3.8-Flash-Next-EXL3')
+        try:
+            self.qwen_context = int(os.environ.get('H3_QWEN_CONTEXT_LENGTH', '262144'))
+        except ValueError:
+            self.qwen_context = 262144
+        self.qwen_base_url = os.environ.get('H3_QWEN_BASE_URL', 'http://127.0.0.1:8899/v1').rstrip('/')
         self.run = run
         self.healthy = healthy or self._healthy
         self.lock = threading.RLock()
@@ -33,12 +40,16 @@ class PgxMode:
         if result.returncode:
             raise ModeError('PGX 서비스 제어 실패 · 서버 서비스/권한을 확인해 주세요.')
 
-    @staticmethod
-    def _healthy(mode):
-        url = 'http://127.0.0.1:8899/v1/models' if mode == 'qwen' else 'http://127.0.0.1:8188/system_stats'
+    def _healthy(self, mode):
+        url = f'{self.qwen_base_url}/models' if mode == 'qwen' else 'http://127.0.0.1:8188/system_stats'
         try:
             with urllib.request.urlopen(url, timeout=2) as r:
-                return r.status == 200
+                if r.status != 200:
+                    return False
+                if mode != 'qwen':
+                    return True
+                payload = json.loads(r.read().decode('utf-8'))
+                return self.qwen_model in {str(item.get('id')) for item in payload.get('data', [])}
         except Exception:
             return False
 
@@ -55,8 +66,12 @@ class PgxMode:
                 mode = 'video' if video == 'active' and qwen in ('inactive','failed') else 'qwen' if qwen == 'active' and video in ('inactive','failed') else 'unknown'
                 if mode != 'unknown' and not self.healthy(mode):
                     mode = 'loading'
-                return {'configured': True, 'mode': mode, 'switching': False,
-                        'message': self.error or {'video':'영상 생성 모드 준비', 'qwen':'Qwen 3.8 전용 모드 준비', 'loading':'모델 로딩 중', 'unknown':'서버 상태 확인 필요'}.get(mode)}
+                result = {'configured': True, 'mode': mode, 'switching': False,
+                          'message': self.error or {'video':'영상 생성 모드 준비', 'qwen':'Qwen 3.8 Flash Next EXL3 · 262K 컨텍스트 준비', 'loading':'모델 로딩 중', 'unknown':'서버 상태 확인 필요'}.get(mode)}
+                if mode == 'qwen':
+                    result.update(model=self.qwen_model, context_length=self.qwen_context,
+                                  base_url=self.qwen_base_url)
+                return result
             except Exception:
                 return {'configured': True, 'mode':'unknown', 'switching':False, 'message':'PGX 서비스 상태를 확인할 수 없습니다.'}
 

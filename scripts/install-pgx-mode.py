@@ -38,7 +38,12 @@ def main():
     directory=Path('/etc/h3-pgx-mode');directory.mkdir(exist_ok=True,mode=0o750)
     os.chown(directory,0,info.pw_gid)
     env=directory/'mode.env'
-    env.write_text(f'H3_PGX_MODE_ENABLED=1\nH3_MODE_PIN_PBKDF2={descriptor}\n')
+    env.write_text(
+        f'H3_PGX_MODE_ENABLED=1\nH3_MODE_PIN_PBKDF2={descriptor}\n'
+        'H3_QWEN_MODEL_NAME=Qwen3.8-Flash-Next-EXL3\n'
+        'H3_QWEN_CONTEXT_LENGTH=262144\n'
+        'H3_QWEN_BASE_URL=http://127.0.0.1:8899/v1\n'
+    )
     os.chown(env,0,info.pw_gid);env.chmod(0o640)
     unit.write_text(f'''# Managed by h3-pgx-mode
 [Unit]
@@ -53,6 +58,7 @@ Environment=MODEL_DIR={model}
 Environment=HOST=127.0.0.1
 Environment=PORT=8899
 Environment=CS=262144
+Environment=SERVED_NAME=Qwen3.8-Flash-Next-EXL3
 ExecStart=/bin/bash {recipe}/scripts/exl3_native/serve_openai.sh
 KillMode=control-group
 TimeoutStartSec=600
@@ -78,5 +84,6 @@ polkit.addRule(function(action, subject) {{
     subprocess.run(['/usr/bin/systemctl','daemon-reload'],check=True)
     print('Configured. No model/service has been started or stopped.')
     print('After checking PGX jobs are idle, reload the user daemon and restart h3-web-backend as its service user.')
+    print('Then run scripts/configure-hermes-qwen38.py --home /home/aski/hermes-official --restart as root.')
 
 if __name__ == '__main__': main()
