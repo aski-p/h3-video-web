@@ -47,6 +47,21 @@ class NoveltyTests(unittest.TestCase):
             (f/'candidate.json').write_text(json.dumps({'sourceUrl':'https://instagram.com/user/reel/BAD/'}))
             self.assertTrue(v.used_source({'sha256':'bad','sourceUrl':'other'}))
             self.assertTrue(v.used_source({'sha256':'new','sourceUrl':'https://instagram.com/reel/BAD/'}))
+    def test_owner_can_release_terminal_source_without_deleting_job_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+            jid='orig_'+'c'*32;f=Path(tmp)/jid;f.mkdir()
+            state={'id':jid,'status':'done','sourceSha256':'old'}
+            (f/'state.json').write_text(json.dumps(state));(f/'candidate.json').write_text(json.dumps({'sourceUrl':'https://instagram.com/user/reel/POST/'}))
+            self.assertTrue(v.used_source({'sha256':'old','sourceUrl':'other'}))
+            result=v.release_source(jid)
+            self.assertIsNotNone(result['job']['sourceReleasedAt'])
+            self.assertFalse(v.used_source({'sha256':'old','sourceUrl':'other'}))
+            self.assertTrue((f/'state.json').exists())
+            self.assertEqual(v.release_source(jid)['job']['sourceReleasedAt'],result['job']['sourceReleasedAt'])
+    def test_active_job_source_cannot_be_released(self):
+        with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+            jid='orig_'+'d'*32;f=Path(tmp)/jid;f.mkdir();(f/'state.json').write_text(json.dumps({'id':jid,'status':'running','sourceSha256':'busy'}))
+            with self.assertRaisesRegex(ValueError,'terminal'):v.release_source(jid)
     def test_segment_cannot_exceed_reviewed_bounds(self):
         c={'start':2,'duration':12}
         self.assertEqual(v.requested_segment(c,{'start':2,'duration':10})['duration'],10)

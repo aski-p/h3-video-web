@@ -50,7 +50,7 @@ def folder(jid):
     if not JOB.fullmatch(jid): raise ValueError('invalid_job')
     return ROOT/jid
 def public(s):
-    return {k:s.get(k) for k in ('id','status','progress','error','policy','sourceSha256','portraitSha256','verification','createdAt','wardrobe')}
+    return {k:s.get(k) for k in ('id','status','progress','error','policy','sourceSha256','portraitSha256','verification','createdAt','wardrobe','sourceReleasedAt')}
 def status(jid): return public(read(folder(jid)/'state.json'))
 def healthy():
     try:return time.time()-(ROOT/'heartbeat').stat().st_mtime<90
@@ -64,7 +64,8 @@ def used_source(candidate, exclude=None):
     for path in ROOT.glob('*/state.json'):
         if path.parent.name==exclude:continue
         state=read(path)
-        # Failed jobs still consumed the source and often prove it unsuitable.
+        if state.get('sourceReleasedAt'):continue
+        # Failed jobs still consume the source until the owner explicitly releases it.
         if state['status']=='cancelled':continue
         if state.get('sourceSha256')==candidate['sha256']:return True
         prior=path.parent/'candidate.json'
@@ -75,7 +76,7 @@ def catalog_sources():
     hashes=set();posts=set()
     for path in ROOT.glob('*/state.json'):
         state=read(path)
-        if state.get('status')=='cancelled':continue
+        if state.get('status')=='cancelled' or state.get('sourceReleasedAt'):continue
         hashes.add(state.get('sourceSha256'))
         prior=path.parent/'candidate.json'
         if prior.exists():posts.add(source_key(read(prior)))
@@ -125,6 +126,15 @@ def cancel(jid):
     f=folder(jid);s=read(f/'state.json')
     if s['status'] not in TERMINAL:(f/'cancel').touch()
     return {'ok':True,'job':public(s)}
+def release_source(jid):
+    ROOT.mkdir(parents=True,exist_ok=True)
+    with (ROOT/'.submit.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        f=folder(jid);s=read(f/'state.json')
+        if s.get('status') not in TERMINAL:raise ValueError('source_release_requires_terminal_job')
+        if not s.get('sourceReleasedAt'):
+            s['sourceReleasedAt']=time.time();save(f/'state.json',s)
+        return {'ok':True,'job':public(s)}
 def handle(handler,path,send_json,post=False):
     if not authorized(handler.headers):send_json(handler,{'ok':False,'error':'unauthorized'},401);return
     try:
@@ -139,6 +149,7 @@ def handle(handler,path,send_json,post=False):
         jid=parts[3];f=folder(jid)
         if len(parts)==4 and not post:send_json(handler,{'ok':True,'job':status(jid)});return
         if len(parts)==5 and parts[4]=='cancel' and post:send_json(handler,cancel(jid));return
+        if len(parts)==5 and parts[4]=='release-source' and post:send_json(handler,release_source(jid));return
         files={'video':'output.mp4','comparison':'comparison.mp4','source':'source.mp4'}
         if len(parts)==5 and parts[4] in files and not post:
             if status(jid)['status']!='done':raise ValueError('quality_gate_not_passed')
