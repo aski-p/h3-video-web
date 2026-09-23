@@ -17,6 +17,13 @@ frames without time stretching. The reviewed source interval remains at most 15s
 Original assets remain archived; comparison video uses matched 24fps frames.
 Content filters and all-frame identity correction checks remain active.
 
+Wardrobe jobs extract the archived motion segment directly and do not require the
+unrelated original-person face swap to pass before H3 synthesis. After synthesis,
+HyperSwap targets the largest single subject and may retry face detection at
+0.50, 0.35, then 0.20. Every retry must still pass the unchanged all-frame
+coverage and identity thresholds. Failed source hashes and Instagram post IDs
+remain consumed so an unsuitable clip is not selected repeatedly.
+
 Validation: graph/model/LoRA regression checks; duration boundaries; old-receipt
 compatibility; source novelty regressions; real approved-output replay through
 production trimming, HyperSwap, audio mux, decoding, face metrics and comparison.

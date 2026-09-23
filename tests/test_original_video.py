@@ -40,6 +40,13 @@ class NoveltyTests(unittest.TestCase):
             self.assertTrue(v.used_source({'sha256':'old','sourceUrl':'other'}))
             self.assertTrue(v.used_source({'sha256':'new','sourceUrl':'https://instagram.com/reel/POST/?x=1'}))
             self.assertFalse(v.used_source({'sha256':'new','sourceUrl':'https://instagram.com/reel/NEW/'}))
+    def test_failed_source_is_not_selected_again(self):
+        with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+            f=Path(tmp)/('orig_'+'b'*32);f.mkdir()
+            (f/'state.json').write_text(json.dumps({'status':'error','sourceSha256':'bad'}))
+            (f/'candidate.json').write_text(json.dumps({'sourceUrl':'https://instagram.com/user/reel/BAD/'}))
+            self.assertTrue(v.used_source({'sha256':'bad','sourceUrl':'other'}))
+            self.assertTrue(v.used_source({'sha256':'new','sourceUrl':'https://instagram.com/reel/BAD/'}))
     def test_segment_cannot_exceed_reviewed_bounds(self):
         c={'start':2,'duration':12}
         self.assertEqual(v.requested_segment(c,{'start':2,'duration':10})['duration'],10)

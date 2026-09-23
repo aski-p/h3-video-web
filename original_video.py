@@ -64,7 +64,8 @@ def used_source(candidate, exclude=None):
     for path in ROOT.glob('*/state.json'):
         if path.parent.name==exclude:continue
         state=read(path)
-        if state['status'] not in ('queued','running','done'):continue
+        # Failed jobs still consumed the source and often prove it unsuitable.
+        if state['status']=='cancelled':continue
         if state.get('sourceSha256')==candidate['sha256']:return True
         prior=path.parent/'candidate.json'
         if source_key(candidate) and prior.exists() and source_key(read(prior))==source_key(candidate):return True
@@ -74,7 +75,7 @@ def catalog_sources():
     hashes=set();posts=set()
     for path in ROOT.glob('*/state.json'):
         state=read(path)
-        if state.get('status') not in ('queued','running','done'):continue
+        if state.get('status')=='cancelled':continue
         hashes.add(state.get('sourceSha256'))
         prior=path.parent/'candidate.json'
         if prior.exists():posts.add(source_key(read(prior)))
@@ -172,6 +173,19 @@ def face_coverage(stats,frames):
 def repairable(code):
     return code in ('identity_gate_failed','face_coverage_gate_failed','expression_gate_failed')
 
+def prepare_wardrobe_source(f,c,cfg,manifest):
+    """Extract motion without running the unrelated source-identity gate."""
+    asset=manifest['assets'][0]
+    original=(Path(cfg['nasRoot'])/asset['path']).resolve()
+    root=Path(cfg['nasRoot']).resolve()
+    if not original.is_relative_to(root) or not original.is_file() or sha(original)!=asset['sha256']:
+        raise ValueError('source_integrity_failed')
+    render=f/'render';render.mkdir()
+    run_child(['ffmpeg','-v','error','-y','-ss',str(c.get('start',0)),'-i',str(original),'-t',str(c['duration']),'-map','0:v:0','-map','0:a?','-c:v','libx264','-crf','18','-preset','fast','-c:a','aac','-movflags','+faststart',str(render/'source.mp4')],f,'wardrobe-source-extract.log',20)
+    meta=wardrobe_video.probe(render/'source.mp4')
+    if abs(meta['frames']/meta['fps']-c['duration'])>1/meta['fps']+1e-6:
+        raise ValueError('wardrobe_source_timing_failed')
+
 def quality_gate(report,workflow,stats):
     result=report.get('output',{})
     scores=result.get('referenceSimilaritySamples',[])
@@ -201,6 +215,17 @@ def process(f,repo):
         if m['assets'][0]['sha256']!=s['sourceSha256']:raise ValueError('source_integrity_failed')
         cfg.update(portrait=str(f/'portrait.jpg'),portraitSha256=s['portraitSha256']);save(f/'config.json',cfg)
         script=repo/'ops/face-quality';python=Path(cfg['engine'])/'.venv/bin/python'
+        wardrobe=wardrobe_video.normalize(s.get('wardrobe'))
+        if wardrobe!='original':
+            prepare_wardrobe_source(f,c,cfg,m)
+            def check():
+                (ROOT/'heartbeat').touch()
+                if (f/'cancel').exists():raise ValueError('cancelled')
+                current=read(f/'state.json');current['progress']=70;save(f/'state.json',current)
+            verification=wardrobe_video.process(f,repo,cfg,wardrobe,run_child,check)
+            if (f/'cancel').exists():raise ValueError('cancelled')
+            s={**s,**read(f/'state.json')};s.update(status='done',progress=100,verification=verification,error=None)
+            save(f/'state.json',s);return
         command=[str(python),str(script/'workflow.py'),'--manifest',str(manifest),'--config',str(f/'config.json'),'--output-dir',str(f/'render'),'--start',str(c.get('start',0)),'--duration',str(c['duration'])]
         command+=['--overlay-roi',*map(str,c['overlayROI'])] if c.get('overlayROI') else ['--no-account-overlay']
         # Keep failed artifacts and adjust matching; never lower output acceptance thresholds.
@@ -219,13 +244,6 @@ def process(f,repo):
                 current=read(f/'state.json');history=current.get('repairHistory',[])
                 history.append({'attempt':attempt+1,'reason':str(error),'nextReferenceDistance':(.45,.6)[attempt]})
                 current.update(repairHistory=history,error='얼굴 매칭 설정 조정 후 자동 재처리 중');save(f/'state.json',current)
-        wardrobe=wardrobe_video.normalize(s.get('wardrobe'))
-        if wardrobe!='original':
-            def check():
-                (ROOT/'heartbeat').touch()
-                if (f/'cancel').exists():raise ValueError('cancelled')
-                current=read(f/'state.json');current['progress']=70;save(f/'state.json',current)
-            verification=wardrobe_video.process(f,repo,cfg,wardrobe,run_child,check)
         if (f/'cancel').exists():raise ValueError('cancelled')
         s={**s,**read(f/'state.json')};s.update(status='done',progress=100,verification=verification,error=None)
     except Exception as e:

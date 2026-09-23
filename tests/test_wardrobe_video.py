@@ -30,6 +30,9 @@ class WardrobeTests(unittest.TestCase):
   with self.assertRaises(ValueError):w.frame_plan({'frames':480,'fps':30})
  def test_resolution_matches_approved_sample(self):
   self.assertEqual(w.size(720,1280),(720,1280));self.assertEqual(w.size(1080,1920),(720,1280))
+ def test_prompt_requires_one_visible_face(self):
+  prompt=w.motion_graph(REPO,'face.jpg','motion.mp4','dress',720,1280,107,'test')['5']['inputs']['prompt']
+  self.assertIn('Exactly one adult woman',prompt);self.assertIn('full face remains visible',prompt)
  def test_receipt_requires_all_frame_faces_and_approved_profile(self):
   report={'output':{'referenceSimilaritySamples':[.8]*5}};meta={'width':720,'height':1280,'fps':24,'frames':96};stats={'rawSkinDeltas':[0]*96,'model':'hyperswap_1b_256','expressionFactor':0}
   receipt=w.verify(report,stats,meta,meta,'yoga')

@@ -29,7 +29,7 @@ def motion_graph(repo,image,video,choice,width,height,length,prefix):
     choice=normalize(choice)
     if choice=='original':raise ValueError('wardrobe_choice_required')
     g=json.loads((repo/'ops/wardrobe-h3/graph.json').read_text())
-    prompt=("<Picture 1> defines the exact adult facial identity. <Video 1> defines only the body movement, timing, full head-to-knee framing, background and stationary camera. Generate the same motion with the face from Picture 1. The adult woman is 28. CHANGE the video outfit to "+CHOICES[choice]+". No cardigan. Non-sexual ordinary fashion. Natural skin with soft highlights, visible subtle fabric texture and realistic folds. Preserve the entire head with margin above the hair. No zoom, no reframing, no additional action. Do not copy the video person's face. No text or logo.")
+    prompt=("<Picture 1> defines the exact adult facial identity. <Video 1> defines only the body movement, timing, full head-to-knee framing, background and stationary camera. Generate the same motion with the face from Picture 1. Exactly one adult woman, age 28. Her full face remains visible, unobstructed and large enough to recognize in every frame. No other people, faces, portraits, reflections or face-like background details. CHANGE the video outfit to "+CHOICES[choice]+". No cardigan. Non-sexual ordinary fashion. Natural skin with soft highlights, visible subtle fabric texture and realistic folds. Preserve the entire head with margin above the hair. No zoom, no reframing, no additional action. Do not copy the video person's face. No text or logo.")
     g['5']['inputs'].update(prompt=prompt,width=width,height=height,length=length)
     g['15']['inputs']['image']=image;g['16']['inputs']['file']=video
     g['14']['inputs']['filename_prefix']=prefix
@@ -94,18 +94,27 @@ def process(folder,repo,cfg,choice,child,check):
     if probe(path)!=expected:raise ValueError('wardrobe_h3_generation_mismatch')
     raw=work/'motion.mp4'
     child(['ffmpeg','-v','error','-y','-i',str(path),'-an','-frames:v',str(plan['frames']),'-c:v','libx264','-crf','16','-movflags','+faststart',str(raw)],folder,'wardrobe-trim.log',80)
-    python=Path(cfg['engine'])/'.venv/bin/python';out=work/'face.mp4'
-    child([str(python),str(repo/'ops/face-quality/trial.py'),'--engine',cfg['engine'],'--source',str(raw),'--portrait',str(folder/'portrait.jpg'),'--output',str(out),'--model','hyperswap_1b_256'],folder,'wardrobe-face.log',85)
-    identity.rename(r/'original-face.mp4');source.rename(r/'original-source.mp4')
+    python=Path(cfg['engine'])/'.venv/bin/python'
+    if identity.exists():identity.rename(r/'original-face.mp4')
+    source.rename(r/'original-source.mp4')
     # Comparison uses the same 24fps grid. Preserve archived originals and do not stretch time.
     child(['ffmpeg','-v','error','-y','-i',str(r/'original-source.mp4'),'-vf',f'fps=24,scale={width}:{height}','-frames:v',str(plan['frames']),'-an','-c:v','libx264','-crf','16',str(source)],folder,'wardrobe-source.log',90)
+    source_meta=probe(source);receipt=None
+    for attempt,detector_score in enumerate((.5,.35,.2),1):
+        out=work/f'face-{attempt}.mp4';review=work/f'review-{attempt}'
+        child([str(python),str(repo/'ops/face-quality/trial.py'),'--engine',cfg['engine'],'--source',str(raw),'--portrait',str(folder/'portrait.jpg'),'--output',str(out),'--model','hyperswap_1b_256','--selector-mode','one','--detector-score',str(detector_score)],folder,f'wardrobe-face-{attempt}.log',84+attempt)
+        review.mkdir();(review/'output.mp4').symlink_to(out.resolve())
+        child([str(python),str(repo/'ops/face-quality/evaluate.py'),'--engine',cfg['engine'],'--source',str(source),'--portrait',str(folder/'portrait.jpg'),'--folder',str(review)],folder,f'wardrobe-quality-{attempt}.log',88+attempt)
+        try:
+            receipt=verify(json.loads((review/'metrics.json').read_text()),json.loads(out.with_suffix('.stats.json').read_text()),source_meta,probe(out),choice)
+            receipt.update(faceRepairAttempt=attempt,faceDetectorScore=detector_score,faceSelectorMode='one')
+            break
+        except ValueError as error:
+            if str(error) not in ('wardrobe_identity_failed','wardrobe_face_coverage_failed') or attempt==3:raise
     child(['ffmpeg','-v','error','-y','-i',str(out),'-i',str(r/'original-source.mp4'),'-map','0:v:0','-map','1:a?','-c','copy','-t',str(duration),'-movflags','+faststart',str(identity)],folder,'wardrobe-mux.log',92)
     child(['ffmpeg','-v','error','-i',str(identity),'-f','null','-'],folder,'wardrobe-decode.log',94)
-    review=work/'review';review.mkdir();(review/'output.mp4').symlink_to(identity.resolve())
-    child([str(python),str(repo/'ops/face-quality/evaluate.py'),'--engine',cfg['engine'],'--source',str(source),'--portrait',str(folder/'portrait.jpg'),'--folder',str(review)],folder,'wardrobe-quality.log',95)
     output=probe(identity)
     if output!={'width':width,'height':height,'fps':24.0,'frames':plan['frames']}:raise ValueError('wardrobe_output_mismatch')
-    receipt=verify(json.loads((review/'metrics.json').read_text()),json.loads(out.with_suffix('.stats.json').read_text()),probe(source),output,choice)
     receipt.update(sourceDimensions=meta,sourceDuration=meta['frames']/meta['fps'],outputDuration=duration,generatedFrames=plan['generatedFrames'],sourceTimingPreserved=False,comparisonTimingVerified=True)
     child(['ffmpeg','-v','error','-y','-i',str(source),'-i',str(identity),'-filter_complex','hstack=inputs=2','-an','-c:v','libx264','-crf','18','-movflags','+faststart',str(r/'comparison.mp4')],folder,'wardrobe-comparison.log',98)
     check()
