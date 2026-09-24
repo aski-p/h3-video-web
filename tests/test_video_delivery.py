@@ -99,7 +99,7 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertEqual(started[0], "200")
         self.assertEqual(started[1]["Content-Type"], "image/jpeg")
         self.assertEqual(started[1]["Cache-Control"], "private, no-store")
-        self.assertEqual(seen["url"], backend_proxy.BACKEND + "/api/archive-thumbnail/" + digest + ".jpg")
+        self.assertEqual(seen["url"], backend_proxy.BACKEND + "/api/original-video/source-thumbnail/" + source_sha)
 
         started = []
         with patch.object(backend_proxy, "ORIGIN_SECRET", self.ORIGIN_SECRET), \

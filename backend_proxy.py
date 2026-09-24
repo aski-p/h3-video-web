@@ -129,12 +129,7 @@ def proxy(environ, start_response):
             start_response("400 Bad Request", [("Content-Type", "application/json"),
                                                ("Cache-Control", PRIVATE_CACHE_CONTROL)])
             return [b'{"ok":false,"error":"invalid_thumbnail"}']
-        token = os.environ["ORIGINAL_VIDEO_TOKEN"]
-        name = hmac.new(token.encode(), source_sha.encode(), hashlib.sha256).hexdigest()
-        upstream_path = "/api/archive-thumbnail/" + name + ".jpg"
-        url = BACKEND + upstream_path
-    else:
-        url = BACKEND + path + (("?" + query) if query else "")
+    url = BACKEND + path + (("?" + query) if query else "")
     # This value comes only from Vercel's server-side environment. Never relay
     # a browser-provided header with the same name.
     headers = {"Content-Type": environ.get("CONTENT_TYPE", "application/json"),
