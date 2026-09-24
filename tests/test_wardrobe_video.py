@@ -81,4 +81,14 @@ class WardrobeTests(unittest.TestCase):
         {'__REALTIME_TIMESTAMP':'4000000','MESSAGE':'  5%|▌| 1/20 [00:35:00<11:00:00, 2100s/it]'}]
   self.assertEqual(w._sampler_log(rows,20,1)['step'],1)
   self.assertIsNone(w._sampler_log(rows[:2],20,1))
+ def test_websocket_receipt_tracks_only_own_sampler_and_estimates_remaining_steps(self):
+  event={'type':'progress_state','data':{'prompt_id':'prompt-a','nodes':{'8':{'value':4,'max':20}}}}
+  first=w._progress_event(event,'prompt-a','8',20,100)
+  self.assertEqual((first['step'],first['percent']),(4,20))
+  self.assertIsNone(first['remainingSeconds'])
+  event['data']['nodes']['8']['value']=5
+  second=w._progress_event(event,'prompt-a','8',20,140,first)
+  self.assertEqual(second['remainingSeconds'],600)
+  self.assertIsNone(w._progress_event(event,'prompt-other','8',20,140,first))
+  self.assertIsNone(w._progress_event(event,'prompt-a','9',20,140,first))
 if __name__=='__main__':unittest.main()

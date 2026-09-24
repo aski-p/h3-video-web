@@ -1,5 +1,5 @@
 """Explicit opt-in wardrobe edits. Separate receipts; never an original-pixel fallback."""
-import json,math,re,shutil,subprocess,time,urllib.error,urllib.request,uuid
+import asyncio,json,math,re,shutil,subprocess,threading,time,urllib.error,urllib.parse,urllib.request,uuid
 from pathlib import Path
 POLICY='wardrobe-h3-ref2va-v2-20260922'
 MODEL='minimax_h3_ref2va_pruned_int8_convrot.safetensors'
@@ -68,6 +68,58 @@ def _sampler_log(lines,total,submitted_at):
         except (KeyError,TypeError,ValueError):continue
     return latest
 
+def _progress_event(message,prompt_id,node_id,total,now,previous=None):
+    if message.get('type')!='progress_state':return None
+    data=message.get('data') or {}
+    if data.get('prompt_id')!=prompt_id:return None
+    node=(data.get('nodes') or {}).get(str(node_id)) or {}
+    try:
+        step=int(node['value']);maximum=int(node['max'])
+        if maximum!=total or not 0<=step<=total or step!=float(node['value']):return None
+    except (KeyError,TypeError,ValueError):return None
+    rate=None
+    if previous and step>previous.get('step',0):
+        elapsed=now-previous.get('observedAt',now)
+        if 0<elapsed<14400:rate=elapsed/(step-previous['step'])
+    if rate is None and previous:rate=previous.get('secondsPerStep')
+    return {'promptId':prompt_id,'status':'running','step':step,'steps':total,'percent':round(step*100/total),
+            'remainingSeconds':round((total-step)*rate) if rate else None,
+            'secondsPerStep':rate,'observedAt':now}
+
+def _watch_progress(record,prompt_id,client_id,node_id,total,stop):
+    """Persist ComfyUI's per-step WebSocket events; tqdm is buffered on PGX."""
+    try:import aiohttp
+    except ImportError:return
+    progress_file=record.with_suffix('.progress.json')
+    previous=None
+    if progress_file.exists():
+        try:
+            saved=json.loads(progress_file.read_text())
+            if saved.get('promptId')==prompt_id:previous=saved
+        except (OSError,ValueError):pass
+    async def listen():
+        nonlocal previous
+        url='ws://127.0.0.1:8188/ws?clientId='+urllib.parse.quote(client_id,safe='')
+        while not stop.is_set():
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.ws_connect(url,heartbeat=30,timeout=5) as ws:
+                        while not stop.is_set():
+                            try:message=await ws.receive(timeout=10)
+                            except asyncio.TimeoutError:continue
+                            if message.type==aiohttp.WSMsgType.CLOSED:break
+                            if message.type!=aiohttp.WSMsgType.TEXT:continue
+                            try:receipt=_progress_event(json.loads(message.data),prompt_id,node_id,total,time.time(),previous)
+                            except (ValueError,TypeError):continue
+                            if not receipt:continue
+                            previous=receipt
+                            temporary=progress_file.with_suffix('.progress.tmp')
+                            temporary.write_text(json.dumps(receipt));temporary.replace(progress_file)
+            except (OSError,aiohttp.ClientError,asyncio.TimeoutError):pass
+            await asyncio.sleep(2)
+    try:asyncio.run(listen())
+    except (OSError,RuntimeError):pass
+
 def generation_progress(folder):
     record=folder/'render/wardrobe/generation.json'
     if not record.is_file():return None
@@ -87,6 +139,13 @@ def generation_progress(folder):
         if len(totals)!=1:return {'status':'running'}
         total=totals.pop()
         if not 1<=total<=100:return {'status':'running'}
+        progress_file=record.with_suffix('.progress.json')
+        if progress_file.exists():
+            try:
+                receipt=json.loads(progress_file.read_text())
+                if receipt.get('promptId')==prompt_id and receipt.get('steps')==total and 0<=receipt.get('step',-1)<=total:
+                    return {k:receipt.get(k) for k in ('status','step','steps','percent','remainingSeconds','observedAt')} | {'stale':time.time()-receipt['observedAt']>5400}
+            except (OSError,ValueError,TypeError,KeyError):pass
         result=subprocess.run(['journalctl','-u','comfyui-minimax-h3.service','--since','@'+str(max(0,int(submitted_at)-1)),'--no-pager','-o','json'],capture_output=True,text=True,timeout=3,check=False)
         if result.returncode:return {'status':'running'}
         lines=[]
@@ -113,7 +172,7 @@ def render(graph,output_node,record,check):
         state={'status':'submitting','client':str(uuid.uuid4()),'attempts':0}
         record.write_text(json.dumps(state))
         graph_record.write_text(json.dumps(graph))
-    pid=state.get('promptId')
+    pid=state.get('promptId');watcher=None;watcher_stop=None;watcher_pid=None
     missing=0
     try:
         while True:
@@ -124,6 +183,13 @@ def render(graph,output_node,record,check):
                 pid=response['prompt_id']
                 state.update(status='submitted',promptId=pid,attempts=state.get('attempts',0)+1)
                 record.write_text(json.dumps(state))
+            if pid!=watcher_pid:
+                if watcher_stop:watcher_stop.set()
+                totals=[(key,int(node['inputs']['steps'])) for key,node in graph.items() if 'steps' in node.get('inputs',{})]
+                if len(totals)==1:
+                    watcher_stop=threading.Event()
+                    watcher=threading.Thread(target=_watch_progress,args=(record,pid,state['client'],totals[0][0],totals[0][1],watcher_stop),daemon=True)
+                    watcher.start();watcher_pid=pid
             h=api('/history/'+pid).get(pid)
             if h:
                 if h['status']['status_str']!='success':raise ValueError('wardrobe_generation_failed')
@@ -157,6 +223,8 @@ def render(graph,output_node,record,check):
                 if any(entry[1]==pid for entry in queue.get('queue_running',[])):api('/interrupt',{'prompt_id':pid})
             except Exception:pass
         raise
+    finally:
+        if watcher_stop:watcher_stop.set()
 
 def probe(path):
     from fractions import Fraction
