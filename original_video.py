@@ -51,7 +51,13 @@ def folder(jid):
     return ROOT/jid
 def public(s):
     return {k:s.get(k) for k in ('id','status','progress','error','policy','sourceSha256','portraitSha256','verification','createdAt','wardrobe','sourceReleasedAt')}
-def status(jid): return public(read(folder(jid)/'state.json'))
+def status(jid):
+    state=read(folder(jid)/'state.json')
+    result=public(state)
+    if state.get('status')=='running' and state.get('policy')==wardrobe_video.POLICY:
+        generation=wardrobe_video.generation_progress(folder(jid))
+        if generation:result['generation']=generation
+    return result
 def healthy():
     try:return time.time()-(ROOT/'heartbeat').stat().st_mtime<90
     except OSError:return False

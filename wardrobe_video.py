@@ -1,5 +1,5 @@
 """Explicit opt-in wardrobe edits. Separate receipts; never an original-pixel fallback."""
-import json,math,shutil,subprocess,time,urllib.request,uuid
+import json,math,re,shutil,subprocess,time,urllib.error,urllib.request,uuid
 from pathlib import Path
 POLICY='wardrobe-h3-ref2va-v2-20260922'
 MODEL='minimax_h3_ref2va_pruned_int8_convrot.safetensors'
@@ -38,6 +38,66 @@ def motion_graph(repo,image,video,choice,width,height,length,prefix):
 def api(path,data=None):
     req=urllib.request.Request(URL+path,data=json.dumps(data).encode() if data is not None else None,headers={'Content-Type':'application/json'})
     with urllib.request.urlopen(req,timeout=60) as r:return json.load(r)
+
+def _clock_seconds(value):
+    parts=value.split(':')
+    if not 1<=len(parts)<=3 or any(not p.isdigit() for p in parts):return None
+    seconds=0
+    for part in parts:seconds=seconds*60+int(part)
+    return seconds
+
+def _sampler_log(lines,total,submitted_at):
+    """Read the last ComfyUI tqdm receipt after this prompt was submitted.
+
+    The HTTP queue has no sampler counter. Journald is read-only evidence and may
+    lag; callers must display its timestamp and never call it overall completion.
+    """
+    latest=None
+    for row in lines:
+        try:
+            timestamp=int(row['__REALTIME_TIMESTAMP'])/1000000
+            message=row.get('MESSAGE','')
+            if isinstance(message,list):message=bytes(message).decode(errors='replace')
+            if timestamp+1<submitted_at:continue
+            if 'Prompt executed' in message:latest=None
+            matches=list(re.finditer(r'(\d{1,3})%[^\r\n]*?(\d{1,3})/(\d{1,3}) \[(\d+:\d+(?::\d+)?)<(?:(\d+:\d+(?::\d+)?)|\?)',message))
+            for match in matches:
+                percent,step,maximum=map(int,match.group(1,2,3))
+                if maximum!=total or not 0<=step<=total or percent!=round(step*100/total):continue
+                latest={'step':step,'steps':total,'percent':percent,'remainingSeconds':_clock_seconds(match.group(5)) if match.group(5) else None,'observedAt':timestamp}
+        except (KeyError,TypeError,ValueError):continue
+    return latest
+
+def generation_progress(folder):
+    record=folder/'render/wardrobe/generation.json'
+    if not record.is_file():return None
+    try:
+        generation=json.loads(record.read_text())
+        prompt_id=generation.get('promptId')
+        if not isinstance(prompt_id,str) or not re.fullmatch(r'[a-f0-9-]{36}',prompt_id):return None
+        req=urllib.request.Request(URL+'/queue')
+        with urllib.request.urlopen(req,timeout=3) as response:queue=json.load(response)
+        running=any(entry[1]==prompt_id for entry in queue.get('queue_running',[]))
+        pending=next((index+1 for index,entry in enumerate(queue.get('queue_pending',[])) if entry[1]==prompt_id),None)
+        if not running:return {'status':'queued','queuePosition':pending} if pending is not None else None
+        entry=next(entry for entry in queue['queue_running'] if entry[1]==prompt_id)
+        submitted_at=entry[3].get('create_time',0)/1000 if len(entry)>3 and isinstance(entry[3],dict) else record.stat().st_mtime
+        graph=json.loads(record.with_suffix('.graph.json').read_text())
+        totals={int(node['inputs']['steps']) for node in graph.values() if 'steps' in node.get('inputs',{})}
+        if len(totals)!=1:return {'status':'running'}
+        total=totals.pop()
+        if not 1<=total<=100:return {'status':'running'}
+        result=subprocess.run(['journalctl','-u','comfyui-minimax-h3.service','--since','@'+str(max(0,int(submitted_at)-1)),'--no-pager','-o','json'],capture_output=True,text=True,timeout=3,check=False)
+        if result.returncode:return {'status':'running'}
+        lines=[]
+        for line in result.stdout.splitlines():
+            try:lines.append(json.loads(line))
+            except json.JSONDecodeError:continue
+        receipt=_sampler_log(lines,total,submitted_at)
+        if not receipt:return {'status':'running','steps':total}
+        return {'status':'running',**receipt,'stale':time.time()-receipt['observedAt']>5400}
+    except (OSError,ValueError,KeyError,TypeError,IndexError,subprocess.TimeoutExpired,urllib.error.URLError):
+        return None
 
 def render(graph,output_node,record,check):
     graph_record=record.with_suffix('.graph.json')

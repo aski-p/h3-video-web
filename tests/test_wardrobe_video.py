@@ -69,4 +69,16 @@ class WardrobeTests(unittest.TestCase):
    self.assertEqual(staged.read_bytes(),source.read_bytes())
    self.assertFalse(staged.is_symlink())
    self.assertEqual(w.stage_review_output(source,review),staged)
+ def test_sampler_receipt_reports_actual_steps_and_sampler_eta(self):
+  rows=[{'__REALTIME_TIMESTAMP':'2000000','MESSAGE':' 50%|█████| 10/20 [6:00:00<6:08:35, 2211.56s/it]'}]
+  progress=w._sampler_log(rows,20,1)
+  self.assertEqual(progress['step'],10)
+  self.assertEqual(progress['percent'],50)
+  self.assertEqual(progress['remainingSeconds'],6*3600+8*60+35)
+ def test_sampler_receipt_does_not_reuse_finished_previous_prompt(self):
+  rows=[{'__REALTIME_TIMESTAMP':'2000000','MESSAGE':'100%|██████████| 20/20 [5:27:45<00:00, 983s/it]'},
+        {'__REALTIME_TIMESTAMP':'3000000','MESSAGE':'Prompt executed in 05:35:02'},
+        {'__REALTIME_TIMESTAMP':'4000000','MESSAGE':'  5%|▌| 1/20 [00:35:00<11:00:00, 2100s/it]'}]
+  self.assertEqual(w._sampler_log(rows,20,1)['step'],1)
+  self.assertIsNone(w._sampler_log(rows[:2],20,1))
 if __name__=='__main__':unittest.main()
