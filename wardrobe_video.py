@@ -40,16 +40,30 @@ def api(path,data=None):
     with urllib.request.urlopen(req,timeout=60) as r:return json.load(r)
 
 def render(graph,output_node,record,check):
-    if record.exists():raise ValueError('existing_generation_requires_review')
-    record.write_text(json.dumps({'status':'submitting','client':str(uuid.uuid4())}))
-    (record.with_suffix('.graph.json')).write_text(json.dumps(graph))
-    pid=None
+    graph_record=record.with_suffix('.graph.json')
+    if record.exists():
+        if not graph_record.exists() or json.loads(graph_record.read_text())!=graph:
+            raise ValueError('existing_generation_requires_review')
+        state=json.loads(record.read_text())
+        if state.get('status')=='done':
+            path=Path(state['output']).resolve()
+            if path.is_relative_to(OUTPUT.resolve()) and path.is_file():return path
+            raise ValueError('wardrobe_output_missing')
+    else:
+        state={'status':'submitting','client':str(uuid.uuid4()),'attempts':0}
+        record.write_text(json.dumps(state))
+        graph_record.write_text(json.dumps(graph))
+    pid=state.get('promptId')
+    missing=0
     try:
-        check()
-        response=api('/prompt',{'prompt':graph,'client_id':json.loads(record.read_text())['client']})
-        pid=response['prompt_id'];record.write_text(json.dumps({'status':'submitted','promptId':pid}))
-        for _ in range(2160):
+        while True:
             check()
+            if not pid:
+                if state.get('attempts',0)>=3:raise ValueError('wardrobe_submission_retries_exhausted')
+                response=api('/prompt',{'prompt':graph,'client_id':state['client']})
+                pid=response['prompt_id']
+                state.update(status='submitted',promptId=pid,attempts=state.get('attempts',0)+1)
+                record.write_text(json.dumps(state))
             h=api('/history/'+pid).get(pid)
             if h:
                 if h['status']['status_str']!='success':raise ValueError('wardrobe_generation_failed')
@@ -57,12 +71,30 @@ def render(graph,output_node,record,check):
                 if not entries or entries[0].get('type')!='output':raise ValueError('wardrobe_output_missing')
                 e=entries[0];path=(OUTPUT/e.get('subfolder','')/e['filename']).resolve()
                 if not path.is_relative_to(OUTPUT.resolve()) or not path.is_file():raise ValueError('wardrobe_output_path')
-                record.write_text(json.dumps({'status':'done','promptId':pid,'output':str(path)}));return path
+                state.update(status='done',output=str(path))
+                record.write_text(json.dumps(state));return path
+            queue=api('/queue')
+            if any(entry[1]==pid for key in ('queue_running','queue_pending') for entry in queue.get(key,[])):
+                missing=0
+            else:
+                missing+=1
+                if missing>=3:
+                    outputs=list((OUTPUT/'wardrobe-h3').glob(record.parent.parent.parent.name+'_*.mp4'))
+                    if len(outputs)==1:
+                        state.update(status='done',output=str(outputs[0].resolve()))
+                        record.write_text(json.dumps(state));return outputs[0]
+                    if outputs:raise ValueError('wardrobe_output_ambiguous')
+                    state.update(status='submitting',promptId=None)
+                    record.write_text(json.dumps(state))
+                    pid=None;missing=0
             time.sleep(5)
-        raise ValueError('wardrobe_timeout')
-    except BaseException:
+    except ValueError as error:
+        if str(error)!='cancelled':raise
         if pid:
-            try:api('/queue',{'delete':[pid]});api('/interrupt',{'prompt_id':pid})
+            try:
+                queue=api('/queue')
+                if any(entry[1]==pid for entry in queue.get('queue_pending',[])):api('/queue',{'delete':[pid]})
+                if any(entry[1]==pid for entry in queue.get('queue_running',[])):api('/interrupt',{'prompt_id':pid})
             except Exception:pass
         raise
 
@@ -80,7 +112,7 @@ def verify(report,stats,source,output,choice):
     return {'policy':POLICY,'wardrobe':choice,'timingVerified':True,'faceCoverage':1,'sampleIdentityMean':sum(scores)/len(scores),'sampleIdentityMin':min(scores),'regeneratedFrames':True,'originalPixelsPreserved':False,'visualReview':'required','publishApproved':False,'dimensions':output,'engine':'minimax_h3_ref2va','model':MODEL,'steps':20,'faceModel':'hyperswap_1b_256','nativeMotionPreserved':False}
 
 def process(folder,repo,cfg,choice,child,check):
-    choice=normalize(choice);r=folder/'render';work=r/'wardrobe';work.mkdir()
+    choice=normalize(choice);r=folder/'render';work=r/'wardrobe';work.mkdir(exist_ok=True)
     source=r/'source.mp4';identity=r/'output.mp4';meta=probe(source);width,height=size(meta['width'],meta['height'])
     plan=frame_plan(meta);duration=plan['frames']/24;ident=folder.name
     # Use the original cleaned source for motion, exactly as in the approved H3 trial.

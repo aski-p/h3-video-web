@@ -92,3 +92,21 @@ class CoverageInstrumentationTests(unittest.TestCase):
         self.assertTrue(v.repairable('identity_gate_failed'))
         for code in ['content_blocked','quality_pipeline_failed','cancelled','source_integrity_failed']:
             self.assertFalse(v.repairable(code))
+
+class WardrobeResumeTests(unittest.TestCase):
+    def test_timeout_requeues_same_job_and_keeps_source_locked(self):
+        with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+            jid='orig_'+'e'*32;f=Path(tmp)/jid;record=f/'render/wardrobe/generation.json';record.parent.mkdir(parents=True)
+            record.write_text(json.dumps({'status':'submitted','promptId':'old'}))
+            record.with_suffix('.graph.json').write_text('{}')
+            (f/'candidate.json').write_text(json.dumps({'sourceUrl':'https://instagram.com/reel/POST/'}))
+            (f/'state.json').write_text(json.dumps({'id':jid,'status':'error','policy':v.wardrobe_video.POLICY,'sourceSha256':'source','error':'원본 기반 품질 검사 미통과 · wardrobe_timeout'}))
+            self.assertEqual(v.retry_wardrobe(jid)['job']['status'],'queued')
+            self.assertEqual(v.retry_wardrobe(jid)['job']['status'],'queued')
+            self.assertTrue(v.used_source({'sha256':'source','sourceUrl':'other'}))
+            self.assertEqual(json.loads(record.read_text())['promptId'],'old')
+    def test_other_failures_do_not_requeue_without_repair(self):
+        with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+            jid='orig_'+'f'*32;f=Path(tmp)/jid;f.mkdir()
+            (f/'state.json').write_text(json.dumps({'id':jid,'status':'error','policy':v.wardrobe_video.POLICY,'error':'wardrobe_face_coverage_failed'}))
+            with self.assertRaisesRegex(ValueError,'unavailable'):v.retry_wardrobe(jid)

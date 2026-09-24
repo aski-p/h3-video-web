@@ -126,6 +126,24 @@ def cancel(jid):
     f=folder(jid);s=read(f/'state.json')
     if s['status'] not in TERMINAL:(f/'cancel').touch()
     return {'ok':True,'job':public(s)}
+def retry_wardrobe(jid):
+    ROOT.mkdir(parents=True,exist_ok=True)
+    with (ROOT/'.submit.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        f=folder(jid);s=read(f/'state.json')
+        if s.get('policy')!=wardrobe_video.POLICY or s.get('sourceReleasedAt') or (f/'cancel').exists():
+            raise ValueError('wardrobe_retry_unavailable')
+        if s['status'] in ('queued','running'):return {'ok':True,'job':public(s)}
+        if s['status']!='error' or not str(s.get('error','')).endswith('wardrobe_timeout'):
+            raise ValueError('wardrobe_retry_unavailable')
+        record=f/'render/wardrobe/generation.json'
+        if not record.is_file() or not record.with_suffix('.graph.json').is_file():
+            raise ValueError('wardrobe_generation_record_missing')
+        history=s.get('repairHistory',[])
+        history.append({'reason':s.get('error'),'at':time.time(),'action':'resume_existing_generation'})
+        s.update(status='queued',progress=0,error=None,repairHistory=history)
+        save(f/'state.json',s)
+        return {'ok':True,'job':public(s)}
 def release_source(jid):
     ROOT.mkdir(parents=True,exist_ok=True)
     with (ROOT/'.submit.lock').open('a') as lock:
@@ -149,6 +167,7 @@ def handle(handler,path,send_json,post=False):
         jid=parts[3];f=folder(jid)
         if len(parts)==4 and not post:send_json(handler,{'ok':True,'job':status(jid)});return
         if len(parts)==5 and parts[4]=='cancel' and post:send_json(handler,cancel(jid));return
+        if len(parts)==5 and parts[4]=='retry-wardrobe' and post:send_json(handler,retry_wardrobe(jid));return
         if len(parts)==5 and parts[4]=='release-source' and post:send_json(handler,release_source(jid));return
         files={'video':'output.mp4','comparison':'comparison.mp4','source':'source.mp4'}
         if len(parts)==5 and parts[4] in files and not post:

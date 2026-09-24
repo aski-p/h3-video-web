@@ -49,4 +49,15 @@ class WardrobeTests(unittest.TestCase):
    d={'requestId':'11111111-1111-1111-1111-111111111111:1','sourceSha256':'abc','portrait':'data:image/jpeg;base64,/9j/','wardrobe':'dress','wardrobePolicy':w.POLICY}
    self.assertEqual(v.submit(d)['policy'],w.POLICY)
    with self.assertRaisesRegex(ValueError,'conflict'):v.submit({**d,'wardrobe':'casual'})
+ def test_finished_prompt_resumes_without_duplicate_submission(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);output=root/'output';output.mkdir();video=output/'clip.mp4';video.write_bytes(b'video')
+   record=root/'generation.json';graph={'14':{'inputs':{'filename_prefix':'clip'}}}
+   record.write_text(json.dumps({'status':'submitted','client':'client','promptId':'prompt'}))
+   record.with_suffix('.graph.json').write_text(json.dumps(graph))
+   history={'prompt':{'status':{'status_str':'success'},'outputs':{'14':{'images':[{'type':'output','filename':'clip.mp4','subfolder':''}]}}}}
+   with patch.object(w,'OUTPUT',output),patch.object(w,'api',return_value=history) as api:
+    self.assertEqual(w.render(graph,'14',record,lambda:None),video)
+    self.assertEqual(record.read_text() and json.loads(record.read_text())['status'],'done')
+    self.assertFalse(any(call.args[0]=='/prompt' for call in api.call_args_list))
 if __name__=='__main__':unittest.main()
