@@ -91,4 +91,9 @@ class WardrobeTests(unittest.TestCase):
   self.assertEqual(second['remainingSeconds'],600)
   self.assertIsNone(w._progress_event(event,'prompt-other','8',20,140,first))
   self.assertIsNone(w._progress_event(event,'prompt-a','9',20,140,first))
+ def test_sampler_progress_config_uses_sampler_node_not_scheduler_node(self):
+  graph={'8':{'class_type':'BasicScheduler','inputs':{'steps':20}},
+         '10':{'class_type':'SamplerCustomAdvanced','inputs':{'sigmas':['8',0]}}}
+  self.assertEqual(w._sampler_progress_config(graph),('10',20))
+  self.assertIsNone(w._sampler_progress_config({'8':graph['8']}))
 if __name__=='__main__':unittest.main()

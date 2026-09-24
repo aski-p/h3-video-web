@@ -86,6 +86,18 @@ def _progress_event(message,prompt_id,node_id,total,now,previous=None):
             'remainingSeconds':round((total-step)*rate) if rate else None,
             'secondsPerStep':rate,'observedAt':now}
 
+def _sampler_progress_config(graph):
+    for node_id,node in graph.items():
+        if node.get('class_type')!='SamplerCustomAdvanced':continue
+        sigmas=node.get('inputs',{}).get('sigmas')
+        if not isinstance(sigmas,list) or not sigmas:continue
+        scheduler=graph.get(str(sigmas[0]),{})
+        if scheduler.get('class_type')!='BasicScheduler':continue
+        try:steps=int(scheduler['inputs']['steps'])
+        except (KeyError,TypeError,ValueError):continue
+        if steps>0:return node_id,steps
+    return None
+
 def _watch_progress(record,prompt_id,client_id,node_id,total,stop):
     """Persist ComfyUI's per-step WebSocket events; tqdm is buffered on PGX."""
     try:import aiohttp
@@ -185,10 +197,10 @@ def render(graph,output_node,record,check):
                 record.write_text(json.dumps(state))
             if pid!=watcher_pid:
                 if watcher_stop:watcher_stop.set()
-                totals=[(key,int(node['inputs']['steps'])) for key,node in graph.items() if 'steps' in node.get('inputs',{})]
-                if len(totals)==1:
+                sampler=_sampler_progress_config(graph)
+                if sampler:
                     watcher_stop=threading.Event()
-                    watcher=threading.Thread(target=_watch_progress,args=(record,pid,state['client'],totals[0][0],totals[0][1],watcher_stop),daemon=True)
+                    watcher=threading.Thread(target=_watch_progress,args=(record,pid,state['client'],*sampler,watcher_stop),daemon=True)
                     watcher.start();watcher_pid=pid
             h=api('/history/'+pid).get(pid)
             if h:
