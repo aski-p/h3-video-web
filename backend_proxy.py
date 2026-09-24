@@ -4,6 +4,7 @@ import ipaddress
 import json
 import hmac
 import os
+import re
 import urllib.request
 import urllib.error
 
@@ -44,9 +45,9 @@ def _cache_control_for_path(path):
     return PRIVATE_CACHE_CONTROL
 
 
-def _proxy_response(r, start_response, is_video=False, cache_control=PRIVATE_CACHE_CONTROL):
+def _proxy_response(r, start_response, is_video=False, cache_control=PRIVATE_CACHE_CONTROL, content_type=None):
     """HTTP response를 stream으로 반환 (다운로드 시 헤더 보존, 메모리 절감)."""
-    headers = [("Content-Type", r.headers.get("Content-Type", "application/json")),
+    headers = [("Content-Type", content_type or r.headers.get("Content-Type", "application/json")),
                ("Access-Control-Allow-Origin", "*"),
                ("Cache-Control", cache_control)]
     if is_video:
@@ -92,6 +93,11 @@ def proxy(environ, start_response):
             start_response("401", [("Content-Type", "application/json"),
                                    ("Cache-Control", PRIVATE_CACHE_CONTROL)])
             return [err]
+    # The static archive is an internal data plane, never a public URL.
+    if path.startswith("/api/archive-thumbnail/"):
+        start_response("404 Not Found", [("Content-Type", "application/json"),
+                                         ("Cache-Control", PRIVATE_CACHE_CONTROL)])
+        return [b'{"ok":false,"error":"not_found"}']
     if path.startswith("/api/original-video/"):
         token = os.environ.get("ORIGINAL_VIDEO_TOKEN", "")
         if not token or not hmac.compare_digest(environ.get("HTTP_X_ASKI_ORIGINAL_TOKEN", ""), token):
@@ -116,7 +122,19 @@ def proxy(environ, start_response):
                 or path.startswith("/api/worker/input/") or path.startswith("/api/original-video/jobs/") or path == "/api/refv")
     cache_control = _cache_control_for_path(path)
     query = environ.get("QUERY_STRING", "")
-    url = BACKEND + path + (("?" + query) if query else "")
+    source_thumbnail = path.startswith("/api/original-video/source-thumbnail/")
+    if source_thumbnail:
+        source_sha = path.removeprefix("/api/original-video/source-thumbnail/")
+        if method not in ("GET", "HEAD") or not re.fullmatch(r"[a-f0-9]{64}", source_sha):
+            start_response("400 Bad Request", [("Content-Type", "application/json"),
+                                               ("Cache-Control", PRIVATE_CACHE_CONTROL)])
+            return [b'{"ok":false,"error":"invalid_thumbnail"}']
+        token = os.environ["ORIGINAL_VIDEO_TOKEN"]
+        name = hmac.new(token.encode(), source_sha.encode(), hashlib.sha256).hexdigest()
+        upstream_path = "/api/archive-thumbnail/" + name + ".jpg"
+        url = BACKEND + upstream_path
+    else:
+        url = BACKEND + path + (("?" + query) if query else "")
     # This value comes only from Vercel's server-side environment. Never relay
     # a browser-provided header with the same name.
     headers = {"Content-Type": environ.get("CONTENT_TYPE", "application/json"),
@@ -143,7 +161,7 @@ def proxy(environ, start_response):
         # WSGI iterator that must keep the upstream socket open while bytes
         # are sent to the browser.
         r = urllib.request.urlopen(req, timeout=300)
-        return _proxy_response(r, start_response, is_video, cache_control)
+        return _proxy_response(r, start_response, is_video, cache_control, "image/jpeg" if source_thumbnail else None)
     except urllib.error.HTTPError as e:
         data = e.read()
         headers = [("Content-Type", "application/json"),

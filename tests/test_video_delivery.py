@@ -70,6 +70,46 @@ class VideoDeliveryTests(unittest.TestCase):
             spec.loader.exec_module(module)
         self.assertEqual(module.BACKEND, "https://thinkstationpgx-11d3.tailccac79.ts.net")
 
+    def test_original_thumbnail_uses_private_static_archive_without_backend_restart(self):
+        source_sha = "a" * 64
+        token = "unit-test-original-token"
+        digest = hmac.new(token.encode(), source_sha.encode(), hashlib.sha256).hexdigest()
+        seen = {}
+
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "application/octet-stream"}
+            def read(self, _size):
+                if getattr(self, "done", False): return b""
+                self.done = True; return b"\xff\xd8\xfftest"
+            def close(self): pass
+
+        def fake_open(request, timeout):
+            seen["url"] = request.full_url
+            return FakeResponse()
+
+        env = {"REQUEST_METHOD": "GET", "PATH_INFO": "/api/original-video/source-thumbnail/" + source_sha,
+               "QUERY_STRING": "", "wsgi.input": None, "HTTP_X_ASKI_ORIGINAL_TOKEN": token}
+        started = []
+        with patch.object(backend_proxy, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch.dict(os.environ, {"ORIGINAL_VIDEO_TOKEN": token}), \
+             patch("urllib.request.urlopen", fake_open):
+            result = backend_proxy.handler(env, lambda status, headers: started.extend([status, dict(headers)]))
+            self.assertEqual(b"".join(result), b"\xff\xd8\xfftest")
+        self.assertEqual(started[0], "200")
+        self.assertEqual(started[1]["Content-Type"], "image/jpeg")
+        self.assertEqual(started[1]["Cache-Control"], "private, no-store")
+        self.assertEqual(seen["url"], backend_proxy.BACKEND + "/api/archive-thumbnail/" + digest + ".jpg")
+
+        started = []
+        with patch.object(backend_proxy, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch("urllib.request.urlopen") as urlopen:
+            result = backend_proxy.handler({"REQUEST_METHOD": "GET", "PATH_INFO": "/api/archive-thumbnail/" + digest + ".jpg"},
+                                           lambda status, headers: started.extend([status, dict(headers)]))
+        self.assertEqual(started[0], "404 Not Found")
+        urlopen.assert_not_called()
+        self.assertFalse(json.loads(b"".join(result))["ok"])
+
     def test_proxy_fails_closed_without_origin_secret(self):
         started = []
         env = {"REQUEST_METHOD": "GET", "PATH_INFO": "/api/jobs", "QUERY_STRING": "", "wsgi.input": None}
