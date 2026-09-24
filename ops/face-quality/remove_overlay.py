@@ -17,6 +17,7 @@ p.add_argument('--source', type=Path, required=True)
 p.add_argument('--output', type=Path, required=True)
 p.add_argument('--model', type=Path, required=True)
 p.add_argument('--roi', type=int, nargs=4, required=True, metavar=('X', 'Y', 'W', 'H'))
+p.add_argument('--full-roi', action='store_true', help='Restore a stable account mark, including dark or translucent text')
 p.add_argument('--limit', type=int, default=0)
 a = p.parse_args()
 if a.source.resolve() == a.output.resolve():
@@ -38,21 +39,25 @@ h, w = frames[0].shape[:2]
 x, y, rw, rh = a.roi
 if not (0 <= x < x+rw <= w and 0 <= y < y+rh <= h):
     p.error('ROI outside source')
-# Track the overlay template within a bounded neighborhood, frame by frame.
-gray0 = cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY)
-template = gray0[y:y+rh, x:x+rw]
-glyph = (template > 210).astype(np.uint8)*255
-glyph = cv2.dilate(glyph, np.ones((7, 7), np.uint8))
-sx, sy = max(0,x-120), max(0,y-120)
-ex, ey = min(w,x+rw+120), min(h,y+rh+120)
-positions=[]
-for frame in frames:
-    gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
-    match=cv2.matchTemplate((gray[sy:ey,sx:ex]>210).astype(np.uint8),(template>210).astype(np.uint8),cv2.TM_CCOEFF_NORMED)
-    _,confidence,_,loc=cv2.minMaxLoc(match)
-    if confidence < .55:
-        raise ValueError(f'Overlay tracking confidence too low: {confidence}')
-    positions.append((sx+loc[0],sy+loc[1],confidence))
+if a.full_roi:
+    glyph = np.ones((rh, rw), np.uint8) * 255
+    positions = [(x, y, 1.0)] * len(frames)
+else:
+    # Preserve the approved manual ROI path for bright, trackable text.
+    gray0 = cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY)
+    template = gray0[y:y+rh, x:x+rw]
+    glyph = (template > 210).astype(np.uint8)*255
+    glyph = cv2.dilate(glyph, np.ones((7, 7), np.uint8))
+    sx, sy = max(0,x-120), max(0,y-120)
+    ex, ey = min(w,x+rw+120), min(h,y+rh+120)
+    positions=[]
+    for frame in frames:
+        gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
+        match=cv2.matchTemplate((gray[sy:ey,sx:ex]>210).astype(np.uint8),(template>210).astype(np.uint8),cv2.TM_CCOEFF_NORMED)
+        _,confidence,_,loc=cv2.minMaxLoc(match)
+        if confidence < .55:
+            raise ValueError(f'Overlay tracking confidence too low: {confidence}')
+        positions.append((sx+loc[0],sy+loc[1],confidence))
 print('tracking', positions[::30], flush=True)
 model = torch.jit.load(str(a.model), map_location='cpu').eval()
 raw = a.output.with_suffix('.silent.mp4')
@@ -85,5 +90,5 @@ except BaseException:
     raise
 subprocess.run(['ffmpeg','-v','error','-i',str(raw),'-i',str(a.source),'-map','0:v:0','-map','1:a?','-c','copy','-shortest','-movflags','+faststart','-y',str(a.output)],check=True)
 raw.unlink()
-a.output.with_suffix('.json').write_text(json.dumps({'source':str(a.source),'method':'LaMa tracked glyph mask; estimated texture','tracking':positions,'roi':a.roi,'maskedPixels':int((mask>0).sum()),'frames':a.limit or len(frames),'fps':fps},indent=2))
+a.output.with_suffix('.json').write_text(json.dumps({'source':str(a.source),'method':'LaMa screen-fixed ROI; estimated texture' if a.full_roi else 'LaMa tracked glyph mask; estimated texture','tracking':positions,'roi':a.roi,'maskedPixels':int((mask>0).sum()),'frames':a.limit or len(frames),'fps':fps},indent=2))
 cv2.imwrite(str(a.output.with_suffix('.mask.png')),mask)

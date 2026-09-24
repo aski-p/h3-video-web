@@ -295,7 +295,7 @@ def process(f,repo):
             s={**s,**read(f/'state.json')};s.update(status='done',progress=100,verification=verification,error=None)
             save(f/'state.json',s);return
         command=[str(python),str(script/'workflow.py'),'--manifest',str(manifest),'--config',str(f/'config.json'),'--output-dir',str(f/'render'),'--start',str(c.get('start',0)),'--duration',str(c['duration'])]
-        command+=['--overlay-roi',*map(str,c['overlayROI'])] if c.get('overlayROI') else ['--no-account-overlay']
+        command+=['--overlay-roi',*map(str,c['overlayROI'])] if c.get('overlayROI') else ['--auto-account-overlay']
         # Keep failed artifacts and adjust matching; never lower output acceptance thresholds.
         import shutil
         for attempt,distance in enumerate((.3,.45,.6)):

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 from fractions import Fraction
+from urllib.parse import urlparse
 
 HERE = Path(__file__).resolve().parent
 
@@ -36,6 +37,15 @@ def original_from_manifest(root, manifest):
         raise ValueError('Original integrity check failed')
     return original
 
+def scan_account_overlay(config, video, username):
+    try:
+        result = subprocess.run([config['inpaintPython'], str(HERE/'detect_account_overlay.py'),
+                                 '--source', str(video), '--username', username],
+                                capture_output=True, text=True, timeout=90, check=True)
+        return json.loads(result.stdout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+        raise ValueError('account_overlay_review_required') from error
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--manifest', type=Path, required=True)
@@ -46,10 +56,11 @@ def main():
     p.add_argument('--reference-frame', type=int)
     p.add_argument('--reference-distance',type=float,default=.3)
     p.add_argument('--overlay-roi', nargs=4, type=int)
+    p.add_argument('--auto-account-overlay', action='store_true', help='Detect and restore a stable account mark')
     p.add_argument('--no-account-overlay', action='store_true', help='Explicitly record that this source was inspected and has no account-name overlay')
     a = p.parse_args()
-    if bool(a.overlay_roi) == a.no_account_overlay:
-        p.error('Inspect the source, then choose --overlay-roi or --no-account-overlay')
+    if sum((bool(a.overlay_roi), a.auto_account_overlay, a.no_account_overlay)) != 1:
+        p.error('Choose exactly one account-overlay review mode')
     config = json.loads(a.config.read_text())
     profile = json.loads((HERE/'default-profile.json').read_text())
     manifest = json.loads(a.manifest.read_text())
@@ -70,18 +81,29 @@ def main():
     subprocess.run(['ffmpeg','-v','error','-ss',str(a.start),'-i',str(original),'-t',str(duration),'-map','0:v:0','-map','0:a?','-c:v','libx264','-crf','18','-preset','fast','-c:a','aac','-movflags','+faststart',str(source)],check=True)
     source_meta = video_meta(source)
     if abs(source_meta['frames']/source_meta['fps']-duration)>1/source_meta['fps']+1e-6:raise ValueError('Extracted duration differs from requested segment')
+    overlay_review = None
+    if a.auto_account_overlay:
+        username = urlparse(manifest['sourceUrl']).path.strip('/').split('/')[0]
+        overlay_review = scan_account_overlay(config, source, username)
+        a.overlay_roi = overlay_review['overlayROI']
     reference = a.reference_frame if a.reference_frame is not None else min(round(source_meta['fps']*profile['referenceTimeSeconds']),source_meta['frames']-1)
     if not 0 <= reference < source_meta['frames']:
         raise ValueError('Reference frame outside clip')
-    record = {'profile':profile,'sourceUrl':manifest['sourceUrl'],'originalSha256':digest(original),'portraitSha256':digest(portrait),'start':a.start,'duration':duration,'referenceFrame':reference,'overlayROI':a.overlay_roi,'overlayReviewed':True,'visualReview':'pending','source':source_meta}
+    record = {'profile':profile,'sourceUrl':manifest['sourceUrl'],'originalSha256':digest(original),'portraitSha256':digest(portrait),'start':a.start,'duration':duration,'referenceFrame':reference,'overlayROI':a.overlay_roi,'overlayReview':overlay_review,'overlayReviewed':bool(a.overlay_roi or a.no_account_overlay),'visualReview':'pending','source':source_meta}
     (r/'workflow.json').write_text(json.dumps(record,ensure_ascii=False,indent=2))
     with (r/'render.log').open('w') as log:
         subprocess.run([sys.executable,str(HERE/'trial.py'),'--engine',config['engine'],'--source',str(source),'--portrait',str(r/'portrait.jpg'),'--output',str(swapped),'--model',profile['model'],'--reference-frame',str(reference),'--reference-distance',str(a.reference_distance)],stdout=log,stderr=subprocess.STDOUT,check=True)
     if a.overlay_roi:
         with (r/'restoration.log').open('w') as log:
-            subprocess.run([config['inpaintPython'],str(HERE/'remove_overlay.py'),'--source',str(swapped),'--output',str(output),'--model',config['inpaintModel'],'--roi',*map(str,a.overlay_roi)],stdout=log,stderr=subprocess.STDOUT,check=True)
+            command=[config['inpaintPython'],str(HERE/'remove_overlay.py'),'--source',str(swapped),'--output',str(output),'--model',config['inpaintModel'],'--roi',*map(str,a.overlay_roi)]
+            if a.auto_account_overlay:command.append('--full-roi')
+            subprocess.run(command,stdout=log,stderr=subprocess.STDOUT,check=True)
     else:
         shutil.copy2(swapped,output)
+    if a.auto_account_overlay and a.overlay_roi:
+        record['overlayOutputReview'] = scan_account_overlay(config, output, username)
+        if record['overlayOutputReview']['overlayROI']:
+            raise ValueError('account_overlay_remains')
     meta = video_meta(output)
     if meta != source_meta:
         raise ValueError('Output timing or dimensions changed')
