@@ -60,4 +60,13 @@ class WardrobeTests(unittest.TestCase):
     self.assertEqual(w.render(graph,'14',record,lambda:None),video)
     self.assertEqual(record.read_text() and json.loads(record.read_text())['status'],'done')
     self.assertFalse(any(call.args[0]=='/prompt' for call in api.call_args_list))
+ def test_review_output_stages_on_filesystems_without_symlinks(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);source=root/'face.mp4';source.write_bytes(b'generated-video')
+   review=root/'review'
+   with patch.object(Path,'symlink_to',side_effect=OSError(95,'Operation not supported')):
+    staged=w.stage_review_output(source,review)
+   self.assertEqual(staged.read_bytes(),source.read_bytes())
+   self.assertFalse(staged.is_symlink())
+   self.assertEqual(w.stage_review_output(source,review),staged)
 if __name__=='__main__':unittest.main()

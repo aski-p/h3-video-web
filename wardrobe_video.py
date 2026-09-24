@@ -111,6 +111,13 @@ def verify(report,stats,source,output,choice):
     if not __import__('original_video').face_coverage(stats,source['frames']) or stats.get('model')!='hyperswap_1b_256' or stats.get('expressionFactor')!=0 or stats.get('appliedLabDelta') is not None:raise ValueError('wardrobe_face_coverage_failed')
     return {'policy':POLICY,'wardrobe':choice,'timingVerified':True,'faceCoverage':1,'sampleIdentityMean':sum(scores)/len(scores),'sampleIdentityMin':min(scores),'regeneratedFrames':True,'originalPixelsPreserved':False,'visualReview':'required','publishApproved':False,'dimensions':output,'engine':'minimax_h3_ref2va','model':MODEL,'steps':20,'faceModel':'hyperswap_1b_256','nativeMotionPreserved':False}
 
+def stage_review_output(output,review):
+    # The durable job directory is on SMB, where symbolic links are unsupported.
+    review.mkdir(exist_ok=True)
+    destination=review/'output.mp4'
+    shutil.copy2(output,destination)
+    return destination
+
 def process(folder,repo,cfg,choice,child,check):
     choice=normalize(choice);r=folder/'render';work=r/'wardrobe';work.mkdir(exist_ok=True)
     source=r/'source.mp4';identity=r/'output.mp4';meta=probe(source);width,height=size(meta['width'],meta['height'])
@@ -135,7 +142,7 @@ def process(folder,repo,cfg,choice,child,check):
     for attempt,detector_score in enumerate((.5,.35,.2),1):
         out=work/f'face-{attempt}.mp4';review=work/f'review-{attempt}'
         child([str(python),str(repo/'ops/face-quality/trial.py'),'--engine',cfg['engine'],'--source',str(raw),'--portrait',str(folder/'portrait.jpg'),'--output',str(out),'--model','hyperswap_1b_256','--selector-mode','one','--detector-score',str(detector_score)],folder,f'wardrobe-face-{attempt}.log',84+attempt)
-        review.mkdir();(review/'output.mp4').symlink_to(out.resolve())
+        stage_review_output(out,review)
         child([str(python),str(repo/'ops/face-quality/evaluate.py'),'--engine',cfg['engine'],'--source',str(source),'--portrait',str(folder/'portrait.jpg'),'--folder',str(review)],folder,f'wardrobe-quality-{attempt}.log',88+attempt)
         try:
             receipt=verify(json.loads((review/'metrics.json').read_text()),json.loads(out.with_suffix('.stats.json').read_text()),source_meta,probe(out),choice)
