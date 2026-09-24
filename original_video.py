@@ -83,6 +83,31 @@ def catalog_sources():
     return [{**{k:v[k] for k in ('sha256','sourceUrl','duration','width','height','fps','username')},
              'start':v.get('start',0),'used':v['sha256'] in hashes or bool(source_key(v) and source_key(v) in posts)} for v in catalog()]
 
+def source_thumbnail(source_sha):
+    """Return a small cached frame from an authenticated archived source."""
+    if not re.fullmatch(r'[a-f0-9]{64}',source_sha):raise ValueError('invalid_source_hash')
+    cache=ROOT/'source-thumbnails'/f'{source_sha}.jpg'
+    if cache.is_file():
+        image=cache.read_bytes()
+        if image.startswith(b'\xff\xd8\xff') and len(image)<500000:return image
+    candidate=next((v for v in catalog() if v['sha256']==source_sha),None)
+    if candidate is None:raise FileNotFoundError('source_not_archived')
+    root=Path(read(CONFIG/'workflow.json')['nasRoot']).resolve()
+    manifest=(root/candidate['manifest']).resolve()
+    if not manifest.is_relative_to(root):raise ValueError('source_path_invalid')
+    asset=read(manifest)['assets'][0]
+    source=(root/asset['path']).resolve()
+    if not source.is_relative_to(root) or not source.is_file() or sha(source)!=source_sha:
+        raise ValueError('source_integrity_failed')
+    frame=subprocess.run(['ffmpeg','-v','error','-ss','0.1','-i',str(source),'-frames:v','1',
+                          '-vf','scale=320:-2','-q:v','5','-f','image2','pipe:1'],
+                         capture_output=True,timeout=20,check=True).stdout
+    if not frame.startswith(b'\xff\xd8\xff') or len(frame)>500000:raise ValueError('thumbnail_failed')
+    cache.parent.mkdir(parents=True,exist_ok=True)
+    tmp=cache.with_name(cache.name+'.'+str(os.getpid())+'.tmp')
+    tmp.write_bytes(frame);tmp.replace(cache)
+    return frame
+
 def requested_segment(candidate,data):
     start=float(data.get('start',candidate.get('start',0)))
     duration=float(data.get('duration',candidate['duration']))
@@ -159,6 +184,13 @@ def handle(handler,path,send_json,post=False):
         parts=path.strip('/').split('/')
         if path=='/api/original-video/catalog' and not post:
             send_json(handler,{'ok':True,'policy':POLICY,'workerOnline':healthy(),'wardrobePolicy':wardrobe_video.POLICY,'wardrobeChoices':list(wardrobe_video.CHOICES),'sources':catalog_sources()});return
+        if len(parts)==4 and parts[2]=='source-thumbnail' and not post:
+            image=source_thumbnail(parts[3])
+            handler.send_response(200)
+            handler.send_header('Content-Type','image/jpeg')
+            handler.send_header('Content-Length',str(len(image)))
+            handler.send_header('Cache-Control','private, max-age=86400')
+            handler.end_headers();handler.wfile.write(image);return
         if path=='/api/original-video/generate' and post:
             size=int(handler.headers.get('Content-Length',0))
             if not 0<size<750000:raise ValueError('invalid_request_size')
