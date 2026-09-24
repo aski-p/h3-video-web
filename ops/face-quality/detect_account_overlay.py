@@ -63,6 +63,8 @@ def matching_lines(image, username):
                           for alias in aliases)
         if not alias_match and not re.search(r'@[a-z0-9_.]{4,}', text):
             continue
+        if y < height * .34:
+            raise ValueError('account_overlay_near_face')
         # A large graphic across a person is not safe to reconstruct automatically.
         if w > width * .55 or h > height * .11:
             raise ValueError('account_overlay_too_large')

@@ -291,6 +291,27 @@ def process(folder,repo,cfg,choice,child,check):
         except ValueError as error:
             if str(error) not in ('wardrobe_identity_failed','wardrobe_face_coverage_failed') or attempt==3:raise
     child(['ffmpeg','-v','error','-y','-i',str(out),'-i',str(r/'original-source.mp4'),'-map','0:v:0','-map','1:a?','-c','copy','-t',str(duration),'-movflags','+faststart',str(identity)],folder,'wardrobe-mux.log',92)
+    candidate=json.loads((folder/'candidate.json').read_text())
+    username=candidate['username']
+    def scan(video):
+        try:
+            result=subprocess.run([cfg['inpaintPython'],str(repo/'ops/face-quality/detect_account_overlay.py'),
+                                   '--source',str(video),'--username',username],
+                                  capture_output=True,text=True,timeout=90,check=True)
+            return json.loads(result.stdout)
+        except (subprocess.CalledProcessError,subprocess.TimeoutExpired,json.JSONDecodeError) as error:
+            raise ValueError('wardrobe_account_overlay_review_required') from error
+    overlay=scan(identity)
+    receipt['overlayReview']=overlay
+    if overlay['overlayROI']:
+        clean=work/'face-no-account.mp4'
+        child([cfg['inpaintPython'],str(repo/'ops/face-quality/remove_overlay.py'),
+               '--source',str(identity),'--output',str(clean),'--model',cfg['inpaintModel'],
+               '--roi',*map(str,overlay['overlayROI']),'--full-roi'],folder,'wardrobe-account-restoration.log',93)
+        receipt['overlayOutputReview']=scan(clean)
+        if receipt['overlayOutputReview']['overlayROI']:raise ValueError('wardrobe_account_overlay_remains')
+        identity.rename(work/'face-with-account.mp4')
+        clean.rename(identity)
     child(['ffmpeg','-v','error','-i',str(identity),'-f','null','-'],folder,'wardrobe-decode.log',94)
     output=probe(identity)
     if output!={'width':width,'height':height,'fps':24.0,'frames':plan['frames']}:raise ValueError('wardrobe_output_mismatch')
