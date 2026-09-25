@@ -30,6 +30,15 @@ must stay within a mean absolute RGB difference of 12/255; larger scene changes
 hold the job. Hair matching still needs direct source/output/portrait review
 before publication.
 
+The `portrait_face` option keeps the source hairstyle and uses the same tracked
+head mask and H3 latent. A narrow face-only mask produced an unintended black
+face covering in one source, even with an explicit uncovered-face prompt; do not
+restore that mask as a fallback. HyperSwap 1b still supplies the fixed portrait
+identity, and every-frame face coverage, sampled identity, scene preservation,
+and comparison checks remain required. A prior hair-mask render may be restored
+only when its original technical verification and media files pass integrity
+checks and the user explicitly accepts retaining the source hair.
+
 The 2026-09-25 isolated 5.167-second sample used 124 frames at 704×1248 and
 20 Ref2VA steps. Five outside-mask samples differed by 2.87–3.11 RGB levels
 out of 255. After HyperSwap 1b, six portrait-similarity samples were 0.866–0.903

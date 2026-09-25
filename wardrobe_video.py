@@ -344,11 +344,11 @@ def process(folder,repo,cfg,choice,child,check):
     video=COMFY/'input'/(ident+'-h3-motion.mp4')
     if localized:
         prepare_hair_source(source,video,width,height,plan['generatedFrames'],child,folder)
-        mask=COMFY/'input'/(ident+('-h3-face-mask.mp4' if choice=='portrait_face' else '-h3-hair-mask.mp4'))
-        mask_report=work/('face-mask.json' if choice=='portrait_face' else 'hair-mask.json')
-        child([str(python),str(repo/'ops/wardrobe-h3'/('build_face_mask.py' if choice=='portrait_face' else 'build_hair_mask.py')),
+        mask=COMFY/'input'/(ident+'-h3-hair-mask.mp4')
+        mask_report=work/'hair-mask.json'
+        child([str(python),str(repo/'ops/wardrobe-h3/build_hair_mask.py'),
                '--source',str(video),'--output',str(mask),'--report',str(mask_report)],
-              folder,'face-mask.log' if choice=='portrait_face' else 'hair-mask.log',18)
+              folder,'hair-mask.log',18)
         if probe(mask)!={'width':width,'height':height,'fps':24.0,'frames':plan['generatedFrames']}:
             raise ValueError('localized_mask_timing_mismatch')
         if choice=='portrait_hair':

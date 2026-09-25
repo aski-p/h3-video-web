@@ -40,11 +40,6 @@ class WardrobeTests(unittest.TestCase):
   self.assertIn('Keep the source hairstyle',g['5']['inputs']['prompt'])
   self.assertIn('no face covering',g['5']['inputs']['prompt'])
   self.assertNotIn('hair color must disappear',g['5']['inputs']['prompt'])
-  face_spec=spec_from_file_location('face_mask',REPO/'ops/wardrobe-h3/build_face_mask.py')
-  with patch.dict('sys.modules',{'build_hair_mask':hair_mask}):
-   face_mask=module_from_spec(face_spec);face_spec.loader.exec_module(face_mask)
-  self.assertGreater(face_mask.face_mask(704,1248,(200,200,110,140)).max(),250)
-  self.assertEqual(face_mask.face_mask(704,1248,(200,200,110,140))[600,300],0)
  def test_hair_tracking_holds_when_face_or_mask_is_uncertain(self):
   self.assertTrue(hair_mask.duplicate_detection((197,126,298,298),(290,29,271,271)))
   self.assertTrue(hair_mask.duplicate_detection((495,336,93,93),(566,380,70,70)))
