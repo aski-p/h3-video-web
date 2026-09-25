@@ -191,8 +191,12 @@ def retry_wardrobe(jid,repair=None):
             candidate=read(f/'candidate.json')
             original={'start':s.get('requestedStart',s['start']),
                       'duration':s.get('requestedDuration',s['duration'])}
-            changed=requested_segment({**candidate,**original},repair)
-            if changed['duration']<5 or (changed['start'],changed['duration'])==(s['start'],s['duration']):
+            archived=next((item for item in catalog() if item['sha256']==candidate['sha256']),None)
+            if archived is None:raise ValueError('source_not_archived')
+            changed=requested_segment(archived,repair)
+            if changed['duration']<5 or abs(changed['duration']-original['duration'])>1e-6:
+                raise ValueError('repair_duration_mismatch')
+            if (changed['start'],changed['duration'])==(s['start'],s['duration']):
                 raise ValueError('hair_mask_repair_interval_invalid')
             destination=f/f'repair-attempt-{len(history)+1}'
             if destination.exists() or not (f/'render').is_dir():
@@ -270,7 +274,10 @@ def retry_face_segment(jid,start,duration):
         candidate=next((item for item in catalog() if item['sha256']==s['sourceSha256']),None)
         if candidate is None:raise ValueError('source_not_archived')
         changed=requested_segment(candidate,{'start':start,'duration':duration})
+        requested_duration=s.get('requestedDuration',s['duration'])
         if changed['duration']<5:raise ValueError('portrait_edit_requires_five_seconds')
+        if abs(changed['duration']-requested_duration)>1e-6:
+            raise ValueError('repair_duration_mismatch')
         history=list(s.get('repairHistory',[]))
         destination=f/f'repair-attempt-{len(history)+1}'
         if destination.exists() or not (f/'render').is_dir():raise ValueError('face_segment_evidence_missing')

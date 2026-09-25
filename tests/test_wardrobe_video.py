@@ -63,8 +63,11 @@ class WardrobeTests(unittest.TestCase):
    v.save(folder/'state.json',{'id':jid,'status':'error','policy':w.POLICY,
            'wardrobe':'portrait_hair','start':0,'duration':14,
            'error':'원본 기반 품질 검사 미통과 · quality_pipeline_failed'})
-   result=v.retry_wardrobe(jid,{'start':0,'duration':5.5})['job']
-   self.assertEqual((result['status'],result['duration'],result['requestedDuration']),('queued',5.5,14))
+   with patch.object(v,'catalog',return_value=[{'start':0,'duration':15,'sha256':'source'}]):
+    with self.assertRaisesRegex(ValueError,'repair_duration_mismatch'):
+     v.retry_wardrobe(jid,{'start':0,'duration':5.5})
+    result=v.retry_wardrobe(jid,{'start':1,'duration':14})['job']
+   self.assertEqual((result['status'],result['start'],result['duration'],result['requestedDuration']),('queued',1,14,14))
    self.assertEqual((folder/'repair-attempt-1'/'source.mp4').read_bytes(),b'old-source')
    self.assertFalse((folder/'render').exists())
    self.assertEqual(v.retry_wardrobe(jid)['job']['status'],'queued')
@@ -102,6 +105,8 @@ class WardrobeTests(unittest.TestCase):
           'error':'원본 기반 품질 검사 미통과 · wardrobe_face_coverage_failed',
           'repairHistory':[{'action':'regenerate_face_only'}]})
    with patch.object(v,'catalog',return_value=[{'sha256':'source','start':0,'duration':15}]):
+    with self.assertRaisesRegex(ValueError,'repair_duration_mismatch'):
+     v.retry_face_segment(jid,8.5,5.5)
     result=v.retry_face_segment(jid,8.5,5)['job']
    self.assertEqual((result['status'],result['start'],result['requestedStart']),('queued',8.5,7.5))
    self.assertEqual((folder/'repair-attempt-2'/'output.mp4').read_bytes(),b'failed-render')
