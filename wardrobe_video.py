@@ -338,9 +338,16 @@ def process(folder,repo,cfg,choice,child,check):
               folder,'hair-mask.log',18)
         if probe(mask)!={'width':width,'height':height,'fps':24.0,'frames':plan['generatedFrames']}:
             raise ValueError('hair_mask_timing_mismatch')
+        conditioned=COMFY/'input'/(ident+'-h3-conditioned.mp4')
+        condition_report=work/'hair-conditioning.json'
+        child([str(python),str(repo/'ops/wardrobe-h3/neutralize_hair_source.py'),
+               '--source',str(video),'--mask',str(mask),'--output',str(conditioned),
+               '--report',str(condition_report)],folder,'hair-condition.log',18)
+        if probe(conditioned)!={'width':width,'height':height,'fps':24.0,'frames':plan['generatedFrames']}:
+            raise ValueError('hair_conditioning_timing_mismatch')
     else:shutil.copy2(source,video)
     check()
-    graph=(hair_graph(repo,ref.name,video.name,mask.name,width,height,'wardrobe-h3/'+ident)
+    graph=(hair_graph(repo,ref.name,conditioned.name,mask.name,width,height,'wardrobe-h3/'+ident)
            if choice=='portrait_hair' else
            motion_graph(repo,ref.name,video.name,choice,width,height,plan['generatedFrames'],'wardrobe-h3/'+ident))
     path=render(graph,'14',work/'generation.json',check)
@@ -368,6 +375,7 @@ def process(folder,repo,cfg,choice,child,check):
             receipt.update(faceRepairAttempt=attempt,faceDetectorScore=detector_score,faceSelectorMode='one')
             if choice=='portrait_hair':
                 receipt['hairMaskTracking']=json.loads(mask_report.read_text())
+                receipt['hairConditioning']=json.loads(condition_report.read_text())
                 receipt['hairScenePreservation']=json.loads((work/'hair-preservation.json').read_text())
             break
         except ValueError as error:
