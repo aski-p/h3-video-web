@@ -38,6 +38,7 @@ class WardrobeTests(unittest.TestCase):
   self.assertEqual(g['8']['inputs']['steps'],20)
   self.assertEqual(g['20']['inputs']['file'],'face-mask.mp4')
   self.assertIn('Keep the source hairstyle',g['5']['inputs']['prompt'])
+  self.assertIn('no face covering',g['5']['inputs']['prompt'])
   self.assertNotIn('hair color must disappear',g['5']['inputs']['prompt'])
   face_spec=spec_from_file_location('face_mask',REPO/'ops/wardrobe-h3/build_face_mask.py')
   with patch.dict('sys.modules',{'build_hair_mask':hair_mask}):
@@ -110,6 +111,17 @@ class WardrobeTests(unittest.TestCase):
    self.assertEqual((result['status'],result['start'],result['requestedStart']),('queued',8.5,7.5))
    self.assertEqual((folder/'repair-attempt-2'/'output.mp4').read_bytes(),b'failed-render')
    self.assertEqual(v.read(folder/'candidate.json')['start'],8.5)
+ def test_face_artifact_retry_archives_bad_render(self):
+  jid='orig_'+'e'*32
+  with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+   folder=Path(tmp)/jid;folder.mkdir();(folder/'render').mkdir()
+   (folder/'render'/'output.mp4').write_bytes(b'covered-face')
+   v.save(folder/'state.json',{'id':jid,'status':'error','policy':w.POLICY,
+          'wardrobe':'portrait_face','error':'원본 기반 품질 검사 미통과 · wardrobe_identity_failed'})
+   result=v.retry_face_artifact(jid)['job']
+   self.assertEqual(result['status'],'queued')
+   self.assertEqual((folder/'repair-attempt-1'/'output.mp4').read_bytes(),b'covered-face')
+   self.assertEqual(result['repairHistory'][0]['action'],'regenerate_uncovered_face')
  def test_frame_grid_covers_length_without_loop_or_speed_change(self):
   for frames,fps in [(120,30),(156,30),(178,30),(307,30),(450,30),(449,29.97)]:
    p=w.frame_plan({'frames':frames,'fps':fps})

@@ -286,6 +286,28 @@ def retry_face_segment(jid,start,duration):
                  start=changed['start'],duration=changed['duration'],repairHistory=history)
         save(f/'state.json',s)
         return {'ok':True,'job':public(s)}
+def retry_face_artifact(jid):
+    """Regenerate an uncovered face when the previous H3 render failed identity QC."""
+    ROOT.mkdir(parents=True,exist_ok=True)
+    with (ROOT/'.submit.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        f=folder(jid);s=read(f/'state.json')
+        if s.get('policy')!=wardrobe_video.POLICY or s.get('wardrobe')!='portrait_face' or s.get('sourceReleasedAt') or (f/'cancel').exists():
+            raise ValueError('face_artifact_retry_unavailable')
+        if s['status'] in ('queued','running'):return {'ok':True,'job':public(s)}
+        if s['status']!='error' or not any(code in s.get('error','') for code in
+                ('wardrobe_identity_failed','wardrobe_face_coverage_failed')):
+            raise ValueError('face_artifact_retry_unavailable')
+        history=list(s.get('repairHistory',[]))
+        if sum(item.get('action')=='regenerate_uncovered_face' for item in history)>=2:
+            raise ValueError('face_artifact_retry_limit')
+        destination=f/f'repair-attempt-{len(history)+1}'
+        if destination.exists() or not (f/'render').is_dir():raise ValueError('face_artifact_evidence_missing')
+        (f/'render').rename(destination)
+        history.append({'reason':s['error'],'at':time.time(),'action':'regenerate_uncovered_face'})
+        s.update(status='queued',progress=0,error=None,verification=None,repairHistory=history)
+        save(f/'state.json',s)
+        return {'ok':True,'job':public(s)}
 def release_source(jid):
     ROOT.mkdir(parents=True,exist_ok=True)
     with (ROOT/'.submit.lock').open('a') as lock:
@@ -333,6 +355,8 @@ def handle(handler,path,send_json,post=False):
             if not 0<size<=128:raise ValueError('invalid_request_size')
             data=json.loads(handler.rfile.read(size))
             send_json(handler,retry_face_segment(jid,data.get('start'),data.get('duration')));return
+        if len(parts)==5 and parts[4]=='retry-face-artifact' and post:
+            send_json(handler,retry_face_artifact(jid));return
         if len(parts)==5 and parts[4]=='release-source' and post:send_json(handler,release_source(jid));return
         files={'video':'output.mp4','comparison':'comparison.mp4','source':'source.mp4'}
         if len(parts)==5 and parts[4] in files and not post:

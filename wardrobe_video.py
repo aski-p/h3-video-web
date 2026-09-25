@@ -76,8 +76,10 @@ def hair_graph(repo,image,video,mask,width,height,prefix):
 def face_graph(repo,image,video,mask,width,height,prefix):
     g=hair_graph(repo,image,video,mask,width,height,prefix)
     g['5']['inputs']['prompt']=("<Picture 1> defines the exact adult facial identity. "
-        "Video editing: regenerate ONLY the masked face region of the source video. "
+        "Video editing: regenerate ONLY the selected facial pixels of the source video. "
         "Replace the source person's facial features with Picture 1's face. "
+        "The face is fully uncovered throughout: visible nose, mouth and chin; "
+        "no face covering, medical mask, cloth mask or opaque object on the face. "
         "Keep the source hairstyle, hair color, hairline, clothing, body, hands, "
         "background, camera, lighting, movement and audio. Preserve expressions "
         "and natural skin texture. One adult woman, no extra people, text or logos.")
