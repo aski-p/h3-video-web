@@ -95,6 +95,21 @@ class WardrobeTests(unittest.TestCase):
    self.assertEqual((folder/'repair-attempt-1'/'output.mp4').read_bytes(),b'failed-render')
    self.assertEqual(v.read(folder/'state.json')['requestedWardrobe'],'portrait_hair')
    self.assertEqual(v.retry_face_only(jid)['job']['status'],'queued')
+ def test_face_segment_retry_keeps_source_and_original_request(self):
+  jid='orig_'+'d'*32
+  with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+   folder=Path(tmp)/jid;folder.mkdir();(folder/'render').mkdir()
+   (folder/'render'/'output.mp4').write_bytes(b'failed-render')
+   v.save(folder/'candidate.json',{'start':7.5,'duration':5,'sha256':'source'})
+   v.save(folder/'state.json',{'id':jid,'status':'error','policy':w.POLICY,
+          'wardrobe':'portrait_face','sourceSha256':'source','start':7.5,'duration':5,
+          'error':'원본 기반 품질 검사 미통과 · wardrobe_face_coverage_failed',
+          'repairHistory':[{'action':'regenerate_face_only'}]})
+   with patch.object(v,'catalog',return_value=[{'sha256':'source','start':0,'duration':15}]):
+    result=v.retry_face_segment(jid,8.5,5)['job']
+   self.assertEqual((result['status'],result['start'],result['requestedStart']),('queued',8.5,7.5))
+   self.assertEqual((folder/'repair-attempt-2'/'output.mp4').read_bytes(),b'failed-render')
+   self.assertEqual(v.read(folder/'candidate.json')['start'],8.5)
  def test_frame_grid_covers_length_without_loop_or_speed_change(self):
   for frames,fps in [(120,30),(156,30),(178,30),(307,30),(450,30),(449,29.97)]:
    p=w.frame_plan({'frames':frames,'fps':fps})

@@ -256,6 +256,36 @@ def retry_face_only(jid):
                  wardrobe='portrait_face',repairHistory=history)
         save(f/'state.json',s)
         return {'ok':True,'job':public(s)}
+def retry_face_segment(jid,start,duration):
+    """Move a failed face-only edit to a source-bounded segment with a visible face."""
+    ROOT.mkdir(parents=True,exist_ok=True)
+    with (ROOT/'.submit.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        f=folder(jid);s=read(f/'state.json')
+        if s.get('policy')!=wardrobe_video.POLICY or s.get('wardrobe')!='portrait_face' or s.get('sourceReleasedAt') or (f/'cancel').exists():
+            raise ValueError('face_segment_retry_unavailable')
+        if s['status'] in ('queued','running'):return {'ok':True,'job':public(s)}
+        if s['status']!='error' or 'wardrobe_face_coverage_failed' not in s.get('error',''):
+            raise ValueError('face_segment_retry_unavailable')
+        candidate=next((item for item in catalog() if item['sha256']==s['sourceSha256']),None)
+        if candidate is None:raise ValueError('source_not_archived')
+        changed=requested_segment(candidate,{'start':start,'duration':duration})
+        if changed['duration']<5:raise ValueError('portrait_edit_requires_five_seconds')
+        history=list(s.get('repairHistory',[]))
+        destination=f/f'repair-attempt-{len(history)+1}'
+        if destination.exists() or not (f/'render').is_dir():raise ValueError('face_segment_evidence_missing')
+        (f/'render').rename(destination)
+        old=read(f/'candidate.json')
+        save(f/'candidate.json',{**old,'start':changed['start'],'duration':changed['duration']})
+        history.append({'reason':'wardrobe_face_coverage_failed','at':time.time(),
+                        'action':'retry_face_visible_segment','start':changed['start'],
+                        'duration':changed['duration']})
+        s.update(status='queued',progress=0,error=None,verification=None,
+                 requestedStart=s.get('requestedStart',s['start']),
+                 requestedDuration=s.get('requestedDuration',s['duration']),
+                 start=changed['start'],duration=changed['duration'],repairHistory=history)
+        save(f/'state.json',s)
+        return {'ok':True,'job':public(s)}
 def release_source(jid):
     ROOT.mkdir(parents=True,exist_ok=True)
     with (ROOT/'.submit.lock').open('a') as lock:
@@ -298,6 +328,11 @@ def handle(handler,path,send_json,post=False):
             send_json(handler,retry_visual_hair(jid,data.get('reason')));return
         if len(parts)==5 and parts[4]=='retry-face-only' and post:
             send_json(handler,retry_face_only(jid));return
+        if len(parts)==5 and parts[4]=='retry-face-segment' and post:
+            size=int(handler.headers.get('Content-Length',0))
+            if not 0<size<=128:raise ValueError('invalid_request_size')
+            data=json.loads(handler.rfile.read(size))
+            send_json(handler,retry_face_segment(jid,data.get('start'),data.get('duration')));return
         if len(parts)==5 and parts[4]=='release-source' and post:send_json(handler,release_source(jid));return
         files={'video':'output.mp4','comparison':'comparison.mp4','source':'source.mp4'}
         if len(parts)==5 and parts[4] in files and not post:
