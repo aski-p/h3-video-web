@@ -129,6 +129,7 @@ def submit(data):
     candidate=next((v for v in catalog() if v['sha256']==data.get('sourceSha256')),None)
     if not candidate:raise ValueError('source_not_archived')
     candidate=requested_segment(candidate,data)
+    if wardrobe=='portrait_hair' and candidate['duration']<5:raise ValueError('portrait_hair_requires_five_seconds')
     portrait=data.get('portrait','')
     if not isinstance(portrait,str) or not portrait.startswith('data:image/jpeg;base64,') or len(portrait)>700000:raise ValueError('fixed_portrait_required')
     image=base64.b64decode(portrait.split(',')[1],validate=True)

@@ -3,14 +3,17 @@ from pathlib import Path
 from unittest.mock import patch
 import wardrobe_video as w
 import original_video as v
+from importlib.util import module_from_spec,spec_from_file_location
 REPO=Path(__file__).resolve().parents[1]
+mask_spec=spec_from_file_location('hair_mask',REPO/'ops/wardrobe-h3/build_hair_mask.py')
+hair_mask=module_from_spec(mask_spec);mask_spec.loader.exec_module(hair_mask)
 class WardrobeTests(unittest.TestCase):
  def test_only_explicit_single_choice(self):
   self.assertEqual(w.normalize(None),'original')
   for x in [['dress','casual'],'mix','unknown',{},True]:
    with self.assertRaises(ValueError):w.normalize(x)
  def test_approved_h3_graph_and_all_outfits(self):
-  for choice in w.CHOICES:
+  for choice in w.CHOICES.keys()-{'portrait_hair'}:
    g=w.motion_graph(REPO,'face.jpg','motion.mp4',choice,720,1280,107,'test')
    self.assertEqual(g['1']['inputs']['unet_name'],w.MODEL)
    self.assertEqual(g['8']['inputs']['steps'],20)
@@ -19,6 +22,27 @@ class WardrobeTests(unittest.TestCase):
    self.assertEqual(g['5']['inputs']['ref_videos.ref_video_1'],['17',0])
    self.assertIn(w.CHOICES[choice],g['5']['inputs']['prompt'])
    self.assertFalse(any('Lora' in n['class_type'] or 'Wan' in n['class_type'] or 'QwenImage' in n['class_type'] for n in g.values()))
+ def test_hair_graph_masks_source_and_preserves_audio(self):
+  g=w.hair_graph(REPO,'face.jpg','motion.mp4','mask.mp4',704,1248,'test')
+  self.assertEqual(g['1']['inputs']['unet_name'],w.MODEL)
+  self.assertEqual(g['8']['inputs']['steps'],20)
+  self.assertNotIn('ref_videos.ref_video_1',g['5']['inputs'])
+  self.assertIn('ONLY the masked head and hair region',g['5']['inputs']['prompt'])
+  self.assertEqual(g['10']['inputs']['latent_image'],['28',0])
+  self.assertEqual(g['28']['inputs']['audio_mode'],'preserve source audio')
+  self.assertEqual(g['20']['inputs']['file'],'mask.mp4')
+  self.assertEqual(w.hair_size(720,1280),(704,1248))
+  self.assertFalse(any('Lora' in n['class_type'] or 'Wan' in n['class_type'] or 'QwenImage' in n['class_type'] for n in g.values()))
+ def test_hair_tracking_holds_when_face_or_mask_is_uncertain(self):
+  box=(100,200,80,100)
+  smoothed,missing=hair_mask.tracked_boxes([box]*5+[None]+[box]*5)
+  self.assertEqual((len(smoothed),missing),(11,1))
+  with self.assertRaisesRegex(ValueError,'hair_tracking_incomplete'):
+   hair_mask.tracked_boxes([None]*8+[box]*3)
+  with self.assertRaisesRegex(ValueError,'hair_tracking_gap'):
+   hair_mask.tracked_boxes([box]*5+[None]*5+[box]*40)
+  with self.assertRaisesRegex(ValueError,'hair_head_out_of_frame'):
+   hair_mask.head_mask(384,672,(340,200,80,100))
  def test_frame_grid_covers_length_without_loop_or_speed_change(self):
   for frames,fps in [(120,30),(156,30),(178,30),(307,30),(450,30),(449,29.97)]:
    p=w.frame_plan({'frames':frames,'fps':fps})
@@ -37,12 +61,19 @@ class WardrobeTests(unittest.TestCase):
   report={'output':{'referenceSimilaritySamples':[.8]*5}};meta={'width':720,'height':1280,'fps':24,'frames':96};stats={'rawSkinDeltas':[0]*96,'model':'hyperswap_1b_256','expressionFactor':0}
   receipt=w.verify(report,stats,meta,meta,'yoga')
   self.assertEqual(receipt['engine'],'minimax_h3_ref2va');self.assertFalse(receipt['nativeMotionPreserved']);self.assertFalse(receipt['publishApproved'])
+  hair=w.verify(report,stats,meta,meta,'portrait_hair')
+  self.assertTrue(hair['hairReferenceRequested']);self.assertEqual(hair['hairVisualReview'],'required')
   for bad in [{**meta,'frames':95},{**meta,'fps':30}]:
    with self.assertRaises(ValueError):w.verify(report,stats,meta,bad,'yoga')
   with self.assertRaises(ValueError):w.verify(report,{**stats,'rawSkinDeltas':[]},meta,meta,'yoga')
   with self.assertRaises(ValueError):w.verify(report,{**stats,'appliedLabDelta':[1,0,0]},meta,meta,'yoga')
  def test_legacy_request_rejected_before_generation(self):
   with self.assertRaisesRegex(ValueError,'policy_update'):v.submit({'wardrobe':'yoga','wardrobePolicy':'wardrobe-motion-v1-20260922'})
+ def test_hair_route_rejects_untrained_short_interval(self):
+  c={'sha256':'abc','sourceUrl':'https://instagram.com/reel/POST/','duration':4,'start':0}
+  with patch.object(v,'catalog',return_value=[c]):
+   d={'requestId':'11111111-1111-1111-1111-111111111111:1','sourceSha256':'abc','portrait':'data:image/jpeg;base64,/9j/','wardrobe':'portrait_hair','wardrobePolicy':w.POLICY}
+   with self.assertRaisesRegex(ValueError,'five_seconds'):v.submit(d)
  def test_reusing_request_with_different_outfit_is_rejected(self):
   c={'sha256':'abc','sourceUrl':'https://instagram.com/reel/POST/','duration':10,'start':0}
   with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)),patch.object(v,'catalog',return_value=[c]),patch.object(v,'healthy',return_value=True):

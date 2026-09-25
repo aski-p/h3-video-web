@@ -17,6 +17,35 @@ frames without time stretching. The reviewed source interval remains at most 15s
 Original assets remain archived; comparison video uses matched 24fps frames.
 Content filters and all-frame identity correction checks remain active.
 
+The explicit `portrait_hair` option keeps the original-face mode separate and
+requires a 5–15 second source interval. Prompt-only Ref2VA trials were rejected:
+one retained the source hairstyle; another copied the portrait scene into the
+last frame. This path instead tracks the source head, masks room for loose hair,
+and feeds the original 24fps video and audio as the H3 source latent. The fixed
+portrait conditions Ref2VA; only masked video cells are generated. HyperSwap 1b
+then corrects the face, and all existing technical quality gates remain active.
+The original outfit and background are protected outside the mask, but the head,
+shoulders and nearby background can change. Five frame samples outside the mask
+must stay within a mean absolute RGB difference of 12/255; larger scene changes
+hold the job. Hair matching still needs direct source/output/portrait review
+before publication.
+
+The 2026-09-25 isolated 5.167-second sample used 124 frames at 704×1248 and
+20 Ref2VA steps. Five outside-mask samples differed by 2.87–3.11 RGB levels
+out of 255. After HyperSwap 1b, six portrait-similarity samples were 0.866–0.903
+(mean 0.888), with 124/124 face corrections. A separate moving-mask graph trial
+at 384×672 returned 3.47–4.03 outside-mask differences and showed long hair
+across beginning, middle and end frames. These measurements support this one
+trial and do not guarantee hair quality for every source; review remains required.
+
+The mask graph requires the separate GPL-3.0
+`ethanfel/ComfyUI-MiniMaxH3-PerRowMasking` custom-node package, pinned for the
+verified trial at commit `d6a7964`. Install it as a separate ComfyUI custom node;
+do not copy its code into this repository. Check that `MiniMaxH3SetGenerationMask`,
+`MiniMaxH3MaskGridPreview`, and `MiniMaxH3PerRowMaskPatch` appear in
+`/object_info` before enabling the option. The production worker holds the job
+if the package is absent; it never falls back to whole-frame synthesis.
+
 Wardrobe jobs extract the archived motion segment directly and do not require the
 unrelated original-person face swap to pass before H3 synthesis. After synthesis,
 HyperSwap targets the largest single subject and may retry face detection at
