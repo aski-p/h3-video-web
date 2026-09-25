@@ -205,6 +205,33 @@ def retry_wardrobe(jid,repair=None):
         s.update(status='queued',progress=0,error=None,repairHistory=history)
         save(f/'state.json',s)
         return {'ok':True,'job':public(s)}
+def retry_visual_hair(jid,reason):
+    if reason!='hair_reference_not_applied':raise ValueError('hair_visual_reason_invalid')
+    ROOT.mkdir(parents=True,exist_ok=True)
+    with (ROOT/'.submit.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        f=folder(jid);s=read(f/'state.json')
+        if s.get('policy')!=wardrobe_video.POLICY or s.get('wardrobe')!='portrait_hair' or s.get('sourceReleasedAt') or (f/'cancel').exists():
+            raise ValueError('hair_visual_retry_unavailable')
+        if s['status'] in ('queued','running'):return {'ok':True,'job':public(s)}
+        if s['status']=='done':
+            if s.get('verification',{}).get('hairVisualReview')!='required':
+                raise ValueError('hair_visual_retry_unavailable')
+        elif s['status']=='error':
+            log=f/'hair-reference.log'
+            if not log.is_file() or 'hair_reference_color_mismatch' not in log.read_text(errors='replace'):
+                raise ValueError('hair_visual_retry_unavailable')
+        else:raise ValueError('hair_visual_retry_unavailable')
+        history=list(s.get('repairHistory',[]))
+        if len(history)>=3:raise ValueError('hair_visual_retry_limit')
+        destination=f/f'repair-attempt-{len(history)+1}'
+        if destination.exists() or not (f/'render').is_dir():raise ValueError('hair_visual_evidence_missing')
+        (f/'render').rename(destination)
+        history.append({'reason':reason,'at':time.time(),'action':'regenerate_hair_reference',
+                        'previousVerification':s.get('verification')})
+        s.update(status='queued',progress=0,error=None,verification=None,repairHistory=history)
+        save(f/'state.json',s)
+        return {'ok':True,'job':public(s)}
 def release_source(jid):
     ROOT.mkdir(parents=True,exist_ok=True)
     with (ROOT/'.submit.lock').open('a') as lock:
@@ -240,6 +267,11 @@ def handle(handler,path,send_json,post=False):
             if size<0 or size>512:raise ValueError('invalid_request_size')
             repair=json.loads(handler.rfile.read(size)) if size else None
             send_json(handler,retry_wardrobe(jid,repair));return
+        if len(parts)==5 and parts[4]=='retry-visual-hair' and post:
+            size=int(handler.headers.get('Content-Length',0))
+            if not 0<size<=128:raise ValueError('invalid_request_size')
+            data=json.loads(handler.rfile.read(size))
+            send_json(handler,retry_visual_hair(jid,data.get('reason')));return
         if len(parts)==5 and parts[4]=='release-source' and post:send_json(handler,release_source(jid));return
         files={'video':'output.mp4','comparison':'comparison.mp4','source':'source.mp4'}
         if len(parts)==5 and parts[4] in files and not post:

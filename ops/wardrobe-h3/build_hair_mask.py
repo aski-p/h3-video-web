@@ -107,22 +107,29 @@ def hair_parser():
 
 def parsed_hair(frame, box, parser):
     height, width = frame.shape[:2]
-    prepared = cv2.resize(frame, (512, 512))[:, :, ::-1].astype(np.float32) / 255
+    x, y, face_width, face_height = box
+    left = max(0, round(x - .75 * face_width))
+    right = min(width, round(x + 1.75 * face_width))
+    top = max(0, round(y - .7 * face_height))
+    bottom = min(height, round(y + 3 * face_height))
+    if right <= left or bottom <= top:
+        return None
+    crop = frame[top:bottom, left:right]
+    prepared = cv2.resize(crop, (512, 512))[:, :, ::-1].astype(np.float32) / 255
     prepared = (prepared - np.array([.485, .456, .406], dtype=np.float32)) / np.array([.229, .224, .225], dtype=np.float32)
     labels = parser.run(None, {parser.get_inputs()[0].name: prepared.transpose(2, 0, 1)[None]})[0][0].argmax(0)
     binary = (labels == 17).astype(np.uint8)
     count, components, stats, centers = cv2.connectedComponentsWithStats(binary, 8)
     if count < 2:
         return None
-    x, y, face_width, face_height = box
+    largest = max(stats[1:, cv2.CC_STAT_AREA])
     candidates = [index for index in range(1, count)
-                  if stats[index, cv2.CC_STAT_AREA] >= 512 * 512 * .0005
-                  and abs(centers[index, 0] * width / 512 - (x + face_width / 2)) <= 2 * face_width
-                  and abs(centers[index, 1] * height / 512 - (y + face_height / 2)) <= 3 * face_height]
+                  if stats[index, cv2.CC_STAT_AREA] >= max(512 * 512 * .0005, largest * .05)]
     if not candidates:
         return None
-    selected = max(candidates, key=lambda index: stats[index, cv2.CC_STAT_AREA])
-    hair = cv2.resize((components == selected).astype(np.uint8) * 255, (width, height))
+    selected = np.isin(components, candidates).astype(np.uint8) * 255
+    hair = np.zeros((height, width), dtype=np.uint8)
+    hair[top:bottom, left:right] = cv2.resize(selected, (right-left, bottom-top))
     radius = max(5, round(min(face_width, face_height) * .1))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
     return cv2.dilate(hair, kernel)

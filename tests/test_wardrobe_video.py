@@ -61,6 +61,18 @@ class WardrobeTests(unittest.TestCase):
    self.assertEqual((folder/'repair-attempt-1'/'source.mp4').read_bytes(),b'old-source')
    self.assertFalse((folder/'render').exists())
    self.assertEqual(v.retry_wardrobe(jid)['job']['status'],'queued')
+ def test_visual_hair_retry_archives_completed_output(self):
+  jid='orig_'+'b'*32
+  with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+   folder=Path(tmp)/jid;folder.mkdir();(folder/'render').mkdir()
+   (folder/'render'/'output.mp4').write_bytes(b'previous-output')
+   v.save(folder/'state.json',{'id':jid,'status':'done','policy':w.POLICY,
+           'wardrobe':'portrait_hair','verification':{'hairVisualReview':'required'}})
+   result=v.retry_visual_hair(jid,'hair_reference_not_applied')['job']
+   self.assertEqual(result['status'],'queued')
+   self.assertIsNone(result['verification'])
+   self.assertEqual((folder/'repair-attempt-1'/'output.mp4').read_bytes(),b'previous-output')
+   self.assertEqual(result['repairHistory'][0]['action'],'regenerate_hair_reference')
  def test_frame_grid_covers_length_without_loop_or_speed_change(self):
   for frames,fps in [(120,30),(156,30),(178,30),(307,30),(450,30),(449,29.97)]:
    p=w.frame_plan({'frames':frames,'fps':fps})

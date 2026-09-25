@@ -47,7 +47,7 @@ def hair_graph(repo,image,video,mask,width,height,prefix):
     """Ref2VA identity conditioning over a masked source-video AV latent."""
     g=json.loads((repo/'ops/wardrobe-h3/graph.json').read_text())
     g['5']['inputs'].update(
-        prompt=("<Picture 1> is the sole identity and hair reference. Video editing: regenerate ONLY the masked head and hair region of the source video. Replace the original person's face and hairstyle with Picture 1's face and hair, including its length, part, hairline and color. The hair follows the original head motion throughout the shot. Preserve the unmasked clothing, body, hands, background, camera, lighting and audio exactly. One adult woman, no extra people, text or logos."),
+        prompt=("<Picture 1> is the sole identity and hair reference. Video editing: regenerate ONLY the masked head and hair region of the source video. Replace the original person's face and every visible hair strand with Picture 1's face and hair, including its length, part, hairline and color. The source person's original hairstyle and hair color must disappear completely; do not copy blonde or light hair from the source when Picture 1 has dark hair. The new hair follows the original head motion throughout the shot. Preserve the unmasked clothing, body, hands, background, camera, lighting and audio exactly. One adult woman, no extra people, text or logos."),
         width=width,height=height,length=['18',2])
     g['5']['inputs'].pop('ref_videos.ref_video_1',None)
     g['15']['inputs']['image']=image;g['16']['inputs']['file']=video
@@ -397,6 +397,12 @@ def process(folder,repo,cfg,choice,child,check):
     child(['ffmpeg','-v','error','-i',str(identity),'-f','null','-'],folder,'wardrobe-decode.log',94)
     output=probe(identity)
     if output!={'width':width,'height':height,'fps':24.0,'frames':plan['frames']}:raise ValueError('wardrobe_output_mismatch')
+    if choice=='portrait_hair':
+        hair_report=work/'hair-reference.json'
+        child([str(python),str(repo/'ops/wardrobe-h3/check_hair_reference.py'),
+               '--portrait',str(folder/'portrait.jpg'),'--result',str(identity),
+               '--report',str(hair_report)],folder,'hair-reference.log',95)
+        receipt['hairReferenceColor']=json.loads(hair_report.read_text())
     receipt.update(sourceDimensions=meta,sourceDuration=meta['frames']/meta['fps'],outputDuration=duration,generatedFrames=plan['generatedFrames'],sourceTimingPreserved=False,comparisonTimingVerified=True)
     child(['ffmpeg','-v','error','-y','-i',str(source),'-i',str(identity),'-filter_complex','hstack=inputs=2','-an','-c:v','libx264','-crf','18','-movflags','+faststart',str(r/'comparison.mp4')],folder,'wardrobe-comparison.log',98)
     check()
