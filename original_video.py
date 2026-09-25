@@ -421,7 +421,13 @@ def run_child(command,f,logname,progress):
                 if time.time()-started>3600:raise ValueError('render_timeout')
                 s=read(f/'state.json');s['progress']=progress;save(f/'state.json',s)
                 time.sleep(3)
-            if child.returncode:raise ValueError('quality_pipeline_failed')
+            if child.returncode:
+                path=f/logname
+                with path.open('rb') as reader:
+                    reader.seek(max(0,path.stat().st_size-16384))
+                    tail=reader.read().decode(errors='replace')
+                codes=re.findall(r'ValueError: ((?:hair|wardrobe|face)_[a-z0-9_]+|content_blocked)',tail)
+                raise ValueError(codes[-1] if codes else 'quality_pipeline_failed')
         finally:
             if child.poll() is None:
                 os.killpg(child.pid,signal.SIGTERM)
@@ -512,7 +518,8 @@ def process(f,repo):
     except Exception as e:
         s={**s,**read(f/'state.json')}
         code=str(e) if isinstance(e,ValueError) else type(e).__name__
-        s.update(status='cancelled' if code=='cancelled' else 'error',error='원본 기반 품질 검사 미통과 · '+code,progress=0)
+        s.update(status='cancelled' if code=='cancelled' else 'error',error='원본 기반 품질 검사 미통과 · '+code,
+                 progress=s.get('progress',0))
     save(f/'state.json',s)
 
 def main():

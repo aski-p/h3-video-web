@@ -1,6 +1,6 @@
 import copy
 import unittest
-import tempfile,json
+import tempfile,json,sys
 from pathlib import Path
 from unittest.mock import patch
 import original_video as v
@@ -94,6 +94,12 @@ class CoverageInstrumentationTests(unittest.TestCase):
             self.assertFalse(v.repairable(code))
 
 class WardrobeResumeTests(unittest.TestCase):
+    def test_child_error_reports_specific_quality_gate(self):
+        with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+            f=Path(tmp)/('orig_'+'c'*32);f.mkdir()
+            v.save(f/'state.json',{'status':'running','progress':70})
+            with self.assertRaisesRegex(ValueError,'hair_tracking_gap'):
+                v.run_child([sys.executable,'-c','raise ValueError("hair_tracking_gap")'],f,'hair-mask.log',70)
     def test_timeout_requeues_same_job_and_keeps_source_locked(self):
         with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
             jid='orig_'+'e'*32;f=Path(tmp)/jid;record=f/'render/wardrobe/generation.json';record.parent.mkdir(parents=True)
