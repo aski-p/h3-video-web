@@ -9,7 +9,7 @@ CHOICES={'dress':'an opaque navy blue knee-length short-sleeved dress with a cre
          'bikini':'an opaque navy blue two-piece bikini with secure straps and standard-coverage bottoms, ordinary swimwear',
          'swimsuit':'an opaque navy blue one-piece swimsuit with secure shoulder straps and standard coverage',
          'yoga':'an opaque muted sage fitted sleeveless yoga top and full-length high-waisted charcoal yoga leggings',
-         'portrait_hair':None}
+         'portrait_hair':None,'portrait_face':None}
 COMFY=Path('/home/aski/ComfyUI');OUTPUT=Path('/home/aski/minimax-h3/output');URL='http://127.0.0.1:8188'
 def normalize(value):
     if value is None:return 'original'
@@ -35,7 +35,7 @@ def frame_plan(meta):
 
 def motion_graph(repo,image,video,choice,width,height,length,prefix):
     choice=normalize(choice)
-    if choice in ('original','portrait_hair'):raise ValueError('wardrobe_motion_choice_required')
+    if choice in ('original','portrait_hair','portrait_face'):raise ValueError('wardrobe_motion_choice_required')
     g=json.loads((repo/'ops/wardrobe-h3/graph.json').read_text())
     prompt=("<Picture 1> defines the exact adult facial identity. <Video 1> defines only the body movement, timing, full head-to-knee framing, background and stationary camera. Generate the same motion with the face from Picture 1. Exactly one adult woman, age 28. Her full face remains visible, unobstructed and large enough to recognize in every frame. No other people, faces, portraits, reflections or face-like background details. CHANGE the video outfit to "+CHOICES[choice]+". No cardigan. Non-sexual ordinary fashion. Natural skin with soft highlights, visible subtle fabric texture and realistic folds. Preserve the entire head with margin above the hair. No zoom, no reframing, no additional action. Do not copy the video person's face. No text or logo.")
     g['5']['inputs'].update(prompt=prompt,width=width,height=height,length=length)
@@ -71,6 +71,16 @@ def hair_graph(repo,image,video,mask,width,height,prefix):
     g['10']['inputs']['latent_image']=['28',0]
     g['11']['inputs']['samples']=['30',0];g['12']['inputs']['samples']=['30',1]
     g['14']['inputs']['filename_prefix']=prefix
+    return g
+
+def face_graph(repo,image,video,mask,width,height,prefix):
+    g=hair_graph(repo,image,video,mask,width,height,prefix)
+    g['5']['inputs']['prompt']=("<Picture 1> defines the exact adult facial identity. "
+        "Video editing: regenerate ONLY the masked face region of the source video. "
+        "Replace the source person's facial features with Picture 1's face. "
+        "Keep the source hairstyle, hair color, hairline, clothing, body, hands, "
+        "background, camera, lighting, movement and audio. Preserve expressions "
+        "and natural skin texture. One adult woman, no extra people, text or logos.")
     return g
 
 def has_audio(path):
@@ -317,43 +327,47 @@ def stage_review_output(output,review):
 def process(folder,repo,cfg,choice,child,check):
     choice=normalize(choice);r=folder/'render';work=r/'wardrobe';work.mkdir(exist_ok=True)
     source=r/'source.mp4';identity=r/'output.mp4';meta=probe(source)
-    width,height=(hair_size if choice=='portrait_hair' else size)(meta['width'],meta['height'])
-    if choice=='portrait_hair' and meta['frames']/meta['fps']<5:raise ValueError('portrait_hair_requires_five_seconds')
+    localized=choice in ('portrait_hair','portrait_face')
+    width,height=(hair_size if localized else size)(meta['width'],meta['height'])
+    if localized and meta['frames']/meta['fps']<5:raise ValueError('portrait_edit_requires_five_seconds')
     plan=frame_plan(meta);duration=plan['frames']/24;ident=folder.name
     # Use the original cleaned source for motion, exactly as in the approved H3 trial.
     # workflow.py's verified face-only output is kept separately, never used as fallback.
     ref=COMFY/'input'/(ident+'-h3-portrait.jpg')
-    if choice=='portrait_hair':
+    if localized:
         python=Path(cfg['engine'])/'.venv/bin/python'
         child([str(python),str(repo/'ops/wardrobe-h3/crop_head_reference.py'),
                '--source',str(folder/'portrait.jpg'),'--output',str(ref)],folder,'hair-reference-crop.log',18)
     else:shutil.copy2(folder/'portrait.jpg',ref)
     video=COMFY/'input'/(ident+'-h3-motion.mp4')
-    if choice=='portrait_hair':
+    if localized:
         prepare_hair_source(source,video,width,height,plan['generatedFrames'],child,folder)
-        mask=COMFY/'input'/(ident+'-h3-hair-mask.mp4')
-        mask_report=work/'hair-mask.json'
-        child([str(python),str(repo/'ops/wardrobe-h3/build_hair_mask.py'),
+        mask=COMFY/'input'/(ident+('-h3-face-mask.mp4' if choice=='portrait_face' else '-h3-hair-mask.mp4'))
+        mask_report=work/('face-mask.json' if choice=='portrait_face' else 'hair-mask.json')
+        child([str(python),str(repo/'ops/wardrobe-h3'/('build_face_mask.py' if choice=='portrait_face' else 'build_hair_mask.py')),
                '--source',str(video),'--output',str(mask),'--report',str(mask_report)],
-              folder,'hair-mask.log',18)
+              folder,'face-mask.log' if choice=='portrait_face' else 'hair-mask.log',18)
         if probe(mask)!={'width':width,'height':height,'fps':24.0,'frames':plan['generatedFrames']}:
-            raise ValueError('hair_mask_timing_mismatch')
-        conditioned=COMFY/'input'/(ident+'-h3-conditioned.mp4')
-        condition_report=work/'hair-conditioning.json'
-        child([str(python),str(repo/'ops/wardrobe-h3/neutralize_hair_source.py'),
-               '--source',str(video),'--mask',str(mask),'--output',str(conditioned),
-               '--report',str(condition_report)],folder,'hair-condition.log',18)
-        if probe(conditioned)!={'width':width,'height':height,'fps':24.0,'frames':plan['generatedFrames']}:
-            raise ValueError('hair_conditioning_timing_mismatch')
+            raise ValueError('localized_mask_timing_mismatch')
+        if choice=='portrait_hair':
+            conditioned=COMFY/'input'/(ident+'-h3-conditioned.mp4')
+            condition_report=work/'hair-conditioning.json'
+            child([str(python),str(repo/'ops/wardrobe-h3/neutralize_hair_source.py'),
+                   '--source',str(video),'--mask',str(mask),'--output',str(conditioned),
+                   '--report',str(condition_report)],folder,'hair-condition.log',18)
+            if probe(conditioned)!={'width':width,'height':height,'fps':24.0,'frames':plan['generatedFrames']}:
+                raise ValueError('hair_conditioning_timing_mismatch')
     else:shutil.copy2(source,video)
     check()
     graph=(hair_graph(repo,ref.name,conditioned.name,mask.name,width,height,'wardrobe-h3/'+ident)
            if choice=='portrait_hair' else
+           face_graph(repo,ref.name,video.name,mask.name,width,height,'wardrobe-h3/'+ident)
+           if choice=='portrait_face' else
            motion_graph(repo,ref.name,video.name,choice,width,height,plan['generatedFrames'],'wardrobe-h3/'+ident))
     path=render(graph,'14',work/'generation.json',check)
     expected={'width':width,'height':height,'fps':24.0,'frames':plan['generatedFrames']}
     if probe(path)!=expected:raise ValueError('wardrobe_h3_generation_mismatch')
-    if choice=='portrait_hair':
+    if localized:
         child([str(python),str(repo/'ops/wardrobe-h3/check_hair_preservation.py'),
                '--source',str(video),'--mask',str(mask),'--result',str(path),
                '--report',str(work/'hair-preservation.json')],folder,'hair-preservation.log',80)
@@ -373,10 +387,10 @@ def process(folder,repo,cfg,choice,child,check):
         try:
             receipt=verify(json.loads((review/'metrics.json').read_text()),json.loads(out.with_suffix('.stats.json').read_text()),source_meta,probe(out),choice)
             receipt.update(faceRepairAttempt=attempt,faceDetectorScore=detector_score,faceSelectorMode='one')
-            if choice=='portrait_hair':
-                receipt['hairMaskTracking']=json.loads(mask_report.read_text())
-                receipt['hairConditioning']=json.loads(condition_report.read_text())
-                receipt['hairScenePreservation']=json.loads((work/'hair-preservation.json').read_text())
+            if localized:
+                receipt['localizedMaskTracking']=json.loads(mask_report.read_text())
+                receipt['scenePreservation']=json.loads((work/'hair-preservation.json').read_text())
+                if choice=='portrait_hair':receipt['hairConditioning']=json.loads(condition_report.read_text())
             break
         except ValueError as error:
             if str(error) not in ('wardrobe_identity_failed','wardrobe_face_coverage_failed') or attempt==3:raise

@@ -13,7 +13,7 @@ class WardrobeTests(unittest.TestCase):
   for x in [['dress','casual'],'mix','unknown',{},True]:
    with self.assertRaises(ValueError):w.normalize(x)
  def test_approved_h3_graph_and_all_outfits(self):
-  for choice in w.CHOICES.keys()-{'portrait_hair'}:
+  for choice in w.CHOICES.keys()-{'portrait_hair','portrait_face'}:
    g=w.motion_graph(REPO,'face.jpg','motion.mp4',choice,720,1280,107,'test')
    self.assertEqual(g['1']['inputs']['unet_name'],w.MODEL)
    self.assertEqual(g['8']['inputs']['steps'],20)
@@ -33,6 +33,17 @@ class WardrobeTests(unittest.TestCase):
   self.assertEqual(g['20']['inputs']['file'],'mask.mp4')
   self.assertEqual(w.hair_size(720,1280),(704,1248))
   self.assertFalse(any('Lora' in n['class_type'] or 'Wan' in n['class_type'] or 'QwenImage' in n['class_type'] for n in g.values()))
+ def test_face_only_graph_preserves_source_hair(self):
+  g=w.face_graph(REPO,'face.jpg','motion.mp4','face-mask.mp4',704,1248,'test')
+  self.assertEqual(g['8']['inputs']['steps'],20)
+  self.assertEqual(g['20']['inputs']['file'],'face-mask.mp4')
+  self.assertIn('Keep the source hairstyle',g['5']['inputs']['prompt'])
+  self.assertNotIn('hair color must disappear',g['5']['inputs']['prompt'])
+  face_spec=spec_from_file_location('face_mask',REPO/'ops/wardrobe-h3/build_face_mask.py')
+  with patch.dict('sys.modules',{'build_hair_mask':hair_mask}):
+   face_mask=module_from_spec(face_spec);face_spec.loader.exec_module(face_mask)
+  self.assertGreater(face_mask.face_mask(704,1248,(200,200,110,140)).max(),250)
+  self.assertEqual(face_mask.face_mask(704,1248,(200,200,110,140))[600,300],0)
  def test_hair_tracking_holds_when_face_or_mask_is_uncertain(self):
   self.assertTrue(hair_mask.duplicate_detection((197,126,298,298),(290,29,271,271)))
   self.assertTrue(hair_mask.duplicate_detection((495,336,93,93),(566,380,70,70)))
@@ -73,6 +84,17 @@ class WardrobeTests(unittest.TestCase):
    self.assertIsNone(result['verification'])
    self.assertEqual((folder/'repair-attempt-1'/'output.mp4').read_bytes(),b'previous-output')
    self.assertEqual(result['repairHistory'][0]['action'],'regenerate_hair_reference')
+ def test_face_only_retry_archives_failure_and_keeps_original_binding(self):
+  jid='orig_'+'c'*32
+  with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+   folder=Path(tmp)/jid;folder.mkdir();(folder/'render').mkdir()
+   (folder/'render'/'output.mp4').write_bytes(b'failed-render')
+   v.save(folder/'state.json',{'id':jid,'status':'error','policy':w.POLICY,'wardrobe':'portrait_hair'})
+   result=v.retry_face_only(jid)['job']
+   self.assertEqual((result['status'],result['wardrobe']),('queued','portrait_face'))
+   self.assertEqual((folder/'repair-attempt-1'/'output.mp4').read_bytes(),b'failed-render')
+   self.assertEqual(v.read(folder/'state.json')['requestedWardrobe'],'portrait_hair')
+   self.assertEqual(v.retry_face_only(jid)['job']['status'],'queued')
  def test_frame_grid_covers_length_without_loop_or_speed_change(self):
   for frames,fps in [(120,30),(156,30),(178,30),(307,30),(450,30),(449,29.97)]:
    p=w.frame_plan({'frames':frames,'fps':fps})

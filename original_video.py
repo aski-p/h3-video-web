@@ -129,7 +129,7 @@ def submit(data):
     candidate=next((v for v in catalog() if v['sha256']==data.get('sourceSha256')),None)
     if not candidate:raise ValueError('source_not_archived')
     candidate=requested_segment(candidate,data)
-    if wardrobe=='portrait_hair' and candidate['duration']<5:raise ValueError('portrait_hair_requires_five_seconds')
+    if wardrobe in ('portrait_hair','portrait_face') and candidate['duration']<5:raise ValueError('portrait_edit_requires_five_seconds')
     portrait=data.get('portrait','')
     if not isinstance(portrait,str) or not portrait.startswith('data:image/jpeg;base64,') or len(portrait)>700000:raise ValueError('fixed_portrait_required')
     image=base64.b64decode(portrait.split(',')[1],validate=True)
@@ -143,7 +143,8 @@ def submit(data):
         if (f/'state.json').exists():
             state=read(f/'state.json')
             stored=read(f/'candidate.json')
-            if any(state.get('requestedStart' if k=='start' and 'requestedStart' in state else
+            if any(state.get('requestedWardrobe' if k=='wardrobe' and 'requestedWardrobe' in state else
+                             'requestedStart' if k=='start' and 'requestedStart' in state else
                              'requestedDuration' if k=='duration' and 'requestedDuration' in state else k,
                              stored.get(k,'original' if k=='wardrobe' else 0 if k=='start' else None))!=v
                    for k,v in binding.items()):raise ValueError('request_input_conflict')
@@ -232,6 +233,29 @@ def retry_visual_hair(jid,reason):
         s.update(status='queued',progress=0,error=None,verification=None,repairHistory=history)
         save(f/'state.json',s)
         return {'ok':True,'job':public(s)}
+def retry_face_only(jid):
+    """Reprocess a portrait-hair job with a face-only mask, retaining its source."""
+    ROOT.mkdir(parents=True,exist_ok=True)
+    with (ROOT/'.submit.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        f=folder(jid);s=read(f/'state.json')
+        if s.get('policy')!=wardrobe_video.POLICY or s.get('sourceReleasedAt') or (f/'cancel').exists():
+            raise ValueError('face_only_retry_unavailable')
+        if s.get('wardrobe')=='portrait_face' and s['status'] in ('queued','running'):
+            return {'ok':True,'job':public(s)}
+        if s.get('wardrobe')!='portrait_hair' or s['status'] not in ('done','error'):
+            raise ValueError('face_only_retry_unavailable')
+        history=list(s.get('repairHistory',[]))
+        destination=f/f'repair-attempt-{len(history)+1}'
+        if destination.exists() or not (f/'render').is_dir():raise ValueError('face_only_evidence_missing')
+        (f/'render').rename(destination)
+        history.append({'reason':'user_requested_face_only','at':time.time(),
+                        'action':'regenerate_face_only','previousVerification':s.get('verification')})
+        s.update(status='queued',progress=0,error=None,verification=None,
+                 requestedWardrobe=s.get('requestedWardrobe',s['wardrobe']),
+                 wardrobe='portrait_face',repairHistory=history)
+        save(f/'state.json',s)
+        return {'ok':True,'job':public(s)}
 def release_source(jid):
     ROOT.mkdir(parents=True,exist_ok=True)
     with (ROOT/'.submit.lock').open('a') as lock:
@@ -272,6 +296,8 @@ def handle(handler,path,send_json,post=False):
             if not 0<size<=128:raise ValueError('invalid_request_size')
             data=json.loads(handler.rfile.read(size))
             send_json(handler,retry_visual_hair(jid,data.get('reason')));return
+        if len(parts)==5 and parts[4]=='retry-face-only' and post:
+            send_json(handler,retry_face_only(jid));return
         if len(parts)==5 and parts[4]=='release-source' and post:send_json(handler,release_source(jid));return
         files={'video':'output.mp4','comparison':'comparison.mp4','source':'source.mp4'}
         if len(parts)==5 and parts[4] in files and not post:
