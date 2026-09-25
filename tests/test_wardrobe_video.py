@@ -122,6 +122,28 @@ class WardrobeTests(unittest.TestCase):
    self.assertEqual(result['status'],'queued')
    self.assertEqual((folder/'repair-attempt-1'/'output.mp4').read_bytes(),b'covered-face')
    self.assertEqual(result['repairHistory'][0]['action'],'regenerate_uncovered_face')
+ def test_restore_verified_face_preserves_failed_attempt_and_receipt(self):
+  jid='orig_'+'f'*32
+  meta={'width':704,'height':1248,'fps':24.0,'frames':120}
+  receipt={'policy':w.POLICY,'wardrobe':'portrait_hair','faceCoverage':1,
+           'sampleIdentityMin':.79,'sampleIdentityMean':.82,
+           'faceModel':'hyperswap_1b_256','steps':20,'publishApproved':False,
+           'dimensions':meta}
+  with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+   folder=Path(tmp)/jid;folder.mkdir();(folder/'render').mkdir()
+   (folder/'render'/'output.mp4').write_bytes(b'failed')
+   old=folder/'repair-attempt-2';old.mkdir()
+   for name in ('source.mp4','output.mp4','comparison.mp4'):(old/name).write_bytes(b'passed')
+   v.save(folder/'state.json',{'id':jid,'status':'error','policy':w.POLICY,
+          'wardrobe':'portrait_face','repairHistory':[{},
+          {'action':'regenerate_face_only','previousVerification':receipt}]})
+   with patch.object(w,'probe',return_value=meta),patch.object(v.subprocess,'run'):
+    result=v.restore_verified_face_result(jid)['job']
+   self.assertEqual(result['status'],'done')
+   self.assertTrue(result['verification']['restoredVerifiedFace'])
+   self.assertEqual(result['verification']['hairVisualReview'],'waived_by_user')
+   self.assertEqual((folder/'render'/'output.mp4').read_bytes(),b'passed')
+   self.assertEqual((folder/'repair-attempt-3'/'output.mp4').read_bytes(),b'failed')
  def test_frame_grid_covers_length_without_loop_or_speed_change(self):
   for frames,fps in [(120,30),(156,30),(178,30),(307,30),(450,30),(449,29.97)]:
    p=w.frame_plan({'frames':frames,'fps':fps})

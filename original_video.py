@@ -308,6 +308,48 @@ def retry_face_artifact(jid):
         s.update(status='queued',progress=0,error=None,verification=None,repairHistory=history)
         save(f/'state.json',s)
         return {'ok':True,'job':public(s)}
+def restore_verified_face_result(jid):
+    """Recover a previously quality-passed render after the user waives hair matching."""
+    ROOT.mkdir(parents=True,exist_ok=True)
+    with (ROOT/'.submit.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        f=folder(jid);s=read(f/'state.json')
+        if s.get('status')=='done' and s.get('verification',{}).get('restoredVerifiedFace'):
+            return {'ok':True,'job':public(s)}
+        if s.get('status')!='error' or s.get('wardrobe')!='portrait_face' or s.get('policy')!=wardrobe_video.POLICY or s.get('sourceReleasedAt') or (f/'cancel').exists():
+            raise ValueError('verified_face_restore_unavailable')
+        history=list(s.get('repairHistory',[]))
+        originals=[(index+1,item['previousVerification']) for index,item in enumerate(history)
+                   if item.get('action')=='regenerate_face_only' and item.get('previousVerification')]
+        if len(originals)!=1:raise ValueError('verified_face_evidence_missing')
+        attempt,receipt=originals[0]
+        if (receipt.get('policy')!=wardrobe_video.POLICY or receipt.get('wardrobe')!='portrait_hair' or
+            receipt.get('faceCoverage')!=1 or receipt.get('sampleIdentityMin',0)<.45 or
+            receipt.get('sampleIdentityMean',0)<.65 or receipt.get('faceModel')!='hyperswap_1b_256' or
+            receipt.get('steps')!=20 or receipt.get('publishApproved') is not False):
+            raise ValueError('verified_face_quality_missing')
+        old=f/f'repair-attempt-{attempt}'
+        if not all((old/name).is_file() for name in ('source.mp4','output.mp4','comparison.mp4')):
+            raise ValueError('verified_face_files_missing')
+        expected=receipt.get('dimensions')
+        if wardrobe_video.probe(old/'output.mp4')!=expected or wardrobe_video.probe(old/'source.mp4')!=expected:
+            raise ValueError('verified_face_timing_mismatch')
+        for name in ('source.mp4','output.mp4'):
+            subprocess.run(['ffmpeg','-v','error','-i',str(old/name),'-f','null','-'],
+                           stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=120,check=True)
+        destination=f/f'repair-attempt-{len(history)+1}'
+        if destination.exists() or not (f/'render').is_dir():raise ValueError('verified_face_archive_conflict')
+        (f/'render').rename(destination)
+        old.rename(f/'render')
+        recovered={**receipt,'hairVisualReview':'waived_by_user','publishApproved':False,
+                   'effectiveRequest':'portrait_face','restoredVerifiedFace':True,
+                   'restoredFromAttempt':attempt}
+        history.append({'at':time.time(),'action':'restore_verified_face_result',
+                        'sourceAttempt':attempt,'failedAttempt':destination.name,
+                        'reason':'user_accepted_original_hair'})
+        s.update(status='done',progress=100,error=None,verification=recovered,repairHistory=history)
+        save(f/'state.json',s)
+        return {'ok':True,'job':public(s)}
 def release_source(jid):
     ROOT.mkdir(parents=True,exist_ok=True)
     with (ROOT/'.submit.lock').open('a') as lock:
@@ -357,6 +399,8 @@ def handle(handler,path,send_json,post=False):
             send_json(handler,retry_face_segment(jid,data.get('start'),data.get('duration')));return
         if len(parts)==5 and parts[4]=='retry-face-artifact' and post:
             send_json(handler,retry_face_artifact(jid));return
+        if len(parts)==5 and parts[4]=='restore-verified-face' and post:
+            send_json(handler,restore_verified_face_result(jid));return
         if len(parts)==5 and parts[4]=='release-source' and post:send_json(handler,release_source(jid));return
         files={'video':'output.mp4','comparison':'comparison.mp4','source':'source.mp4'}
         if len(parts)==5 and parts[4] in files and not post:
