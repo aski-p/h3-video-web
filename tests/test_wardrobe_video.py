@@ -34,6 +34,9 @@ class WardrobeTests(unittest.TestCase):
   self.assertEqual(w.hair_size(720,1280),(704,1248))
   self.assertFalse(any('Lora' in n['class_type'] or 'Wan' in n['class_type'] or 'QwenImage' in n['class_type'] for n in g.values()))
  def test_hair_tracking_holds_when_face_or_mask_is_uncertain(self):
+  self.assertTrue(hair_mask.duplicate_detection((197,126,298,298),(290,29,271,271)))
+  self.assertTrue(hair_mask.duplicate_detection((495,336,93,93),(566,380,70,70)))
+  self.assertFalse(hair_mask.duplicate_detection((100,100,100,100),(190,100,100,100)))
   box=(100,200,80,100)
   smoothed,missing=hair_mask.tracked_boxes([box]*5+[None]+[box]*5)
   self.assertEqual((len(smoothed),missing),(11,1))
@@ -43,6 +46,21 @@ class WardrobeTests(unittest.TestCase):
    hair_mask.tracked_boxes([box]*5+[None]*5+[box]*40)
   with self.assertRaisesRegex(ValueError,'hair_head_out_of_frame'):
    hair_mask.head_mask(384,672,(340,200,80,100))
+ def test_hair_mask_repair_preserves_request_binding_and_failed_evidence(self):
+  jid='orig_'+'a'*32
+  with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+   folder=Path(tmp)/jid;folder.mkdir();(folder/'render').mkdir()
+   (folder/'render'/'source.mp4').write_bytes(b'old-source')
+   (folder/'hair-mask.log').write_text('ValueError: hair_multiple_faces')
+   v.save(folder/'candidate.json',{'start':0,'duration':14,'sha256':'source'})
+   v.save(folder/'state.json',{'id':jid,'status':'error','policy':w.POLICY,
+           'wardrobe':'portrait_hair','start':0,'duration':14,
+           'error':'원본 기반 품질 검사 미통과 · quality_pipeline_failed'})
+   result=v.retry_wardrobe(jid,{'start':0,'duration':5.5})['job']
+   self.assertEqual((result['status'],result['duration'],result['requestedDuration']),('queued',5.5,14))
+   self.assertEqual((folder/'repair-attempt-1'/'source.mp4').read_bytes(),b'old-source')
+   self.assertFalse((folder/'render').exists())
+   self.assertEqual(v.retry_wardrobe(jid)['job']['status'],'queued')
  def test_frame_grid_covers_length_without_loop_or_speed_change(self):
   for frames,fps in [(120,30),(156,30),(178,30),(307,30),(450,30),(449,29.97)]:
    p=w.frame_plan({'frames':frames,'fps':fps})

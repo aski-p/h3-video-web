@@ -50,7 +50,7 @@ def folder(jid):
     if not JOB.fullmatch(jid): raise ValueError('invalid_job')
     return ROOT/jid
 def public(s):
-    return {k:s.get(k) for k in ('id','status','progress','error','policy','sourceSha256','portraitSha256','verification','createdAt','wardrobe','sourceReleasedAt')}
+    return {k:s.get(k) for k in ('id','status','progress','error','policy','sourceSha256','portraitSha256','verification','createdAt','wardrobe','sourceReleasedAt','start','duration','requestedStart','requestedDuration','repairHistory')}
 def status(jid):
     state=read(folder(jid)/'state.json')
     result=public(state)
@@ -143,7 +143,10 @@ def submit(data):
         if (f/'state.json').exists():
             state=read(f/'state.json')
             stored=read(f/'candidate.json')
-            if any(state.get(k,stored.get(k,'original' if k=='wardrobe' else 0 if k=='start' else None))!=v for k,v in binding.items()):raise ValueError('request_input_conflict')
+            if any(state.get('requestedStart' if k=='start' and 'requestedStart' in state else
+                             'requestedDuration' if k=='duration' and 'requestedDuration' in state else k,
+                             stored.get(k,'original' if k=='wardrobe' else 0 if k=='start' else None))!=v
+                   for k,v in binding.items()):raise ValueError('request_input_conflict')
             return public(state)
         if used_source(candidate):raise ValueError('source_already_used')
         if not healthy():raise ValueError('original_worker_offline')
@@ -158,7 +161,7 @@ def cancel(jid):
     f=folder(jid);s=read(f/'state.json')
     if s['status'] not in TERMINAL:(f/'cancel').touch()
     return {'ok':True,'job':public(s)}
-def retry_wardrobe(jid):
+def retry_wardrobe(jid,repair=None):
     ROOT.mkdir(parents=True,exist_ok=True)
     with (ROOT/'.submit.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
@@ -166,13 +169,39 @@ def retry_wardrobe(jid):
         if s.get('policy')!=wardrobe_video.POLICY or s.get('sourceReleasedAt') or (f/'cancel').exists():
             raise ValueError('wardrobe_retry_unavailable')
         if s['status'] in ('queued','running'):return {'ok':True,'job':public(s)}
-        if s['status']!='error' or not str(s.get('error','')).endswith('wardrobe_timeout'):
+        if s['status']!='error':
             raise ValueError('wardrobe_retry_unavailable')
-        record=f/'render/wardrobe/generation.json'
-        if not record.is_file() or not record.with_suffix('.graph.json').is_file():
-            raise ValueError('wardrobe_generation_record_missing')
-        history=s.get('repairHistory',[])
-        history.append({'reason':s.get('error'),'at':time.time(),'action':'resume_existing_generation'})
+        history=list(s.get('repairHistory',[]))
+        if str(s.get('error','')).endswith('wardrobe_timeout') and not repair:
+            record=f/'render/wardrobe/generation.json'
+            if not record.is_file() or not record.with_suffix('.graph.json').is_file():
+                raise ValueError('wardrobe_generation_record_missing')
+            history.append({'reason':s.get('error'),'at':time.time(),'action':'resume_existing_generation'})
+        else:
+            if not isinstance(repair,dict) or s.get('wardrobe')!='portrait_hair' or len(history)>=3:
+                raise ValueError('wardrobe_retry_unavailable')
+            log=f/'hair-mask.log'
+            if not log.is_file() or not any('ValueError: '+code in log.read_text(errors='replace')
+                                            for code in ('hair_multiple_faces','hair_tracking_incomplete',
+                                                         'hair_tracking_gap','hair_head_out_of_frame','hair_mask_too_wide')):
+                raise ValueError('hair_mask_repair_unavailable')
+            if (f/'render/wardrobe/generation.json').exists():
+                raise ValueError('hair_mask_repair_after_generation')
+            candidate=read(f/'candidate.json')
+            original={'start':s.get('requestedStart',s['start']),
+                      'duration':s.get('requestedDuration',s['duration'])}
+            changed=requested_segment({**candidate,**original},repair)
+            if changed['duration']<5 or (changed['start'],changed['duration'])==(s['start'],s['duration']):
+                raise ValueError('hair_mask_repair_interval_invalid')
+            destination=f/f'repair-attempt-{len(history)+1}'
+            if destination.exists() or not (f/'render').is_dir():
+                raise ValueError('hair_mask_repair_evidence_missing')
+            (f/'render').rename(destination)
+            save(f/'candidate.json',changed)
+            history.append({'reason':s.get('error'),'at':time.time(),'action':'retry_source_interval',
+                            'start':changed['start'],'duration':changed['duration']})
+            s.update(requestedStart=original['start'],requestedDuration=original['duration'],
+                     start=changed['start'],duration=changed['duration'])
         s.update(status='queued',progress=0,error=None,repairHistory=history)
         save(f/'state.json',s)
         return {'ok':True,'job':public(s)}
@@ -206,7 +235,11 @@ def handle(handler,path,send_json,post=False):
         jid=parts[3];f=folder(jid)
         if len(parts)==4 and not post:send_json(handler,{'ok':True,'job':status(jid)});return
         if len(parts)==5 and parts[4]=='cancel' and post:send_json(handler,cancel(jid));return
-        if len(parts)==5 and parts[4]=='retry-wardrobe' and post:send_json(handler,retry_wardrobe(jid));return
+        if len(parts)==5 and parts[4]=='retry-wardrobe' and post:
+            size=int(handler.headers.get('Content-Length',0))
+            if size<0 or size>512:raise ValueError('invalid_request_size')
+            repair=json.loads(handler.rfile.read(size)) if size else None
+            send_json(handler,retry_wardrobe(jid,repair));return
         if len(parts)==5 and parts[4]=='release-source' and post:send_json(handler,release_source(jid));return
         files={'video':'output.mp4','comparison':'comparison.mp4','source':'source.mp4'}
         if len(parts)==5 and parts[4] in files and not post:
