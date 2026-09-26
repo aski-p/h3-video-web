@@ -22,14 +22,14 @@ def normalized(value):
     return re.sub(r'[^a-z0-9@]', '', value.lower())
 
 
-def text_lines(image, individual=False):
+def text_lines(image, individual=False, psm=11):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 7))
     variants = (gray, cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel))
     lines = []
     for variant in variants:
         encoded = cv2.imencode('.png', variant)[1].tobytes()
-        result = subprocess.run(['tesseract', 'stdin', 'stdout', '--psm', '11', 'tsv'],
+        result = subprocess.run(['tesseract', 'stdin', 'stdout', '--psm', str(psm), 'tsv'],
                                 input=encoded, capture_output=True, timeout=15, check=True)
         groups = defaultdict(list)
         for row in result.stdout.decode('utf-8', 'replace').splitlines()[1:]:
@@ -54,11 +54,12 @@ def text_lines(image, individual=False):
     return lines
 
 
-def matching_lines(image, username, adaptive=False):
+def matching_lines(image, username, adaptive=False, psm=11, full_size=None):
     height, width = image.shape[:2]
+    limit_width,limit_height=full_size or (width,height)
     aliases = ALIASES.get(normalized(username), (normalized(username),))
     found = []
-    for x, y, w, h, text in text_lines(image,individual=adaptive):
+    for x, y, w, h, text in text_lines(image,individual=adaptive,psm=psm):
         alias_match = any(alias and (alias in text or
                           (len(alias) >= 7 and SequenceMatcher(None, alias, text.lstrip('@')).ratio() >= .82))
                           for alias in aliases)
@@ -69,7 +70,7 @@ def matching_lines(image, username, adaptive=False):
         if y < height * .34 and not adaptive:
             raise ValueError('account_overlay_near_face')
         # A large graphic across a person is not safe to reconstruct automatically.
-        if w > width * .55 or h > height * .11:
+        if w > limit_width * .55 or h > limit_height * .11:
             raise ValueError('account_overlay_too_large')
         margin_x, margin_y = max(8, int(w * .06)), max(5, int(h * .2))
         found.append((max(0, x - margin_x), max(0, y - margin_y),
@@ -158,18 +159,25 @@ def detect_track(source, username):
     import numpy as np
     cap=cv2.VideoCapture(str(source));fps=cap.get(cv2.CAP_PROP_FPS)
     total=int(cap.get(cv2.CAP_PROP_FRAME_COUNT));width=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH));height=int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    boxes=[];frames=[]
+    boxes=[];frames=[];last_box=None
     try:
         while True:
             okay,frame=cap.read()
             if not okay:break
             frames.append(cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY))
             found=matching_lines(frame,username,adaptive=True)
+            if not found and last_box is not None:
+                # Whole-frame OCR can merge the label with a moving hand. A
+                # local single-line pass still requires the actual account text.
+                x,y,w,h=last_box;left=max(0,x-48);top=max(0,y-24)
+                crop=frame[top:min(height,y+h+24),left:min(width,x+w+48)]
+                local=matching_lines(crop,username,adaptive=True,psm=7,full_size=(width,height))
+                found=[(a+left,b+top,c,d,t) for a,b,c,d,t in local]
             if found:
                 x=min(v[0] for v in found);y=min(v[1] for v in found)
                 right=max(v[0]+v[2] for v in found);bottom=max(v[1]+v[3] for v in found)
                 if right-x>width*.55 or bottom-y>height*.11:raise ValueError('account_overlay_location_uncertain')
-                boxes.append([x,y,right-x,bottom-y])
+                last_box=[x,y,right-x,bottom-y];boxes.append(last_box)
             else:boxes.append(None)
     finally:cap.release()
     if len(boxes)!=total or total<2:raise ValueError('account_overlay_source_unreadable')
