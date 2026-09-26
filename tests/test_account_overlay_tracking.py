@@ -7,6 +7,11 @@ spec=importlib.util.spec_from_file_location('overlay',Path(__file__).resolve().p
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 
 class OverlayTrackingTests(unittest.TestCase):
+ def test_bounds_include_omitted_edge_glyphs_but_never_large_regions(self):
+  box=m.complete_label_bounds([[83,964,176,35]],704,1248)[0]
+  self.assertLessEqual(box[0],68);self.assertGreaterEqual(box[0]+box[2],269)
+  with self.assertRaisesRegex(ValueError,'account_overlay_location_uncertain'):
+   m.complete_label_bounds([[0,0,400,40]],704,1248)
  def test_local_ocr_is_checked_against_frame_dimensions_and_exact_account(self):
   crop=np.zeros((70,320,3),np.uint8)
   with patch.object(m,'text_lines',return_value=[(40,20,210,25,'@artgentokyo')]):

@@ -156,6 +156,17 @@ def bridge_text_gaps(frames, boxes):
     return result
 
 
+def complete_label_bounds(boxes,width,height):
+    # OCR may read "ArtGenToky" but omit @/the final rounded glyph. Include the
+    # entire account label, not only the characters recognized in this frame.
+    expanded=[]
+    for x,y,w,h in boxes:
+        margin=max(16,round(w*.16));left=max(0,x-margin);right=min(width,x+w+margin)
+        if right-left>width*.55 or h>height*.11:raise ValueError('account_overlay_location_uncertain')
+        expanded.append([left,y,right-left,h])
+    return expanded
+
+
 def detect_track(source, username):
     """Measure the requested mark on every frame; interpolate only short OCR gaps."""
     import numpy as np
@@ -190,6 +201,7 @@ def detect_track(source, username):
     if len(known)<total*.6 or known[0]>3 or total-1-known[-1]>3 or any(b-a>max(4,round(fps*.25)) for a,b in zip(known,known[1:])):
         raise ValueError('account_overlay_tracking_incomplete')
     values=np.array([[np.interp(i,known,[boxes[k][axis] for k in known]) for axis in range(4)] for i in range(total)]).round().astype(int).tolist()
+    values=complete_label_bounds(values,width,height)
     return {'overlayROI':values[0],'boxes':values,'frames':total,'fps':fps,'width':width,'height':height,'observedFrames':len(known),'result':'tracked_account_mark'}
 
 
