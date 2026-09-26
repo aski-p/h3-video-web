@@ -1,8 +1,12 @@
-.page-refresh-bar{display:flex;justify-content:flex-end;padding:10px 0 4px}
-.page-refresh-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:44px;padding:8px 15px;border:1px solid var(--line,#d9dbe0);border-radius:12px;background:#eaf3ff;color:#075caf;font:600 14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer;white-space:nowrap;touch-action:manipulation}
-.page-refresh-button span{font-size:23px;line-height:1}
-.page-refresh-button:hover{filter:brightness(.94)}
-.page-refresh-button:focus-visible{outline:2px solid #007aff;outline-offset:3px}
-.page-refresh-button:disabled{opacity:.65;cursor:wait}
-
-[data-theme="dark"] .page-refresh-button{background:#20364e;color:#b9dcff;border-color:#456382}
+.page-refresh-button{display:inline-flex;align-items:center;justify-content:center;flex:0 0 44px;width:44px;height:44px;padding:0;border:1px solid rgba(0,80,160,.1);border-radius:50%;background:linear-gradient(145deg,#fff,#eef4fb);color:#3973a8;box-shadow:0 2px 7px #173c6410,inset 0 1px 0 #fff;cursor:pointer;touch-action:manipulation;transition:transform .18s ease,background .18s ease,box-shadow .18s ease}
+.page-refresh-button svg{width:21px;height:21px;display:block;transition:transform .25s ease}
+@media(hover:hover){.page-refresh-button:hover{background:#e6f0fd;box-shadow:0 3px 12px #173c6420}.page-refresh-button:hover svg{transform:rotate(35deg)}}
+.page-refresh-button:active{transform:scale(.93)}
+.page-refresh-button:focus-visible{outline:3px solid #80baff;outline-offset:3px}
+.page-refresh-button:disabled{opacity:.7;cursor:wait}
+.page-refresh-button[aria-busy=true] svg{animation:refresh-turn .8s linear infinite}
+[data-theme=dark] .page-refresh-button{background:linear-gradient(145deg,#333a45,#252b34);color:#a6c8f0;border-color:#4c5d714d;box-shadow:0 2px 8px #0002,inset 0 1px 0 #ffffff0d}
+.topbar>.page-refresh-button{order:3}.topbar>.top-actions{margin-left:auto}
+@media(max-width:600px){.topbar>.page-refresh-button{order:0;margin-left:auto}.topbar>.top-actions{order:1;flex-basis:100%}}
+@keyframes refresh-turn{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.page-refresh-button,.page-refresh-button svg{transition:none}.page-refresh-button[aria-busy=true] svg{animation:none}}
