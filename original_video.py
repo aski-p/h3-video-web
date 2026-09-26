@@ -297,6 +297,26 @@ def retry_face_only(jid):
                  wardrobe='portrait_face',repairHistory=history)
         save(f/'state.json',s)
         return {'ok':True,'job':public(s)}
+def retry_face_mask(jid):
+    """Retry pre-generation mask errors after the face-only tracking correction."""
+    with (ROOT/'.submit.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        f=folder(jid);s=read(f/'state.json')
+        if s.get('policy')!=wardrobe_video.POLICY or s.get('wardrobe')!='portrait_face' or s.get('sourceReleasedAt') or (f/'cancel').exists():
+            raise ValueError('face_mask_retry_unavailable')
+        if s['status'] in ('queued','running'):return {'ok':True,'job':public(s)}
+        history=list(s.get('repairHistory',[]))
+        if s['status']!='error' or not any(code in s.get('error','') for code in ('hair_multiple_faces','hair_mask_too_wide')) or any(x.get('action')=='retry_face_mask_v2' for x in history):
+            raise ValueError('face_mask_retry_unavailable')
+        if (f/'render/wardrobe/generation.json').exists():raise ValueError('face_mask_retry_after_generation')
+        destination=f/f'repair-attempt-{len(history)+1}'
+        if destination.exists() or not (f/'render').is_dir():raise ValueError('face_mask_evidence_missing')
+        (f/'render').rename(destination)
+        history.append({'action':'retry_face_mask_v2','reason':s.get('error'),'at':time.time()})
+        s.update(status='queued',progress=0,error=None,verification=None,repairHistory=history)
+        save(f/'state.json',s)
+        return {'ok':True,'job':public(s)}
+
 def retry_face_segment(jid,start,duration):
     """Move a failed face-only edit to a source-bounded segment with a visible face."""
     ROOT.mkdir(parents=True,exist_ok=True)
@@ -436,6 +456,8 @@ def handle(handler,path,send_json,post=False):
             send_json(handler,retry_visual_hair(jid,data.get('reason')));return
         if len(parts)==5 and parts[4]=='retry-face-only' and post:
             send_json(handler,retry_face_only(jid));return
+        if len(parts)==5 and parts[4]=='retry-face-mask' and post:
+            send_json(handler,retry_face_mask(jid));return
         if len(parts)==5 and parts[4]=='retry-face-segment' and post:
             size=int(handler.headers.get('Content-Length',0))
             if not 0<size<=128:raise ValueError('invalid_request_size')

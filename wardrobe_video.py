@@ -347,7 +347,7 @@ def process(folder,repo,cfg,choice,child,check):
         mask=COMFY/'input'/(ident+'-h3-hair-mask.mp4')
         mask_report=work/'hair-mask.json'
         child([str(python),str(repo/'ops/wardrobe-h3/build_hair_mask.py'),
-               '--source',str(video),'--output',str(mask),'--report',str(mask_report)],
+               '--source',str(video),'--output',str(mask),'--report',str(mask_report)]+(['--face-only'] if choice=='portrait_face' else []),
               folder,'hair-mask.log',18)
         if probe(mask)!={'width':width,'height':height,'fps':24.0,'frames':plan['generatedFrames']}:
             raise ValueError('localized_mask_timing_mismatch')

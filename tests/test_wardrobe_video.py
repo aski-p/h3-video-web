@@ -8,6 +8,25 @@ REPO=Path(__file__).resolve().parents[1]
 mask_spec=spec_from_file_location('hair_mask',REPO/'ops/wardrobe-h3/build_hair_mask.py')
 hair_mask=module_from_spec(mask_spec);mask_spec.loader.exec_module(hair_mask)
 class WardrobeTests(unittest.TestCase):
+ def test_face_mask_excludes_hair_and_tracks_without_identity_jump(self):
+  import numpy as np
+  mask=hair_mask.face_mask(704,1248,(180,180,240,300))
+  self.assertEqual(int(mask[100,300]),0)
+  self.assertGreater(int(mask[330,300]),240)
+  self.assertLess(np.count_nonzero(mask>127)/mask.size,.1)
+  target=(100,100,100,120,.9)
+  self.assertEqual(hair_mask.select_tracked_face([target,(400,100,90,100,.9)],target[:4]),target[:4])
+  self.assertIsNone(hair_mask.select_tracked_face([(400,100,90,100,.9)],target[:4]))
+  with self.assertRaisesRegex(ValueError,'hair_multiple_faces'):
+   hair_mask.select_tracked_face([target,(400,100,90,100,.9)],None)
+ def test_mask_repair_preserves_length_and_archives_evidence(self):
+  jid='orig_'+'d'*32
+  with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+   folder=Path(tmp)/jid;folder.mkdir();(folder/'render').mkdir();(folder/'render'/'source.mp4').write_bytes(b'old')
+   v.save(folder/'state.json',{'id':jid,'status':'error','policy':w.POLICY,'wardrobe':'portrait_face','duration':10.4,'error':'hair_mask_too_wide'})
+   job=v.retry_face_mask(jid)['job'];self.assertEqual(job['status'],'queued');self.assertEqual(job['duration'],10.4)
+   self.assertEqual((folder/'repair-attempt-1'/'source.mp4').read_bytes(),b'old')
+   self.assertEqual(v.retry_face_mask(jid)['job']['status'],'queued')
  def test_only_explicit_single_choice(self):
   self.assertEqual(w.normalize(None),'original')
   for x in [['dress','casual'],'mix','unknown',{},True]:

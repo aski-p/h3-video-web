@@ -38,13 +38,41 @@ def face_detector():
     return detector
 
 
-def detect_boxes(source):
+def select_tracked_face(found, previous):
+    """Follow the initially dominant face; never jump to a background person."""
+    peak=max((box[4] for box in found),default=0)
+    confident = [box for box in found if box[4] >= max(.5,peak-.15)]
+    if previous is None:
+        if not confident:
+            return None
+        primary = confident[0]
+        if any(box[2]*box[3] >= primary[2]*primary[3]*.5 and
+               not duplicate_detection(primary[:4], box[:4]) for box in confident[1:]):
+            raise ValueError('hair_multiple_faces')
+        return primary[:4]
+    x,y,w,h = previous
+    matches=[]
+    for box in confident:
+        bx,by,bw,bh,score=box
+        distance=math.hypot(bx+bw/2-x-w/2, by+bh/2-y-h/2)/max(1,math.hypot(w,h))
+        ratio=bw*bh/max(1,w*h)
+        if distance < .55 and .45 < ratio < 2.2:
+            matches.append((distance+abs(math.log(ratio))*.2,box))
+    matches.sort(key=lambda pair:pair[0])
+    if not matches:return None
+    if len(matches)>1 and matches[1][0]-matches[0][0]<.12 and not duplicate_detection(matches[0][1][:4],matches[1][1][:4]):
+        raise ValueError('hair_multiple_faces')
+    return matches[0][1][:4]
+
+
+def detect_boxes(source, face_only=False):
     capture = cv2.VideoCapture(str(source))
     if not capture.isOpened():
         raise ValueError('hair_source_unreadable')
     detector = face_detector()
     boxes = []
     width = height = 0
+    previous = None
     while True:
         okay, frame = capture.read()
         if not okay:
@@ -54,11 +82,16 @@ def detect_boxes(source):
         found = sorted(((float(x1), float(y1), float(x2-x1), float(y2-y1), float(score))
                         for (x1, y1, x2, y2), score in zip(detected, scores)),
                        key=lambda box: box[2] * box[3], reverse=True)
-        if found and found[0][4] >= .5 and any(box[4] >= .5 and
-                         box[2] * box[3] >= found[0][2] * found[0][3] * .5 and
-                         not duplicate_detection(found[0][:4], box[:4]) for box in found[1:]):
-            raise ValueError('hair_multiple_faces')
-        boxes.append(found[0][:4] if found else None)
+        if face_only:
+            selected = select_tracked_face(found, previous)
+            boxes.append(selected)
+            if selected is not None:previous=selected
+        else:
+            if found and found[0][4] >= .5 and any(box[4] >= .5 and
+                             box[2] * box[3] >= found[0][2] * found[0][3] * .5 and
+                             not duplicate_detection(found[0][:4], box[:4]) for box in found[1:]):
+                raise ValueError('hair_multiple_faces')
+            boxes.append(found[0][:4] if found else None)
     capture.release()
     if not boxes:
         raise ValueError('hair_source_empty')
@@ -94,6 +127,19 @@ def head_mask(width, height, box, hair=None):
     mask = cv2.GaussianBlur(mask, (0, 0), 5)
     if np.count_nonzero(mask > 127) / mask.size > .35:
         raise ValueError('hair_mask_too_wide')
+    return mask
+
+
+def face_mask(width, height, box):
+    x,y,w,h=map(float,box)
+    if x < -width*.08 or y < -height*.08 or x+w > width*1.08 or y+h > height*1.08:
+        raise ValueError('hair_head_out_of_frame')
+    mask=np.zeros((height,width),dtype=np.uint8)
+    # A tight facial oval excludes the hairstyle and shoulder region.
+    cv2.ellipse(mask,(round(x+w*.5),round(y+h*.53)),
+                (max(1,round(w*.46)),max(1,round(h*.47))),0,0,360,255,-1)
+    mask=cv2.GaussianBlur(mask,(0,0),2)
+    if np.count_nonzero(mask>127)/mask.size>.35:raise ValueError('hair_mask_too_wide')
     return mask
 
 
@@ -135,10 +181,10 @@ def parsed_hair(frame, box, parser):
     return cv2.dilate(hair, kernel)
 
 
-def build(source, output):
-    boxes, width, height = detect_boxes(source)
+def build(source, output, face_only=False):
+    boxes, width, height = detect_boxes(source, face_only)
     smoothed, missing = tracked_boxes(boxes)
-    parser = hair_parser()
+    parser = None if face_only else hair_parser()
     capture = cv2.VideoCapture(str(source))
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -147,15 +193,16 @@ def build(source, output):
                 okay, frame = capture.read()
                 if not okay:
                     raise ValueError('hair_source_frame_missing')
-                hair = parsed_hair(frame, box, parser)
-                if not cv2.imwrite(str(Path(temp) / f'{index:06d}.png'), head_mask(width, height, box, hair)):
+                mask = face_mask(width,height,box) if face_only else head_mask(width,height,box,parsed_hair(frame,box,parser))
+                if not cv2.imwrite(str(Path(temp) / f'{index:06d}.png'), mask):
                     raise ValueError('hair_mask_frame_write_failed')
             subprocess.run(['ffmpeg', '-v', 'error', '-y', '-framerate', '24', '-i', str(Path(temp) / '%06d.png'),
                             '-c:v', 'libx264', '-qp', '0', '-pix_fmt', 'yuv420p', str(output)], check=True)
     finally:
         capture.release()
     return {'frames': len(boxes), 'detectedFrames': len(boxes) - missing,
-            'interpolatedFrames': missing, 'width': width, 'height': height}
+            'interpolatedFrames': missing, 'width': width, 'height': height,
+            'maskScope':'face_only' if face_only else 'head_and_hair'}
 
 
 if __name__ == '__main__':
@@ -163,8 +210,9 @@ if __name__ == '__main__':
     parser.add_argument('--source', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--report', type=Path)
+    parser.add_argument('--face-only', action='store_true')
     arguments = parser.parse_args()
-    result = build(arguments.source, arguments.output)
+    result = build(arguments.source, arguments.output, arguments.face_only)
     if arguments.report:
         arguments.report.write_text(json.dumps(result))
     print(json.dumps(result))
