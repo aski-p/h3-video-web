@@ -683,7 +683,7 @@ footer{
 .pgx-mode-options button{min-height:46px;white-space:nowrap;font-size:14px;padding:10px;border-radius:12px}.pgx-mode-options button[aria-pressed=true]{background:#087bf0;color:#fff}.pgx-mode-panel p{font-size:13px;margin:10px 0 0;line-height:1.5}
 #pgxModeDialog{width:min(400px,calc(100% - 40px));box-sizing:border-box;border:1px solid #8d99ac55;border-radius:20px;padding:24px;background:#f5f5f7;color:#1d1d1f}#pgxModeDialog::backdrop{background:#0008}#pgxModeDialog input{box-sizing:border-box;width:100%;min-height:46px;margin:10px 0}#pgxModeDialog .pgx-dialog-actions{display:flex;gap:10px;justify-content:flex-end}#pgxModeError{color:#b32929;font-size:13px}
 </style>
-<link rel="stylesheet" href="/assets/page-refresh.css?v=1"><script src="/assets/page-refresh.js?v=1" defer></script>
+<link rel="stylesheet" href="/assets/page-refresh.css?v=2"><script src="/assets/page-refresh.js?v=1" defer></script>
 </head>
 <body>
 <a class="skip-link" href="#main-controls">생성 설정으로 바로가기</a>
@@ -2062,7 +2062,7 @@ function renderWorkerProgressCard(selector,job,serverTime){
   bar.style.width=(pct===null?0:pct)+'%';
   const eta=finiteProgressNumber(job.eta_seconds,0);
   const expected=fmtExpectedCompletion(job.expected_complete_at);
-  timeNode.textContent=unavailable
+  timeNode.textContent=['done','error','cancelled'].includes(job.status)?(job.status==='done'?'생성 완료 · Studio에서 품질 검수':'작업 종료 · Studio에서 상세 확인'):unavailable
     ? '진행 정보 연결 확인 중 · 생성은 계속됩니다'
     :(eta===null?'실측 속도 산정 중':expected+' 완료 예상 · '+fmtEta(eta)+' 남음');
   const step=finiteProgressNumber(job.value,0);
@@ -2123,7 +2123,7 @@ async function refreshWorkerProgress(){
     const data=dashboardResult.status==='fulfilled'?dashboardResult.value:null;
     const direct=studioResult.status==='fulfilled'?studioResult.value:null;
     const workers={...(data?.workers||{})};
-    if(direct?.ok&&direct.job)workers.studio_original=studioProgressCard(direct.job);
+    if(direct?.ok&&direct.job&&(!workers.studio_original||['running','queued'].includes(direct.job.status)))workers.studio_original=studioProgressCard(direct.job);
     else if(!workers.studio_original&&data?.studio_job)workers.studio_original=studioProgressCard(data.studio_job);
     const freshStudio=!!workers.studio_original;
     if(freshStudio)rememberStudioProgress(workers.studio_original);
