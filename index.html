@@ -2098,28 +2098,43 @@ function studioProgressCard(job){
     eta_seconds:remaining,expected_complete_at:remaining===null?null:Date.now()/1000+remaining,
     value:step,max:steps,unavailable:false,queue_position:null};
 }
+let WORKER_PROGRESS_BUSY=false;
+let LAST_STUDIO_PROGRESS=null;
+function rememberStudioProgress(job){
+  LAST_STUDIO_PROGRESS=job;
+  if(/^orig_[a-f0-9]{32}$/.test(job.id||'')){
+    STUDIO_PROGRESS_JOB_ID=job.id;
+    try{localStorage.setItem('studioOriginalJobId',job.id);}catch(_){}
+  }
+}
 async function refreshWorkerProgress(){
+  if(WORKER_PROGRESS_BUSY)return;
+  WORKER_PROGRESS_BUSY=true;
   const requestId=++WORKER_PROGRESS_ISSUED;
   const requestEpoch=WORKER_PROGRESS_EPOCH;
   try{
-    const data=await fetchJsonWithTimeout('/api/active-progress',{},10000);
+    const [dashboardResult,studioResult]=await Promise.allSettled([
+      fetchJsonWithTimeout('/api/active-progress',{},20000),
+      STUDIO_PROGRESS_JOB_ID?fetchJsonWithTimeout('/api/studio-progress/'+STUDIO_PROGRESS_JOB_ID,{},15000):Promise.resolve(null)
+    ]);
     if(!workerProgressResponseIsCurrent(requestId,requestEpoch))return;
-    if(data&&data.ok){
-      const workers=data.workers||{};
-      if(!workers.studio_original&&data.studio_job)workers.studio_original=studioProgressCard(data.studio_job);
-      if(!workers.studio_original&&STUDIO_PROGRESS_JOB_ID){
-        try{const studio=await fetchJsonWithTimeout('/api/studio-progress/'+STUDIO_PROGRESS_JOB_ID,{},12000);
-          if(studio?.ok&&studio.job)workers.studio_original=studioProgressCard(studio.job);
-        }catch(_){/* The main H3 worker cards remain available. */}
-      }
-      if(!workerProgressResponseIsCurrent(requestId,requestEpoch))return;
-      WORKER_PROGRESS_APPLIED=requestId;
-      renderWorkerProgressBoard(workers,data.server_time);
+    const data=dashboardResult.status==='fulfilled'?dashboardResult.value:null;
+    const direct=studioResult.status==='fulfilled'?studioResult.value:null;
+    const workers={...(data?.workers||{})};
+    if(direct?.ok&&direct.job)workers.studio_original=studioProgressCard(direct.job);
+    else if(!workers.studio_original&&data?.studio_job)workers.studio_original=studioProgressCard(data.studio_job);
+    const freshStudio=!!workers.studio_original;
+    if(freshStudio)rememberStudioProgress(workers.studio_original);
+    else if(LAST_STUDIO_PROGRESS)workers.studio_original=LAST_STUDIO_PROGRESS;
+    WORKER_PROGRESS_APPLIED=requestId;
+    if(data?.ok)renderWorkerProgressBoard(workers,data.server_time);
+    else if(workers.studio_original)renderWorkerProgressCard('#studioOriginalProgress',workers.studio_original,Date.now()/1000);
+    if(!freshStudio&&LAST_STUDIO_PROGRESS){
+      const card=$('#studioOriginalProgress');
+      card.querySelector('.worker-live-meta').textContent='마지막 확인 진행률 · 서버 다시 연결 중';
+      card.querySelector('.worker-live-time').textContent='현재 남은 시간 확인 중';
     }
-  }catch(_){
-    if(!workerProgressResponseIsCurrent(requestId,requestEpoch))return;
-    document.querySelectorAll('.worker-live-meta').forEach(node=>{node.textContent='서버 진행률 다시 연결 중';});
-  }
+  }finally{WORKER_PROGRESS_BUSY=false;}
 }
 async function cancelWorkerCardJob(worker){
   const jobId=WORKER_CARD_JOBS[worker];
