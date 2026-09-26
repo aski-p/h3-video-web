@@ -478,12 +478,11 @@ def finish_post(folder,repo,cfg,choice,child,check):
     python=Path(cfg['engine'])/'.venv/bin/python'
     candidate=json.loads((folder/'candidate.json').read_text())
     username=candidate['username']
-    adaptive=(state.get('recovery') or {}).get('strategy')=='tracked_overlay'
     def scan(video):
         report=work/('overlay-clean-report.json' if video.name=='face-no-account.mp4' else 'overlay-source-report.json')
         try:
             child([cfg['inpaintPython'],str(repo/'ops/face-quality/detect_account_overlay.py'),
-                   '--source',str(video),'--username',username,'--report',str(report)]+(['--per-frame'] if adaptive else []),
+                   '--source',str(video),'--username',username,'--report',str(report),'--per-frame'],
                   folder,'account-check-'+report.stem+'.log',92 if video==identity else 94)
             return json.loads(report.read_text())
         except (ValueError,json.JSONDecodeError) as error:
