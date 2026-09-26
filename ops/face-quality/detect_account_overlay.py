@@ -27,7 +27,7 @@ def text_lines(image, individual=False, psm=11):
     scale=3 if psm==7 else 1
     if scale>1:gray=cv2.resize(gray,None,fx=scale,fy=scale,interpolation=cv2.INTER_CUBIC)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 7))
-    variants = (gray, cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel))
+    variants = tuple(255-(gray>level).astype('uint8')*255 for level in (180,200)) if psm==7 else (gray, cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel))
     lines = []
     for variant in variants:
         encoded = cv2.imencode('.png', variant)[1].tobytes()
