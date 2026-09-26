@@ -192,6 +192,25 @@ def proxy(environ, start_response):
         # WSGI iterator that must keep the upstream socket open while bytes
         # are sent to the browser.
         r = urllib.request.urlopen(req, timeout=300)
+        if path == "/api/active-progress" and method == "GET":
+            try:
+                dashboard = json.load(r)
+            finally:
+                r.close()
+            if not (dashboard.get("workers") or {}).get("studio_original"):
+                token = os.environ.get("ORIGINAL_VIDEO_TOKEN", "")
+                try:
+                    if not token: raise ValueError("missing progress credential")
+                    studio_request = urllib.request.Request(
+                        "https://reelradar-5.vercel.app/api/production?workerProgress=1",
+                        headers={"X-Aski-Original-Token": token})
+                    with urllib.request.urlopen(studio_request, timeout=6) as studio_response:
+                        dashboard["studio_job"] = json.load(studio_response).get("job")
+                except (OSError, ValueError, KeyError, TypeError):
+                    dashboard["studio_progress_unavailable"] = True
+            start_response("200 OK", [("Content-Type", "application/json"),
+                                      ("Cache-Control", PRIVATE_CACHE_CONTROL)])
+            return [json.dumps(dashboard, allow_nan=False).encode()]
         return _proxy_response(r, start_response, is_video, cache_control, "image/jpeg" if source_thumbnail else None)
     except urllib.error.HTTPError as e:
         data = e.read()

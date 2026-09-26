@@ -137,6 +137,26 @@ class VideoDeliveryTests(unittest.TestCase):
         self.assertNotIn('private-source',json.dumps(payload))
         self.assertNotIn('private-portrait',json.dumps(payload))
 
+    def test_dashboard_discovers_studio_job_without_browser_job_id(self):
+        import io
+        seen=[]
+        def fake_open(request,timeout):
+            seen.append(request)
+            payload={'ok':True,'workers':{'pgx':None,'rtx5080':None}} if len(seen)==1 else {
+                'ok':True,'job':{'id':'orig_'+'a'*32,'status':'running','step':2,'steps':20,'sampler_percent':10}}
+            return io.BytesIO(json.dumps(payload).encode())
+        started=[]
+        with patch.object(backend_proxy,'ORIGIN_SECRET',self.ORIGIN_SECRET), \
+             patch.dict(os.environ,{'ORIGINAL_VIDEO_TOKEN':'server-only'}), \
+             patch('urllib.request.urlopen',fake_open):
+            result=backend_proxy.handler({'REQUEST_METHOD':'GET','PATH_INFO':'/api/active-progress'},
+                                         lambda status,headers:started.extend([status,dict(headers)]))
+        payload=json.loads(b''.join(result))
+        self.assertEqual(payload['studio_job']['sampler_percent'],10)
+        self.assertEqual(seen[1].get_header('X-aski-original-token'),'server-only')
+        self.assertNotIn('server-only',json.dumps(payload))
+        self.assertEqual(started[1]['Cache-Control'],'private, no-store')
+
     def test_proxy_fails_closed_without_origin_secret(self):
         started = []
         env = {"REQUEST_METHOD": "GET", "PATH_INFO": "/api/jobs", "QUERY_STRING": "", "wsgi.input": None}

@@ -2106,6 +2106,7 @@ async function refreshWorkerProgress(){
     if(!workerProgressResponseIsCurrent(requestId,requestEpoch))return;
     if(data&&data.ok){
       const workers=data.workers||{};
+      if(!workers.studio_original&&data.studio_job)workers.studio_original=studioProgressCard(data.studio_job);
       if(!workers.studio_original&&STUDIO_PROGRESS_JOB_ID){
         try{const studio=await fetchJsonWithTimeout('/api/studio-progress/'+STUDIO_PROGRESS_JOB_ID,{},12000);
           if(studio?.ok&&studio.job)workers.studio_original=studioProgressCard(studio.job);
