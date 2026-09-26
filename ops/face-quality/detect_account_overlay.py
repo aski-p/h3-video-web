@@ -24,6 +24,8 @@ def normalized(value):
 
 def text_lines(image, individual=False, psm=11):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    scale=3 if psm==7 else 1
+    if scale>1:gray=cv2.resize(gray,None,fx=scale,fy=scale,interpolation=cv2.INTER_CUBIC)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 7))
     variants = (gray, cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel))
     lines = []
@@ -39,7 +41,7 @@ def text_lines(image, individual=False, psm=11):
             try:
                 if float(cells[10]) < 25:
                     continue
-                x, y, width, height = map(int, cells[6:10])
+                x, y, width, height = [round(int(value)/scale) for value in cells[6:10]]
             except ValueError:
                 continue
             if width > 0 and height > 0:
@@ -169,8 +171,8 @@ def detect_track(source, username):
             if not found and last_box is not None:
                 # Whole-frame OCR can merge the label with a moving hand. A
                 # local single-line pass still requires the actual account text.
-                x,y,w,h=last_box;left=max(0,x-48);top=max(0,y-24)
-                crop=frame[top:min(height,y+h+24),left:min(width,x+w+48)]
+                x,y,w,h=last_box;left=max(0,x-16);top=max(0,y-8)
+                crop=frame[top:min(height,y+h+8),left:min(width,x+w+16)]
                 local=matching_lines(crop,username,adaptive=True,psm=7,full_size=(width,height))
                 found=[(a+left,b+top,c,d,t) for a,b,c,d,t in local]
             if found:
