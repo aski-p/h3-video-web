@@ -728,8 +728,8 @@ footer{
 
   <section class="worker-progress-board" id="workerProgressBoard" aria-label="생성 장비별 실시간 진행률" aria-live="polite">
     <article class="worker-live" id="pgxLiveProgress" data-worker="pgx">
-      <div class="worker-live-head"><span class="worker-live-name"><i class="worker-live-dot" aria-hidden="true"></i>PGX Spark</span><strong class="worker-live-pct">대기</strong></div>
-      <div class="worker-live-phase">진행 중인 작업 없음</div>
+      <div class="worker-live-head"><span class="worker-live-name"><i class="worker-live-dot" aria-hidden="true"></i>PGX Spark · H3 직접 생성</span><strong class="worker-live-pct">대기</strong></div>
+      <div class="worker-live-phase">직접 생성 작업 없음</div>
       <div class="worker-live-bar" aria-hidden="true"><i></i></div>
       <div class="worker-live-time">예상 완료 —</div>
       <div class="worker-live-meta">최근 서버 확인 대기</div>
@@ -2041,7 +2041,7 @@ function renderWorkerProgressCard(selector,job,serverTime){
     if(previousJobId)WORKER_CANCEL_PENDING.delete(previousJobId);
     WORKER_CARD_JOBS[worker]=null;
     card.classList.remove('active');
-    pctNode.textContent='대기'; phaseNode.textContent='진행 중인 작업 없음';
+    pctNode.textContent='대기'; phaseNode.textContent=worker==='pgx'?'H3 직접 생성 작업 없음':'진행 중인 작업 없음';
     bar.style.width='0%'; timeNode.textContent='예상 완료 —';
     metaNode.textContent='서버 확인 '+fmtExpectedCompletion(serverTime);
     if(cancelButton){cancelButton.hidden=true; cancelButton.disabled=true;
