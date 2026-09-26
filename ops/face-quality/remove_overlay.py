@@ -16,7 +16,8 @@ p = argparse.ArgumentParser()
 p.add_argument('--source', type=Path, required=True)
 p.add_argument('--output', type=Path, required=True)
 p.add_argument('--model', type=Path, required=True)
-p.add_argument('--roi', type=int, nargs=4, required=True, metavar=('X', 'Y', 'W', 'H'))
+p.add_argument('--roi', type=int, nargs=4, metavar=('X', 'Y', 'W', 'H'))
+p.add_argument('--track-json',type=Path)
 p.add_argument('--full-roi', action='store_true', help='Restore a stable account mark, including dark or translucent text')
 p.add_argument('--limit', type=int, default=0)
 a = p.parse_args()
@@ -36,10 +37,19 @@ cap.release()
 if not frames:
     raise ValueError('No source frames')
 h, w = frames[0].shape[:2]
+track=json.loads(a.track_json.read_text()) if a.track_json else None
+if track:
+    if track['frames']!=len(frames) or (track['width'],track['height'])!=(w,h) or abs(track['fps']-fps)>.01 or len(track['boxes'])!=len(frames):raise ValueError('overlay_track_timing_mismatch')
+    for tx,ty,tw,th in track['boxes']:
+        if not (0<=tx<tx+tw<=w and 0<=ty<ty+th<=h) or tw>w*.55 or th>h*.11:raise ValueError('overlay_track_bounds_invalid')
+    a.roi=track['boxes'][0]
+if not a.roi:p.error('ROI or track required')
 x, y, rw, rh = a.roi
 if not (0 <= x < x+rw <= w and 0 <= y < y+rh <= h):
     p.error('ROI outside source')
-if a.full_roi:
+if track:
+    positions=[(box[0],box[1],1.0) for box in track['boxes']]
+elif a.full_roi:
     glyph = np.ones((rh, rw), np.uint8) * 255
     positions = [(x, y, 1.0)] * len(frames)
 else:
@@ -65,6 +75,8 @@ writer = subprocess.Popen(['ffmpeg','-v','error','-f','rawvideo','-pix_fmt','bgr
 try:
     for i, frame in enumerate(frames[:a.limit or None]):
         px,py,_=positions[i]
+        if track:
+            _,_,rw,rh=track['boxes'][i];glyph=np.ones((rh,rw),np.uint8)*255
         mask=np.zeros((h,w),np.uint8)
         mask[py:py+rh,px:px+rw]=glyph
         x0,y0=max(0,px-100)//8*8,max(0,py-110)//8*8
@@ -90,5 +102,5 @@ except BaseException:
     raise
 subprocess.run(['ffmpeg','-v','error','-i',str(raw),'-i',str(a.source),'-map','0:v:0','-map','1:a?','-c','copy','-shortest','-movflags','+faststart','-y',str(a.output)],check=True)
 raw.unlink()
-a.output.with_suffix('.json').write_text(json.dumps({'source':str(a.source),'method':'LaMa screen-fixed ROI; estimated texture' if a.full_roi else 'LaMa tracked glyph mask; estimated texture','tracking':positions,'roi':a.roi,'maskedPixels':int((mask>0).sum()),'frames':a.limit or len(frames),'fps':fps},indent=2))
+a.output.with_suffix('.json').write_text(json.dumps({'source':str(a.source),'method':'LaMa per-frame account ROI; estimated texture' if track else 'LaMa screen-fixed ROI; estimated texture' if a.full_roi else 'LaMa tracked glyph mask; estimated texture','tracking':positions,'roi':a.roi,'maskedPixels':int((mask>0).sum()),'frames':a.limit or len(frames),'fps':fps},indent=2))
 cv2.imwrite(str(a.output.with_suffix('.mask.png')),mask)

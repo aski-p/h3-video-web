@@ -1,5 +1,5 @@
 """Explicit opt-in wardrobe edits. Separate receipts; never an original-pixel fallback."""
-import asyncio,json,math,re,shutil,subprocess,threading,time,urllib.error,urllib.parse,urllib.request,uuid
+import asyncio,hashlib,json,math,re,shutil,subprocess,threading,time,urllib.error,urllib.parse,urllib.request,uuid
 from pathlib import Path
 POLICY='wardrobe-h3-ref2va-v2-20260922'
 MODEL='minimax_h3_ref2va_pruned_int8_convrot.safetensors'
@@ -258,10 +258,31 @@ def render(graph,output_node,record,check):
         while True:
             check()
             if not pid:
-                if state.get('attempts',0)>=3:raise ValueError('wardrobe_submission_retries_exhausted')
-                response=api('/prompt',{'prompt':graph,'client_id':state['client']})
+                if state.get('nextSubmitAt',0)>time.time():
+                    time.sleep(5);continue
+                if state.get('submissionPending'):
+                    queue=api('/queue');history=api('/history')
+                    entries=list(queue.get('queue_running',[]))+list(queue.get('queue_pending',[]))
+                    entries += [value.get('prompt',[]) for value in history.values()]
+                    matches={entry[1] for entry in entries if len(entry)>3 and isinstance(entry[3],dict)
+                             and entry[3].get('client_id')==state['client'] and entry[2]==graph}
+                    if len(matches)==1:
+                        pid=matches.pop();state.update(promptId=pid,status='submitted',submissionPending=False)
+                        record.write_text(json.dumps(state));continue
+                    # A lost acknowledgement cannot prove the expensive prompt was
+                    # rejected. Keep polling the same client, never duplicate it.
+                    if len(matches)>1:raise ValueError('wardrobe_submission_ambiguous')
+                    time.sleep(15);continue
+                state['submissionPending']=True;record.write_text(json.dumps(state))
+                try:response=api('/prompt',{'prompt':graph,'client_id':state['client']})
+                except urllib.error.HTTPError:
+                    state['submissionPending']=False;record.write_text(json.dumps(state));raise
+                except urllib.error.URLError as error:
+                    if isinstance(error.reason,ConnectionRefusedError):
+                        state['submissionPending']=False;record.write_text(json.dumps(state))
+                    raise
                 pid=response['prompt_id']
-                state.update(status='submitted',promptId=pid,attempts=state.get('attempts',0)+1)
+                state.update(status='submitted',promptId=pid,submissionPending=False,attempts=state.get('attempts',0)+1)
                 record.write_text(json.dumps(state))
             if pid!=watcher_pid:
                 if watcher_stop:watcher_stop.set()
@@ -285,12 +306,13 @@ def render(graph,output_node,record,check):
             else:
                 missing+=1
                 if missing>=3:
-                    outputs=list((OUTPUT/'wardrobe-h3').glob(record.parent.parent.parent.name+'_*.mp4'))
+                    prefix=graph[str(output_node)]['inputs']['filename_prefix']
+                    outputs=list((OUTPUT/Path(prefix).parent).glob(Path(prefix).name+'_*.mp4'))
                     if len(outputs)==1:
                         state.update(status='done',output=str(outputs[0].resolve()))
                         record.write_text(json.dumps(state));return outputs[0]
                     if outputs:raise ValueError('wardrobe_output_ambiguous')
-                    state.update(status='submitting',promptId=None)
+                    state.update(status='submitting',promptId=None,nextSubmitAt=time.time()+min(900,15*2**min(state.get('attempts',0),6)))
                     record.write_text(json.dumps(state))
                     pid=None;missing=0
             time.sleep(5)
@@ -328,7 +350,8 @@ def stage_review_output(output,review):
 
 def process(folder,repo,cfg,choice,child,check):
     choice=normalize(choice);r=folder/'render';work=r/'wardrobe';work.mkdir(exist_ok=True)
-    source=r/'source.mp4';identity=r/'output.mp4';meta=probe(source)
+    if (work/'post-checkpoint.json').exists():return finish_post(folder,repo,cfg,choice,child,check)
+    source=r/'original-source.mp4' if (r/'original-source.mp4').exists() else r/'source.mp4';identity=r/'output.mp4';meta=probe(source)
     localized=choice in ('portrait_hair','portrait_face')
     width,height=(hair_size if localized else size)(meta['width'],meta['height'])
     if localized and meta['frames']/meta['fps']<5:raise ValueError('portrait_edit_requires_five_seconds')
@@ -347,7 +370,7 @@ def process(folder,repo,cfg,choice,child,check):
         mask=COMFY/'input'/(ident+'-h3-hair-mask.mp4')
         mask_report=work/'hair-mask.json'
         child([str(python),str(repo/'ops/wardrobe-h3/build_hair_mask.py'),
-               '--source',str(video),'--output',str(mask),'--report',str(mask_report)]+(['--face-only'] if choice=='portrait_face' else []),
+               '--source',str(video),'--output',str(mask),'--report',str(mask_report)]+(['--face-only'] if choice=='portrait_face' else [])+(['--multiscale'] if json.loads((folder/'state.json').read_text()).get('multiscaleFaceTracking') else []),
               folder,'hair-mask.log',18)
         if probe(mask)!={'width':width,'height':height,'fps':24.0,'frames':plan['generatedFrames']}:
             raise ValueError('localized_mask_timing_mismatch')
@@ -366,6 +389,12 @@ def process(folder,repo,cfg,choice,child,check):
            face_graph(repo,ref.name,video.name,mask.name,width,height,'wardrobe-h3/'+ident)
            if choice=='portrait_face' else
            motion_graph(repo,ref.name,video.name,choice,width,height,plan['generatedFrames'],'wardrobe-h3/'+ident))
+    state=json.loads((folder/'state.json').read_text())
+    generation=state.get('generationAttempt',0)
+    if generation:
+        for node in graph.values():
+            if 'noise_seed' in node.get('inputs',{}):node['inputs']['noise_seed']=int(hashlib.sha256(f'{ident}:{generation}'.encode()).hexdigest()[:12],16)
+        graph['14']['inputs']['filename_prefix']+=f'-attempt-{generation}'
     path=render(graph,'14',work/'generation.json',check)
     expected={'width':width,'height':height,'fps':24.0,'frames':plan['generatedFrames']}
     if probe(path)!=expected:raise ValueError('wardrobe_h3_generation_mismatch')
@@ -377,7 +406,8 @@ def process(folder,repo,cfg,choice,child,check):
     child(['ffmpeg','-v','error','-y','-i',str(path),'-an','-frames:v',str(plan['frames']),'-c:v','libx264','-crf','16','-movflags','+faststart',str(raw)],folder,'wardrobe-trim.log',80)
     python=Path(cfg['engine'])/'.venv/bin/python'
     if identity.exists():identity.rename(r/'original-face.mp4')
-    source.rename(r/'original-source.mp4')
+    if source!=r/'original-source.mp4':source.rename(r/'original-source.mp4')
+    source=r/'source.mp4'
     # Comparison uses the same 24fps grid. Preserve archived originals and do not stretch time.
     child(['ffmpeg','-v','error','-y','-i',str(r/'original-source.mp4'),'-vf',f'fps=24,scale={width}:{height}','-frames:v',str(plan['frames']),'-an','-c:v','libx264','-crf','16',str(source)],folder,'wardrobe-source.log',90)
     source_meta=probe(source);receipt=None
@@ -397,27 +427,86 @@ def process(folder,repo,cfg,choice,child,check):
         except ValueError as error:
             if str(error) not in ('wardrobe_identity_failed','wardrobe_face_coverage_failed') or attempt==3:raise
     child(['ffmpeg','-v','error','-y','-i',str(out),'-i',str(r/'original-source.mp4'),'-map','0:v:0','-map','1:a?','-c','copy','-t',str(duration),'-movflags','+faststart',str(identity)],folder,'wardrobe-mux.log',92)
+    save_post_checkpoint(folder,receipt,meta,plan,width,height)
+    return finish_post(folder,repo,cfg,choice,child,check)
+
+
+def file_sha(path):
+    with path.open('rb') as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
+
+
+def save_post_checkpoint(folder,receipt,meta,plan,width,height):
+    r=folder/'render';work=r/'wardrobe'
+    saved=work/'post-face.mp4'
+    if not saved.exists():
+        temporary=saved.with_suffix('.tmp.mp4');shutil.copy2(r/'output.mp4',temporary);temporary.replace(saved)
+    state=json.loads((folder/'state.json').read_text())
+    checkpoint={'version':1,'receipt':receipt,'meta':meta,'plan':plan,'width':width,'height':height,
+        'sourceSha256':state['sourceSha256'],'portraitSha256':state['portraitSha256'],
+        'duration':state['duration'],'wardrobe':state['wardrobe'],'outputSha256':file_sha(saved)}
+    temp=work/'post-checkpoint.tmp';temp.write_text(json.dumps(checkpoint));temp.replace(work/'post-checkpoint.json')
+
+
+def restore_post_checkpoint(folder,choice):
+    """Recover legacy post-face failures only from independently valid QC receipts."""
+    r=folder/'render';work=r/'wardrobe'
+    if (work/'post-checkpoint.json').exists():return
+    source=r/'source.mp4';base=r/'original-source.mp4';meta=probe(base);width,height=probe(source)['width'],probe(source)['height'];plan=frame_plan(meta)
+    for attempt in (1,2,3):
+        out=work/f'face-{attempt}.mp4';review=work/f'review-{attempt}'
+        if not out.exists() or not (review/'metrics.json').exists():continue
+        try:receipt=verify(json.loads((review/'metrics.json').read_text()),json.loads(out.with_suffix('.stats.json').read_text()),probe(source),probe(out),choice)
+        except (ValueError,OSError,KeyError):continue
+        receipt.update(faceRepairAttempt=attempt,faceDetectorScore=(.5,.35,.2)[attempt-1],faceSelectorMode='one')
+        if choice in ('portrait_face','portrait_hair'):
+            receipt['localizedMaskTracking']=json.loads((work/'hair-mask.json').read_text())
+            receipt['scenePreservation']=json.loads((work/'hair-preservation.json').read_text())
+            if choice=='portrait_hair':receipt['hairConditioning']=json.loads((work/'hair-conditioning.json').read_text())
+        # Rebuild from the verified face artifact, never trust an arbitrary output file.
+        subprocess.run(['ffmpeg','-v','error','-y','-i',str(out),'-i',str(base),'-map','0:v:0','-map','1:a?','-c','copy','-t',str(plan['frames']/24),str(r/'output.mp4')],check=True,timeout=60)
+        save_post_checkpoint(folder,receipt,meta,plan,width,height);return
+    raise ValueError('post_checkpoint_quality_missing')
+
+
+def finish_post(folder,repo,cfg,choice,child,check):
+    r=folder/'render';work=r/'wardrobe';identity=r/'output.mp4';source=r/'source.mp4'
+    cp=json.loads((work/'post-checkpoint.json').read_text());state=json.loads((folder/'state.json').read_text())
+    if any(cp[k]!=state[k] for k in ('sourceSha256','portraitSha256','duration','wardrobe')) or file_sha(work/'post-face.mp4')!=cp['outputSha256']:
+        raise ValueError('post_checkpoint_binding_mismatch')
+    shutil.copy2(work/'post-face.mp4',identity)
+    receipt=cp['receipt'];meta=cp['meta'];plan=cp['plan'];width=cp['width'];height=cp['height'];duration=plan['frames']/24
+    python=Path(cfg['engine'])/'.venv/bin/python'
     candidate=json.loads((folder/'candidate.json').read_text())
     username=candidate['username']
+    adaptive=(state.get('recovery') or {}).get('strategy')=='tracked_overlay'
     def scan(video):
+        report=work/('overlay-clean-report.json' if video.name=='face-no-account.mp4' else 'overlay-source-report.json')
         try:
-            result=subprocess.run([cfg['inpaintPython'],str(repo/'ops/face-quality/detect_account_overlay.py'),
-                                   '--source',str(video),'--username',username],
-                                  capture_output=True,text=True,timeout=90,check=True)
-            return json.loads(result.stdout)
-        except (subprocess.CalledProcessError,subprocess.TimeoutExpired,json.JSONDecodeError) as error:
+            child([cfg['inpaintPython'],str(repo/'ops/face-quality/detect_account_overlay.py'),
+                   '--source',str(video),'--username',username,'--report',str(report)]+(['--per-frame'] if adaptive else []),
+                  folder,'account-check-'+report.stem+'.log',92 if video==identity else 94)
+            return json.loads(report.read_text())
+        except (ValueError,json.JSONDecodeError) as error:
+            if str(error)=='cancelled':raise
+            (work/'overlay-diagnostic.json').write_text(json.dumps({'type':type(error).__name__,'detail':str(error)}))
             raise ValueError('wardrobe_account_overlay_review_required') from error
     overlay=scan(identity)
     receipt['overlayReview']=overlay
     if overlay['overlayROI']:
         clean=work/'face-no-account.mp4'
+        track=work/'overlay-track.json';track.write_text(json.dumps(overlay))
         child([cfg['inpaintPython'],str(repo/'ops/face-quality/remove_overlay.py'),
                '--source',str(identity),'--output',str(clean),'--model',cfg['inpaintModel'],
-               '--roi',*map(str,overlay['overlayROI']),'--full-roi'],folder,'wardrobe-account-restoration.log',93)
+               *(['--track-json',str(track)] if overlay.get('boxes') else ['--roi',*map(str,overlay['overlayROI']),'--full-roi'])],folder,'wardrobe-account-restoration.log',93)
         receipt['overlayOutputReview']=scan(clean)
         if receipt['overlayOutputReview']['overlayROI']:raise ValueError('wardrobe_account_overlay_remains')
         identity.rename(work/'face-with-account.mp4')
         clean.rename(identity)
+        review=work/'post-overlay-review';stage_review_output(identity,review)
+        child([str(python),str(repo/'ops/face-quality/evaluate.py'),'--engine',cfg['engine'],'--source',str(source),'--portrait',str(folder/'portrait.jpg'),'--folder',str(review)],folder,'post-overlay-quality.log',94)
+        attempt=receipt['faceRepairAttempt']
+        verify(json.loads((review/'metrics.json').read_text()),json.loads((work/f'face-{attempt}.stats.json').read_text()),probe(source),probe(identity),choice)
+        receipt['postOverlayIdentityVerified']=True
     child(['ffmpeg','-v','error','-i',str(identity),'-f','null','-'],folder,'wardrobe-decode.log',94)
     output=probe(identity)
     if output!={'width':width,'height':height,'fps':24.0,'frames':plan['frames']}:raise ValueError('wardrobe_output_mismatch')
@@ -427,6 +516,8 @@ def process(folder,repo,cfg,choice,child,check):
                '--portrait',str(folder/'portrait.jpg'),'--result',str(identity),
                '--report',str(hair_report)],folder,'hair-reference.log',95)
         receipt['hairReferenceColor']=json.loads(hair_report.read_text())
+    if choice=='portrait_hair':
+        receipt['hairMaskTracking']=receipt['localizedMaskTracking'];receipt['hairScenePreservation']=receipt['scenePreservation']
     receipt.update(sourceDimensions=meta,sourceDuration=meta['frames']/meta['fps'],outputDuration=duration,generatedFrames=plan['generatedFrames'],sourceTimingPreserved=False,comparisonTimingVerified=True)
     child(['ffmpeg','-v','error','-y','-i',str(source),'-i',str(identity),'-filter_complex','hstack=inputs=2','-an','-c:v','libx264','-crf','18','-movflags','+faststart',str(r/'comparison.mp4')],folder,'wardrobe-comparison.log',98)
     check()

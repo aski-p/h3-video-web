@@ -65,12 +65,24 @@ def select_tracked_face(found, previous):
     return matches[0][1][:4]
 
 
-def detect_boxes(source, face_only=False):
+def profile_reacquisition(found, previous):
+    """A turn can shrink a face box; require strong detection inside the old head."""
+    x,y,w,h=previous;candidates=[]
+    for bx,by,bw,bh,score in found:
+        overlap=max(0,min(x+w,bx+bw)-max(x,bx))*max(0,min(y+h,by+bh)-max(y,by))
+        if score>=.7 and .25<bw*bh/(w*h)<1 and overlap/(bw*bh)>=.75:
+            candidates.append((bx,by,bw,bh))
+    if not candidates:return None
+    if any(not duplicate_detection(candidates[0],other) for other in candidates[1:]):return None
+    return candidates[0]
+
+
+def detect_boxes(source, face_only=False, multiscale=False):
     capture = cv2.VideoCapture(str(source))
     if not capture.isOpened():
         raise ValueError('hair_source_unreadable')
     detector = face_detector()
-    boxes = []
+    boxes = [];observations=[]
     width = height = 0
     previous = None
     while True:
@@ -82,8 +94,25 @@ def detect_boxes(source, face_only=False):
         found = sorted(((float(x1), float(y1), float(x2-x1), float(y2-y1), float(score))
                         for (x1, y1, x2, y2), score in zip(detected, scores)),
                        key=lambda box: box[2] * box[3], reverse=True)
+        observations.append(found)
         if face_only:
             selected = select_tracked_face(found, previous)
+            if selected is None and multiscale and previous is not None:
+                # Re-detect actual facial landmarks at a larger effective scale.
+                # Do not fabricate missing detections or relax the temporal gate.
+                selected=profile_reacquisition(found,previous)
+                x,y,w,h=previous
+                for padding in (.75,1.5):
+                    if selected is not None:break
+                    left=max(0,int(x-w*padding));right=min(width,int(x+w*(1+padding)))
+                    top=max(0,int(y-h*padding));bottom=min(height,int(y+h*(1+padding)))
+                    crop=frame[top:bottom,left:right]
+                    if not crop.size:continue
+                    local,confidence,_=detector.detect_faces(crop)
+                    candidates=sorted(((float(x1+left),float(y1+top),float(x2-x1),float(y2-y1),float(score))
+                        for (x1,y1,x2,y2),score in zip(local,confidence)),key=lambda b:b[2]*b[3],reverse=True)
+                    selected=select_tracked_face(candidates,previous)
+                    if selected is not None:break
             boxes.append(selected)
             if selected is not None:previous=selected
         else:
@@ -93,6 +122,20 @@ def detect_boxes(source, face_only=False):
                 raise ValueError('hair_multiple_faces')
             boxes.append(found[0][:4] if found else None)
     capture.release()
+    if face_only and multiscale:
+        # At a rapid turn, forward scale continuity may fail although the face is
+        # clearly detected. Track backwards from the next reliable anchor and
+        # accept only a span that reconnects to the preceding target.
+        known=[i for i,b in enumerate(boxes) if b is not None]
+        for left,right in zip(known,known[1:]):
+            if right-left<=1:continue
+            previous=boxes[right];recovered={}
+            for index in range(right-1,left-1,-1):
+                candidate=select_tracked_face(observations[index],previous)
+                if candidate is None:break
+                recovered[index]=candidate;previous=candidate
+            if left in recovered and duplicate_detection(boxes[left],recovered[left]):
+                for index in range(left+1,right):boxes[index]=recovered[index]
     if not boxes:
         raise ValueError('hair_source_empty')
     return boxes, width, height
@@ -181,8 +224,8 @@ def parsed_hair(frame, box, parser):
     return cv2.dilate(hair, kernel)
 
 
-def build(source, output, face_only=False):
-    boxes, width, height = detect_boxes(source, face_only)
+def build(source, output, face_only=False, multiscale=False):
+    boxes, width, height = detect_boxes(source, face_only, multiscale)
     smoothed, missing = tracked_boxes(boxes)
     parser = None if face_only else hair_parser()
     capture = cv2.VideoCapture(str(source))
@@ -211,8 +254,9 @@ if __name__ == '__main__':
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--report', type=Path)
     parser.add_argument('--face-only', action='store_true')
+    parser.add_argument('--multiscale', action='store_true')
     arguments = parser.parse_args()
-    result = build(arguments.source, arguments.output, arguments.face_only)
+    result = build(arguments.source, arguments.output, arguments.face_only, arguments.multiscale)
     if arguments.report:
         arguments.report.write_text(json.dumps(result))
     print(json.dumps(result))

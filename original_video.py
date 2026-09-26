@@ -1,5 +1,7 @@
 """Authenticated, durable original-motion jobs. No synthesis fallback."""
 import math
+import shutil
+import urllib.error
 import wardrobe_video
 import base64, fcntl, hashlib, hmac, json, os, re, signal, subprocess, sys, time
 from pathlib import Path
@@ -50,7 +52,7 @@ def folder(jid):
     if not JOB.fullmatch(jid): raise ValueError('invalid_job')
     return ROOT/jid
 def public(s):
-    return {k:s.get(k) for k in ('id','status','progress','error','policy','sourceSha256','portraitSha256','verification','createdAt','wardrobe','sourceReleasedAt','start','duration','requestedStart','requestedDuration','repairHistory')}
+    return {k:s.get(k) for k in ('id','status','progress','error','policy','sourceSha256','portraitSha256','verification','createdAt','wardrobe','sourceReleasedAt','start','duration','requestedStart','requestedDuration','repairHistory','recovery','recoveryHistory','stage','recoveryCount','recoveryBlocked','stageUpdatedAt')}
 def status(jid):
     state=read(folder(jid)/'state.json')
     result=public(state)
@@ -88,6 +90,7 @@ def active_progress(now=None):
            f'H3 생성 {step}/{steps}스텝 · {stage_label}' if step is not None and steps else
            f'H3 생성 · 총 {steps}스텝 · 현재 스텝 확인 중 · {stage_label}' if steps else
            f'원본 영상 처리 중 · {stage_label}')
+    if state.get('recovery') and state.get('status') in ('queued','running'):phase=f"자동 복구 {state['recovery']['attempt']}차 · {state.get('stage',state['recovery']['stage'])}"
     return {'id':state['id'],'status':state['status'],'can_cancel':False,'phase':phase,
             'pct':round(sampler if sampler is not None else stage) if sampler is not None or stage is not None else None,
             'stage_percent':round(stage) if stage is not None else None,
@@ -297,6 +300,48 @@ def retry_face_only(jid):
                  wardrobe='portrait_face',repairHistory=history)
         save(f/'state.json',s)
         return {'ok':True,'job':public(s)}
+def schedule_recovery(f,s,recovery):
+    """Persist intent before moving evidence, so a crash cannot lose an attempt."""
+    s.update(status='queued',error=None,recovery=recovery,recoveryBlocked=None,
+             recoveryCount=recovery['attempt'],stage=recovery['stage'],stageUpdatedAt=time.time(),
+             recoveryHistory=(s.get('recoveryHistory',[])+[recovery])[-100:])
+    save(f/'state.json',s)
+
+def prepare_recovery(f,s):
+    recovery=s.get('recovery') or {}
+    if not recovery or recovery.get('prepared'):return
+    strategy=recovery.get('strategy')
+    if strategy=='tracked_overlay':wardrobe_video.restore_post_checkpoint(f,s['wardrobe'])
+    if strategy in ('regenerate_quality','multiscale_face_tracking'):
+        destination=f/f"recovery-{recovery['attempt']}"
+        if (f/'render').exists():
+            if destination.exists():raise ValueError('recovery_evidence_conflict')
+            (f/'render').rename(destination)
+            save(destination/'attempt-state.json',s)
+            for log in f.glob('*.log'):shutil.copy2(log,destination/log.name)
+        s['verification']=None;s['progress']=0
+        if strategy=='regenerate_quality':s['generationAttempt']=recovery['generationAttempt']
+        if strategy=='multiscale_face_tracking':s['multiscaleFaceTracking']=True
+    recovery['prepared']=True;s['recovery']=recovery
+    save(f/'state.json',s)
+
+def retry_recovery(jid):
+    with (ROOT/'.submit.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        f=folder(jid);s=read(f/'state.json')
+        if (f/'cancel').exists() or s.get('sourceReleasedAt') or s.get('policy')!=wardrobe_video.POLICY:raise ValueError('recovery_unavailable')
+        if s['status'] in ('queued','running'):return {'ok':True,'job':public(s)}
+        if s['status']!='error':raise ValueError('recovery_unavailable')
+        from production_recovery import plan
+        code=str(s.get('error','')).split(' · ')[-1]
+        if code in ('hair_mask_too_wide','hair_multiple_faces','quality_pipeline_failed') and (f/'hair-mask.log').is_file():
+            reasons=re.findall(r'ValueError: (hair_[a-z0-9_]+)',(f/'hair-mask.log').read_text(errors='replace')[-16384:])
+            if reasons:code=reasons[-1]
+        recovery=plan(s,code)
+        if not recovery:raise ValueError('recovery_requires_new_strategy')
+        schedule_recovery(f,s,recovery)
+        return {'ok':True,'job':public(read(f/'state.json'))}
+
 def retry_face_mask(jid):
     """Retry pre-generation mask errors after the face-only tracking correction."""
     with (ROOT/'.submit.lock').open('a') as lock:
@@ -456,6 +501,8 @@ def handle(handler,path,send_json,post=False):
             send_json(handler,retry_visual_hair(jid,data.get('reason')));return
         if len(parts)==5 and parts[4]=='retry-face-only' and post:
             send_json(handler,retry_face_only(jid));return
+        if len(parts)==5 and parts[4]=='retry-recovery' and post:
+            send_json(handler,retry_recovery(jid));return
         if len(parts)==5 and parts[4]=='retry-face-mask' and post:
             send_json(handler,retry_face_mask(jid));return
         if len(parts)==5 and parts[4]=='retry-face-segment' and post:
@@ -476,6 +523,18 @@ def handle(handler,path,send_json,post=False):
     except FileNotFoundError:send_json(handler,{'ok':False,'error':'not_found'},404)
     except (ValueError,KeyError,TypeError):send_json(handler,{'ok':False,'error':'original_video_rejected'},409)
 
+def stage_label(logname):
+    if 'account-check' in logname:return '전체 프레임 계정명 검사'
+    if 'account' in logname:return '계정명 영역 복원'
+    if 'quality' in logname:return '고정 얼굴 품질 검사'
+    if 'comparison' in logname:return '원본 비교 영상 저장'
+    if 'decode' in logname:return '전체 프레임·재생 검사'
+    if 'mask' in logname:return '얼굴 영역 검출·추적'
+    if 'preservation' in logname:return '원본 장면 보존 검사'
+    if 'face-' in logname:return '고정 얼굴 적용'
+    if 'mux' in logname:return '원본 음성 결합'
+    return '원본 준비·처리'
+
 def run_child(command,f,logname,progress):
     with (f/logname).open('w') as log:
         child=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
@@ -485,14 +544,14 @@ def run_child(command,f,logname,progress):
                 (ROOT/'heartbeat').touch()
                 if (f/'cancel').exists():raise ValueError('cancelled')
                 if time.time()-started>3600:raise ValueError('render_timeout')
-                s=read(f/'state.json');s['progress']=progress;save(f/'state.json',s)
+                s=read(f/'state.json');s.update(progress=progress,stage=stage_label(logname),stageUpdatedAt=time.time());save(f/'state.json',s)
                 time.sleep(3)
             if child.returncode:
                 path=f/logname
                 with path.open('rb') as reader:
                     reader.seek(max(0,path.stat().st_size-16384))
                     tail=reader.read().decode(errors='replace')
-                codes=re.findall(r'ValueError: ((?:hair|wardrobe|face)_[a-z0-9_]+|content_blocked)',tail)
+                codes=re.findall(r'ValueError: ((?:hair|wardrobe|face|account_overlay|overlay)_[a-z0-9_]+|content_blocked)',tail)
                 raise ValueError(codes[-1] if codes else 'quality_pipeline_failed')
         finally:
             if child.poll() is None:
@@ -515,7 +574,7 @@ def prepare_wardrobe_source(f,c,cfg,manifest):
     root=Path(cfg['nasRoot']).resolve()
     if not original.is_relative_to(root) or not original.is_file() or sha(original)!=asset['sha256']:
         raise ValueError('source_integrity_failed')
-    render=f/'render';render.mkdir()
+    render=f/'render';render.mkdir(exist_ok=True)
     run_child(['ffmpeg','-v','error','-y','-ss',str(c.get('start',0)),'-i',str(original),'-t',str(c['duration']),'-map','0:v:0','-map','0:a?','-c:v','libx264','-crf','18','-preset','fast','-c:a','aac','-movflags','+faststart',str(render/'source.mp4')],f,'wardrobe-source-extract.log',20)
     meta=wardrobe_video.probe(render/'source.mp4')
     if abs(meta['frames']/meta['fps']-c['duration'])>1/meta['fps']+1e-6:
@@ -540,9 +599,10 @@ def quality_gate(report,workflow,stats):
 def process(f,repo):
     s=read(f/'state.json')
     if (f/'cancel').exists():s.update(status='cancelled',error='사용자가 작업을 취소했습니다.');save(f/'state.json',s);return
-    s.update(status='running',progress=5);save(f/'state.json',s)
+    s.update(status='running',stage='입력 무결성 확인',stageUpdatedAt=time.time());save(f/'state.json',s)
     try:
         if s.get('wardrobe','original')!='original' and s.get('policy')!=wardrobe_video.POLICY:raise ValueError('legacy_wardrobe_job_requires_new_run')
+        prepare_recovery(f,s)
         c=read(f/'candidate.json');cfg=read(CONFIG/'workflow.json')
         if sha(f/'portrait.jpg')!=s['portraitSha256']:raise ValueError('portrait_integrity_failed')
         manifest=Path(cfg['nasRoot'])/c['manifest']
@@ -552,14 +612,14 @@ def process(f,repo):
         script=repo/'ops/face-quality';python=Path(cfg['engine'])/'.venv/bin/python'
         wardrobe=wardrobe_video.normalize(s.get('wardrobe'))
         if wardrobe!='original':
-            prepare_wardrobe_source(f,c,cfg,m)
+            if not (f/'render/source.mp4').exists():prepare_wardrobe_source(f,c,cfg,m)
             def check():
                 (ROOT/'heartbeat').touch()
                 if (f/'cancel').exists():raise ValueError('cancelled')
-                current=read(f/'state.json');current['progress']=70;save(f/'state.json',current)
+                current=read(f/'state.json');current['progress']=max(70,current.get('progress',0));current.update(stage='H3 생성·연결 확인',stageUpdatedAt=time.time());save(f/'state.json',current)
             verification=wardrobe_video.process(f,repo,cfg,wardrobe,run_child,check)
             if (f/'cancel').exists():raise ValueError('cancelled')
-            s={**s,**read(f/'state.json')};s.update(status='done',progress=100,verification=verification,error=None)
+            s={**s,**read(f/'state.json')};s.update(status='done',progress=100,verification=verification,error=None,recovery=None,recoveryBlocked=None,stage='기술 검사 통과 · 최종 시각 검수 필요')
             save(f/'state.json',s);return
         command=[str(python),str(script/'workflow.py'),'--manifest',str(manifest),'--config',str(f/'config.json'),'--output-dir',str(f/'render'),'--start',str(c.get('start',0)),'--duration',str(c['duration'])]
         command+=['--overlay-roi',*map(str,c['overlayROI'])] if c.get('overlayROI') else ['--auto-account-overlay']
@@ -580,10 +640,16 @@ def process(f,repo):
                 history.append({'attempt':attempt+1,'reason':str(error),'nextReferenceDistance':(.45,.6)[attempt]})
                 current.update(repairHistory=history,error='얼굴 매칭 설정 조정 후 자동 재처리 중');save(f/'state.json',current)
         if (f/'cancel').exists():raise ValueError('cancelled')
-        s={**s,**read(f/'state.json')};s.update(status='done',progress=100,verification=verification,error=None)
+        s={**s,**read(f/'state.json')};s.update(status='done',progress=100,verification=verification,error=None,recovery=None,recoveryBlocked=None,stage='기술 검사 통과 · 최종 시각 검수 필요')
     except Exception as e:
         s={**s,**read(f/'state.json')}
         code=str(e) if isinstance(e,ValueError) else type(e).__name__
+        if isinstance(e,urllib.error.HTTPError) and e.code not in (429,500,502,503,504):code='wardrobe_request_rejected'
+        from production_recovery import plan as recovery_plan
+        recovery=recovery_plan(s,code) if s.get('policy')==wardrobe_video.POLICY else None
+        if recovery and not (f/'cancel').exists():
+            schedule_recovery(f,s,recovery);return
+        if code!='cancelled':s['recoveryBlocked']={'reason':code,'at':time.time(),'message':'자동 복구에 필요한 입력·추적 근거 확인 필요'}
         s.update(status='cancelled' if code=='cancelled' else 'error',error='원본 기반 품질 검사 미통과 · '+code,
                  progress=s.get('progress',0))
     save(f/'state.json',s)
@@ -594,10 +660,13 @@ def main():
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         for p in ROOT.glob('*/state.json'):
             s=read(p)
-            if s['status']=='running':s.update(status='error',error='작업자 재시작 · 자동 재생성하지 않았습니다.');save(p,s)
+            if s['status']=='running':
+                if s.get('policy')==wardrobe_video.POLICY:s.update(status='queued',error=None,stage='작업자 재연결 · 저장 지점에서 복구')
+                else:s.update(status='error',error='작업자 재시작 · 원본 처리 확인 필요')
+                save(p,s)
         while True:
             (ROOT/'heartbeat').touch()
             for p in sorted(ROOT.glob('*/state.json'),key=lambda p:p.stat().st_mtime):
-                if read(p)['status']=='queued':process(p.parent,Path(__file__).resolve().parent)
+                if read(p)['status']=='queued' and ((p.parent/'cancel').exists() or (read(p).get('recovery') or {}).get('nextAttemptAt',0)<=time.time()):process(p.parent,Path(__file__).resolve().parent)
             time.sleep(3)
 if __name__=='__main__':main()

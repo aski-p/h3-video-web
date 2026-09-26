@@ -22,7 +22,7 @@ def normalized(value):
     return re.sub(r'[^a-z0-9@]', '', value.lower())
 
 
-def text_lines(image):
+def text_lines(image, individual=False):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 7))
     variants = (gray, cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel))
@@ -44,7 +44,8 @@ def text_lines(image):
                 continue
             if width > 0 and height > 0:
                 groups[tuple(cells[1:5])].append((x, y, width, height, cells[11]))
-        for words in groups.values():
+        candidates=([word] for words in groups.values() for word in words) if individual else groups.values()
+        for words in candidates:
             x = min(v[0] for v in words)
             y = min(v[1] for v in words)
             right = max(v[0] + v[2] for v in words)
@@ -53,17 +54,19 @@ def text_lines(image):
     return lines
 
 
-def matching_lines(image, username):
+def matching_lines(image, username, adaptive=False):
     height, width = image.shape[:2]
     aliases = ALIASES.get(normalized(username), (normalized(username),))
     found = []
-    for x, y, w, h, text in text_lines(image):
+    for x, y, w, h, text in text_lines(image,individual=adaptive):
         alias_match = any(alias and (alias in text or
                           (len(alias) >= 7 and SequenceMatcher(None, alias, text.lstrip('@')).ratio() >= .82))
                           for alias in aliases)
-        if not alias_match and not re.search(r'@[a-z0-9_.]{4,}', text):
+        if adaptive and not alias_match:
+            alias_match=any(len(text.lstrip('@'))>=7 and alias.startswith(text.lstrip('@')) for alias in aliases)
+        if not alias_match and (adaptive or not re.search(r'@[a-z0-9_.]{4,}', text)):
             continue
-        if y < height * .34:
+        if y < height * .34 and not adaptive:
             raise ValueError('account_overlay_near_face')
         # A large graphic across a person is not safe to reconstruct automatically.
         if w > width * .55 or h > height * .11:
@@ -116,9 +119,77 @@ def detect(source, username):
             'matches': len(group), 'result': 'stable_account_mark', 'matchedText': group[0][4]}
 
 
+def bridge_text_gaps(frames, boxes):
+    """Track pixels through OCR gaps, bidirectionally; ambiguous spans stay missing."""
+    result=list(boxes)
+    known=[i for i,box in enumerate(boxes) if box is not None]
+    for left,right in zip(known,known[1:]):
+        if right-left<=1 or right-left>48:continue
+        def follow(start,end):
+            step=1 if end>start else -1
+            x,y,w,h=map(int,boxes[start]);template=frames[start][y:y+h,x:x+w]
+            tracked={}
+            for index in range(start+step,end+step,step):
+                frame=frames[index];height,width=frame.shape
+                sx=max(0,x-24);sy=max(0,y-24);ex=min(width,x+w+24);ey=min(height,y+h+24)
+                window=frame[sy:ey,sx:ex]
+                if window.shape[0]<h or window.shape[1]<w:return None
+                _,score,_,loc=cv2.minMaxLoc(cv2.matchTemplate(window,template,cv2.TM_CCOEFF_NORMED))
+                if score<.8:return None
+                x,y=sx+loc[0],sy+loc[1];tracked[index]=[x,y,w,h]
+            return tracked
+        forward=follow(left,right);backward=follow(right,left)
+        if not forward or not backward:continue
+        consistent=True
+        for index in range(left+1,right):
+            a,b=forward[index],backward[index]
+            if abs(a[0]+a[2]/2-b[0]-b[2]/2)>12 or abs(a[1]+a[3]/2-b[1]-b[3]/2)>8:
+                consistent=False;break
+        if not consistent:continue
+        for index in range(left+1,right):
+            a,b=forward[index],backward[index]
+            x=min(a[0],b[0]);y=min(a[1],b[1]);r=max(a[0]+a[2],b[0]+b[2]);bottom=max(a[1]+a[3],b[1]+b[3])
+            result[index]=[x,y,r-x,bottom-y]
+    return result
+
+
+def detect_track(source, username):
+    """Measure the requested mark on every frame; interpolate only short OCR gaps."""
+    import numpy as np
+    cap=cv2.VideoCapture(str(source));fps=cap.get(cv2.CAP_PROP_FPS)
+    total=int(cap.get(cv2.CAP_PROP_FRAME_COUNT));width=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH));height=int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    boxes=[];frames=[]
+    try:
+        while True:
+            okay,frame=cap.read()
+            if not okay:break
+            frames.append(cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY))
+            found=matching_lines(frame,username,adaptive=True)
+            if found:
+                x=min(v[0] for v in found);y=min(v[1] for v in found)
+                right=max(v[0]+v[2] for v in found);bottom=max(v[1]+v[3] for v in found)
+                if right-x>width*.55 or bottom-y>height*.11:raise ValueError('account_overlay_location_uncertain')
+                boxes.append([x,y,right-x,bottom-y])
+            else:boxes.append(None)
+    finally:cap.release()
+    if len(boxes)!=total or total<2:raise ValueError('account_overlay_source_unreadable')
+    known=[i for i,b in enumerate(boxes) if b is not None]
+    if not known:return {'overlayROI':None,'boxes':[],'frames':total,'fps':fps,'width':width,'height':height,'result':'no_matching_account_mark_detected'}
+    boxes=bridge_text_gaps(frames,boxes)
+    known=[i for i,b in enumerate(boxes) if b is not None]
+    if len(known)<total*.6 or known[0]>3 or total-1-known[-1]>3 or any(b-a>max(4,round(fps*.25)) for a,b in zip(known,known[1:])):
+        raise ValueError('account_overlay_tracking_incomplete')
+    values=np.array([[np.interp(i,known,[boxes[k][axis] for k in known]) for axis in range(4)] for i in range(total)]).round().astype(int).tolist()
+    return {'overlayROI':values[0],'boxes':values,'frames':total,'fps':fps,'width':width,'height':height,'observedFrames':len(known),'result':'tracked_account_mark'}
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--source', required=True, type=Path)
     parser.add_argument('--username', required=True)
+    parser.add_argument('--per-frame',action='store_true')
+    parser.add_argument('--report',type=Path)
     args = parser.parse_args()
-    print(json.dumps(detect(args.source, args.username)))
+    result=(detect_track if args.per_frame else detect)(args.source,args.username)
+    if args.report:args.report.write_text(json.dumps(result))
+    print(json.dumps(result))
