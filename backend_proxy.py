@@ -98,6 +98,42 @@ def proxy(environ, start_response):
         start_response("404 Not Found", [("Content-Type", "application/json"),
                                          ("Cache-Control", PRIVATE_CACHE_CONTROL)])
         return [b'{"ok":false,"error":"not_found"}']
+    if path.startswith("/api/studio-progress/"):
+        job_id = path.removeprefix("/api/studio-progress/")
+        if method != "GET" or not re.fullmatch(r"orig_[a-f0-9]{32}", job_id):
+            start_response("400 Bad Request", [("Content-Type", "application/json"),
+                                               ("Cache-Control", PRIVATE_CACHE_CONTROL)])
+            return [b'{"ok":false,"error":"invalid_job"}']
+        token = os.environ.get("ORIGINAL_VIDEO_TOKEN", "")
+        if not token:
+            start_response("503 Service Unavailable", [("Content-Type", "application/json"),
+                                                       ("Cache-Control", PRIVATE_CACHE_CONTROL)])
+            return [b'{"ok":false,"error":"original_video_unavailable"}']
+        request = urllib.request.Request(BACKEND + "/api/original-video/jobs/" + job_id,
+                                         headers={ORIGIN_HEADER: ORIGIN_SECRET,
+                                                  "X-Aski-Original-Token": token})
+        try:
+            with urllib.request.urlopen(request, timeout=12) as upstream:
+                job = json.load(upstream)["job"]
+            generation = job.get("generation") or {}
+            progress = {
+                "id": job_id, "status": job.get("status"), "stage_percent": job.get("progress"),
+                "step": generation.get("step"), "steps": generation.get("steps"),
+                "sampler_percent": generation.get("percent"),
+                "remaining_seconds": generation.get("remainingSeconds"),
+            }
+            payload = json.dumps({"ok": True, "job": progress}, allow_nan=False).encode()
+            start_response("200 OK", [("Content-Type", "application/json"),
+                                      ("Cache-Control", PRIVATE_CACHE_CONTROL)])
+            return [payload]
+        except urllib.error.HTTPError as exc:
+            start_response(f"{exc.code}", [("Content-Type", "application/json"),
+                                         ("Cache-Control", PRIVATE_CACHE_CONTROL)])
+            return [b'{"ok":false,"error":"job_unavailable"}']
+        except (OSError, ValueError, KeyError, TypeError):
+            start_response("502 Bad Gateway", [("Content-Type", "application/json"),
+                                               ("Cache-Control", PRIVATE_CACHE_CONTROL)])
+            return [b'{"ok":false,"error":"backend_unavailable"}']
     if path.startswith("/api/original-video/"):
         token = os.environ.get("ORIGINAL_VIDEO_TOKEN", "")
         if not token or not hmac.compare_digest(environ.get("HTTP_X_ASKI_ORIGINAL_TOKEN", ""), token):

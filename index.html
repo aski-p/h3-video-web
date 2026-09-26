@@ -104,6 +104,8 @@ header .sub2 b{color:var(--tx2);font-weight:500}
   box-shadow:0 8px 28px rgba(0,0,0,.28);
 }
 .worker-live{min-width:0;padding:11px 12px;border:1px solid var(--line-subtle);border-radius:var(--r-md);background:rgba(255,255,255,.025)}
+.worker-live[data-worker="studio_original"]{grid-column:1/-1}
+.worker-live[data-worker="studio_original"] .worker-live-phase{white-space:normal}
 .worker-live-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .worker-live-name{display:flex;align-items:center;gap:7px;color:var(--tx);font-size:12px;font-weight:590}
 .worker-live-dot{width:7px;height:7px;border-radius:50%;background:var(--tx4);flex:0 0 auto}
@@ -740,6 +742,13 @@ footer{
       <div class="worker-live-time">예상 완료 —</div>
       <div class="worker-live-meta">최근 서버 확인 대기</div>
       <button class="worker-live-cancel" type="button" data-worker="rtx5080" hidden disabled>이 작업 중단</button>
+    </article>
+    <article class="worker-live" id="studioOriginalProgress" data-worker="studio_original" hidden>
+      <div class="worker-live-head"><span class="worker-live-name"><i class="worker-live-dot" aria-hidden="true"></i>Studio 원본 영상 · PGX</span><strong class="worker-live-pct">대기</strong></div>
+      <div class="worker-live-phase">진행 중인 작업 없음</div>
+      <div class="worker-live-bar" aria-hidden="true"><i></i></div>
+      <div class="worker-live-time">예상 완료 —</div>
+      <div class="worker-live-meta">최근 서버 확인 대기</div>
     </article>
   </section>
 
@@ -2003,7 +2012,12 @@ function fmtExpectedCompletion(epochSeconds){
   if(!Number.isFinite(value)||value<=0) return '—';
   return new Date(value*1000).toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'});
 }
-const WORKER_CARD_JOBS={pgx:null,rtx5080:null};
+const WORKER_CARD_JOBS={pgx:null,rtx5080:null,studio_original:null};
+const STUDIO_JOB_PARAM=new URLSearchParams(location.search).get('studioJob');
+const STUDIO_JOB_ID=/^orig_[a-f0-9]{32}$/.test(STUDIO_JOB_PARAM||'')?STUDIO_JOB_PARAM:null;
+if(STUDIO_JOB_ID)try{localStorage.setItem('studioOriginalJobId',STUDIO_JOB_ID);}catch(_){}
+let STUDIO_PROGRESS_JOB_ID=STUDIO_JOB_ID;
+if(!STUDIO_PROGRESS_JOB_ID)try{const saved=localStorage.getItem('studioOriginalJobId');if(/^orig_[a-f0-9]{32}$/.test(saved||''))STUDIO_PROGRESS_JOB_ID=saved;}catch(_){}
 const WORKER_CANCEL_PENDING=new Set();
 let WORKER_PROGRESS_ISSUED=0;
 let WORKER_PROGRESS_APPLIED=0;
@@ -2015,6 +2029,7 @@ function renderWorkerProgressCard(selector,job,serverTime){
   const card=$(selector);
   if(!card)return;
   const worker=card.dataset.worker;
+  if(worker==='studio_original')card.hidden=!job;
   const pctNode=card.querySelector('.worker-live-pct');
   const phaseNode=card.querySelector('.worker-live-phase');
   const bar=card.querySelector('.worker-live-bar i');
@@ -2029,8 +2044,8 @@ function renderWorkerProgressCard(selector,job,serverTime){
     pctNode.textContent='대기'; phaseNode.textContent='진행 중인 작업 없음';
     bar.style.width='0%'; timeNode.textContent='예상 완료 —';
     metaNode.textContent='서버 확인 '+fmtExpectedCompletion(serverTime);
-    cancelButton.hidden=true; cancelButton.disabled=true;
-    cancelButton.textContent='이 작업 중단'; cancelButton.removeAttribute('aria-busy');
+    if(cancelButton){cancelButton.hidden=true; cancelButton.disabled=true;
+      cancelButton.textContent='이 작업 중단'; cancelButton.removeAttribute('aria-busy');}
     return;
   }
   const jobId=String(job.id||'');
@@ -2054,17 +2069,34 @@ function renderWorkerProgressCard(selector,job,serverTime){
   const queueText=job.status==='queued'&&job.queue_position?' · 큐 '+job.queue_position+'번':'';
   metaNode.textContent=jobId.slice(0,8)+stepText+queueText+' · 서버 갱신 '+fmtExpectedCompletion(serverTime);
   const cancelling=WORKER_CANCEL_PENDING.has(jobId);
-  cancelButton.hidden=job.can_cancel!==true||!jobId;
-  cancelButton.disabled=cancelling||cancelButton.hidden;
-  cancelButton.textContent=cancelling?'중단 요청 중…':'이 작업 바로 중단';
-  if(cancelling)cancelButton.setAttribute('aria-busy','true');
-  else cancelButton.removeAttribute('aria-busy');
-  cancelButton.setAttribute('aria-label',(worker==='rtx5080'?'RTX 5080':'PGX Spark')+' 작업 '+jobId.slice(0,8)+' 바로 중단');
+  if(cancelButton){
+    cancelButton.hidden=job.can_cancel!==true||!jobId;
+    cancelButton.disabled=cancelling||cancelButton.hidden;
+    cancelButton.textContent=cancelling?'중단 요청 중…':'이 작업 바로 중단';
+    if(cancelling)cancelButton.setAttribute('aria-busy','true');
+    else cancelButton.removeAttribute('aria-busy');
+    cancelButton.setAttribute('aria-label',(worker==='rtx5080'?'RTX 5080':'PGX Spark')+' 작업 '+jobId.slice(0,8)+' 바로 중단');
+  }
 }
 function renderWorkerProgressBoard(workers,serverTime){
   workers=workers||{};
   renderWorkerProgressCard('#pgxLiveProgress',workers.pgx,serverTime);
   renderWorkerProgressCard('#rtxLiveProgress',workers.rtx5080,serverTime);
+  renderWorkerProgressCard('#studioOriginalProgress',workers.studio_original,serverTime);
+}
+function studioProgressCard(job){
+  const stage=finiteProgressNumber(job.stage_percent,0,100);
+  const sampler=finiteProgressNumber(job.sampler_percent,0,100);
+  const step=finiteProgressNumber(job.step,0);
+  const steps=finiteProgressNumber(job.steps,1);
+  const remaining=finiteProgressNumber(job.remaining_seconds,0);
+  const complete=job.status==='done',failed=['error','cancelled'].includes(job.status);
+  const phase=complete?'원본 영상 생성 완료 · Studio에서 검수 확인':failed?'원본 영상 처리 종료 · Studio에서 원인 확인':
+    job.status==='queued'?'Studio 원본 영상 작업 대기':
+    `H3 생성 ${step!==null&&steps!==null?Math.round(step)+'/'+Math.round(steps)+'스텝':steps!==null?'총 '+Math.round(steps)+'스텝 · 현재 스텝 확인 중':'스텝 확인 중'} · 전체 처리 ${stage===null?'확인 중':Math.round(stage)+'%'}`;
+  return {id:job.id,status:job.status,can_cancel:false,phase,pct:complete?100:sampler??stage,
+    eta_seconds:remaining,expected_complete_at:remaining===null?null:Date.now()/1000+remaining,
+    value:step,max:steps,unavailable:false,queue_position:null};
 }
 async function refreshWorkerProgress(){
   const requestId=++WORKER_PROGRESS_ISSUED;
@@ -2072,8 +2104,17 @@ async function refreshWorkerProgress(){
   try{
     const data=await fetchJsonWithTimeout('/api/active-progress',{},10000);
     if(!workerProgressResponseIsCurrent(requestId,requestEpoch))return;
-    WORKER_PROGRESS_APPLIED=requestId;
-    if(data&&data.ok)renderWorkerProgressBoard(data.workers,data.server_time);
+    if(data&&data.ok){
+      const workers=data.workers||{};
+      if(!workers.studio_original&&STUDIO_PROGRESS_JOB_ID){
+        try{const studio=await fetchJsonWithTimeout('/api/studio-progress/'+STUDIO_PROGRESS_JOB_ID,{},12000);
+          if(studio?.ok&&studio.job)workers.studio_original=studioProgressCard(studio.job);
+        }catch(_){/* The main H3 worker cards remain available. */}
+      }
+      if(!workerProgressResponseIsCurrent(requestId,requestEpoch))return;
+      WORKER_PROGRESS_APPLIED=requestId;
+      renderWorkerProgressBoard(workers,data.server_time);
+    }
   }catch(_){
     if(!workerProgressResponseIsCurrent(requestId,requestEpoch))return;
     document.querySelectorAll('.worker-live-meta').forEach(node=>{node.textContent='서버 진행률 다시 연결 중';});

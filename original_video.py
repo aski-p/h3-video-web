@@ -58,6 +58,43 @@ def status(jid):
         generation=wardrobe_video.generation_progress(folder(jid))
         if generation:result['generation']=generation
     return result
+def active_progress(now=None):
+    """Public-safe progress for the H3 dashboard; no source or portrait data."""
+    now=time.time() if now is None else now
+    active=[]
+    for path in ROOT.glob('*/state.json'):
+        try:
+            state=read(path)
+            if state.get('status') in ('running','queued') and JOB.fullmatch(str(state.get('id',''))):
+                active.append(state)
+        except (OSError,ValueError,TypeError):continue
+    if not active:return None
+    state=max(active,key=lambda item:(item['status']=='running',float(item.get('createdAt') or 0)))
+    generation=None
+    if state['status']=='running' and state.get('policy')==wardrobe_video.POLICY:
+        try:generation=wardrobe_video.generation_progress(folder(state['id']))
+        except (OSError,ValueError,TypeError):pass
+    stage=state.get('progress')
+    if not isinstance(stage,(int,float)) or isinstance(stage,bool) or not math.isfinite(stage):stage=None
+    sampler=(generation or {}).get('percent')
+    if not isinstance(sampler,(int,float)) or isinstance(sampler,bool) or not math.isfinite(sampler):sampler=None
+    step=(generation or {}).get('step');steps=(generation or {}).get('steps')
+    if not isinstance(step,int) or isinstance(step,bool):step=None
+    if not isinstance(steps,int) or isinstance(steps,bool):steps=None
+    remaining=(generation or {}).get('remainingSeconds')
+    if not isinstance(remaining,(int,float)) or isinstance(remaining,bool) or not math.isfinite(remaining) or remaining<0:remaining=None
+    stage_label=f'전체 처리 {round(stage)}%' if stage is not None else '전체 처리 확인 중'
+    phase=('작업 대기' if state['status']=='queued' else
+           f'H3 생성 {step}/{steps}스텝 · {stage_label}' if step is not None and steps else
+           f'H3 생성 · 총 {steps}스텝 · 현재 스텝 확인 중 · {stage_label}' if steps else
+           f'원본 영상 처리 중 · {stage_label}')
+    return {'id':state['id'],'status':state['status'],'can_cancel':False,'phase':phase,
+            'pct':round(sampler if sampler is not None else stage) if sampler is not None or stage is not None else None,
+            'stage_percent':round(stage) if stage is not None else None,
+            'sampler_percent':round(sampler) if sampler is not None else None,
+            'eta_seconds':round(remaining) if remaining is not None else None,
+            'expected_complete_at':now+remaining if remaining is not None else None,
+            'value':step,'max':steps,'unavailable':False,'queue_position':None}
 def healthy():
     try:return time.time()-(ROOT/'heartbeat').stat().st_mtime<90
     except OSError:return False

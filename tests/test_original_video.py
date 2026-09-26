@@ -32,6 +32,25 @@ class QualityGateTests(unittest.TestCase):
     def test_path_traversal_blocks(self):
         with self.assertRaises(ValueError):v.folder('../secret')
 class NoveltyTests(unittest.TestCase):
+    def test_active_progress_exposes_studio_stage_and_h3_sampler_without_source_data(self):
+        with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)), \
+             patch.object(v.wardrobe_video,'generation_progress',return_value={
+                 'status':'running','step':7,'steps':20,'percent':35,'remainingSeconds':120}):
+            job_id='orig_'+'a'*32
+            folder=Path(tmp)/job_id;folder.mkdir()
+            (folder/'state.json').write_text(json.dumps({
+                'id':job_id,'status':'running','progress':70,'createdAt':100,
+                'policy':v.wardrobe_video.POLICY,'sourceSha256':'private-source','portraitSha256':'private-portrait'}))
+            result=v.active_progress(now=1000)
+            self.assertEqual(result['id'],job_id)
+            self.assertEqual(result['pct'],35)
+            self.assertEqual(result['stage_percent'],70)
+            self.assertEqual(result['value'],7)
+            self.assertEqual(result['expected_complete_at'],1120)
+            self.assertFalse(result['can_cancel'])
+            self.assertNotIn('private-source',json.dumps(result))
+            self.assertNotIn('private-portrait',json.dumps(result))
+
     def test_used_hash_and_post_survive_card_deletion(self):
         with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
             f=Path(tmp)/('orig_'+'a'*32);f.mkdir()

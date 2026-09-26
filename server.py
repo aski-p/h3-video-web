@@ -3505,10 +3505,13 @@ class Handler(BaseHTTPRequestHandler):
             now = time.time()
             with LOCK:
                 jobs_snapshot = {jid: dict(job) for jid, job in JOBS.items()}
+            import original_video
+            workers = worker_progress_dashboard(jobs_snapshot, now=now)
+            workers["studio_original"] = original_video.active_progress(now=now)
             send_json(self, {
                 "ok": True,
                 "server_time": now,
-                "workers": worker_progress_dashboard(jobs_snapshot, now=now),
+                "workers": workers,
             })
         elif p == "/api/jobs":
             requeue_expired_rtx5080_jobs()
@@ -4451,5 +4454,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

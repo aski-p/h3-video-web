@@ -110,6 +110,33 @@ class VideoDeliveryTests(unittest.TestCase):
         urlopen.assert_not_called()
         self.assertFalse(json.loads(b"".join(result))["ok"])
 
+    def test_studio_progress_proxy_returns_only_safe_job_status(self):
+        import io
+        job_id='orig_'+'a'*32
+        source={'job':{'id':job_id,'status':'running','progress':70,
+                       'generation':{'step':7,'steps':20,'percent':35,'remainingSeconds':120},
+                       'sourceSha256':'private-source','portraitSha256':'private-portrait'}}
+        seen={}
+        def fake_open(request,timeout):
+            seen['url']=request.full_url
+            seen['token']=request.get_header('X-aski-original-token')
+            return io.BytesIO(json.dumps(source).encode())
+        started=[]
+        with patch.object(backend_proxy,'ORIGIN_SECRET',self.ORIGIN_SECRET), \
+             patch.dict(os.environ,{'ORIGINAL_VIDEO_TOKEN':'private-token'}), \
+             patch('urllib.request.urlopen',fake_open):
+            result=backend_proxy.handler({'REQUEST_METHOD':'GET','PATH_INFO':'/api/studio-progress/'+job_id},
+                                         lambda status,headers:started.extend([status,dict(headers)]))
+        payload=json.loads(b''.join(result))
+        self.assertEqual(started[0],'200 OK')
+        self.assertEqual(started[1]['Cache-Control'],'private, no-store')
+        self.assertEqual(seen['url'],backend_proxy.BACKEND+'/api/original-video/jobs/'+job_id)
+        self.assertEqual(seen['token'],'private-token')
+        self.assertEqual(payload['job']['sampler_percent'],35)
+        self.assertEqual(payload['job']['stage_percent'],70)
+        self.assertNotIn('private-source',json.dumps(payload))
+        self.assertNotIn('private-portrait',json.dumps(payload))
+
     def test_proxy_fails_closed_without_origin_secret(self):
         started = []
         env = {"REQUEST_METHOD": "GET", "PATH_INFO": "/api/jobs", "QUERY_STRING": "", "wsgi.input": None}
@@ -3567,8 +3594,10 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertIn('id="workerProgressBoard"', source)
         self.assertIn('id="pgxLiveProgress"', source)
         self.assertIn('id="rtxLiveProgress"', source)
+        self.assertIn('id="studioOriginalProgress"', source)
         self.assertIn("'/api/active-progress'", source)
         self.assertIn('renderWorkerProgressBoard', source)
+        self.assertIn("workers[\"studio_original\"] = original_video.active_progress(now=now)", inspect.getsource(server.Handler.do_GET))
         self.assertIn('expected_complete_at', source)
         self.assertIn('setInterval(refreshWorkerProgress,4000)', source)
 
