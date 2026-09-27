@@ -10,17 +10,15 @@ class RecoveryTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    state={'status':'queued'};v.prepare_recovery(Path(tmp),state)
    self.assertNotIn('recovery',state)
- def test_quality_uses_local_repair_then_new_generation_without_lowering_gates(self):
+ def test_overlay_failure_never_triggers_repeated_synthesis(self):
   state={'wardrobe':'portrait_face','duration':15,'generationAttempt':0}
   first=plan(state,'wardrobe_account_overlay_review_required',100)
   self.assertEqual(first['strategy'],'tracked_overlay')
   state.update(recoveryHistory=[first],recoveryCount=1)
   second=plan(state,'wardrobe_account_overlay_review_required',120)
-  self.assertEqual(second['strategy'],'regenerate_quality')
-  self.assertEqual(second['generationAttempt'],1)
+  self.assertIsNone(second)
   self.assertEqual(state['duration'],15)
-  state.update(generationAttempt=1,recoveryCount=2,recoveryHistory=[first,second])
-  self.assertEqual(plan(state,'wardrobe_account_overlay_remains',140)['strategy'],'tracked_overlay')
+  self.assertIsNone(plan(state,'wardrobe_account_overlay_remains',140))
  def test_transient_has_no_arbitrary_terminal_limit_but_backoff(self):
   state={'recoveryCount':10000}
   result=plan(state,'URLError',100)

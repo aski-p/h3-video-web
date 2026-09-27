@@ -18,8 +18,11 @@ def plan(state, code, now=None):
     # Every new synthesis gets one local post-processing repair first.
     generation=state.get('generationAttempt',0)
     tracked=any(x.get('strategy')=='tracked_overlay' and x.get('generationAttempt',0)==generation for x in history)
-    if code in ('wardrobe_account_overlay_review_required','wardrobe_account_overlay_remains') and not tracked:
-        return result|{'strategy':'tracked_overlay','stage':'계정명 위치 추적·복원·재검수','generationAttempt':generation}
+    if code in ('wardrobe_account_overlay_review_required','wardrobe_account_overlay_remains'):
+        if not tracked:return result|{'strategy':'tracked_overlay','stage':'계정명 위치 추적·복원·재검수','generationAttempt':generation}
+        # Changing the synthesis seed cannot repair an ambiguous overlay track.
+        # Keep the verified face checkpoint for a scoped, evidence-bound repair.
+        return None
     if code in TRANSIENT:
         return result|{'strategy':'resume_checkpoint','stage':'서버 연결 복구 후 저장 지점에서 재개'}
     if code in QUALITY:

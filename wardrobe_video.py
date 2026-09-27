@@ -468,6 +468,21 @@ def restore_post_checkpoint(folder,choice):
     raise ValueError('post_checkpoint_quality_missing')
 
 
+def reviewed_overlay_regions(path,checkpoint,width,height,frames):
+    if not path.exists():return None
+    data=json.loads(path.read_text())
+    if data.get('outputSha256')!=checkpoint['outputSha256'] or data.get('frames')!=frames or data.get('width')!=width or data.get('height')!=height:
+        raise ValueError('overlay_review_binding_mismatch')
+    regions=data.get('regions',[])
+    if not regions or len(regions)>4:raise ValueError('overlay_review_regions_invalid')
+    for box in regions:
+        if len(box)!=4 or any(type(v)!=int for v in box):raise ValueError('overlay_review_regions_invalid')
+        x,y,w,h=box
+        if not (0<=x<x+w<=width and 0<=y<y+h<=height) or w>width*.55 or h>height*.16:
+            raise ValueError('overlay_review_regions_invalid')
+    return data
+
+
 def finish_post(folder,repo,cfg,choice,child,check):
     r=folder/'render';work=r/'wardrobe';identity=r/'output.mp4';source=r/'source.mp4'
     cp=json.loads((work/'post-checkpoint.json').read_text());state=json.loads((folder/'state.json').read_text())
@@ -489,14 +504,24 @@ def finish_post(folder,repo,cfg,choice,child,check):
             if str(error)=='cancelled':raise
             (work/'overlay-diagnostic.json').write_text(json.dumps({'type':type(error).__name__,'detail':str(error)}))
             raise ValueError('wardrobe_account_overlay_review_required') from error
-    overlay=scan(identity)
+    reviewed=reviewed_overlay_regions(work/'reviewed-overlay-regions.json',cp,width,height,plan['frames'])
+    overlay={'overlayROI':reviewed['regions'][0],'result':'reviewed_multiple_screen_fixed_marks','review':reviewed} if reviewed else scan(identity)
     receipt['overlayReview']=overlay
     if overlay['overlayROI']:
         clean=work/'face-no-account.mp4'
         track=work/'overlay-track.json';track.write_text(json.dumps(overlay))
-        child([cfg['inpaintPython'],str(repo/'ops/face-quality/remove_overlay.py'),
-               '--source',str(identity),'--output',str(clean),'--model',cfg['inpaintModel'],
-               *(['--track-json',str(track)] if overlay.get('boxes') else ['--roi',*map(str,overlay['overlayROI']),'--full-roi'])],folder,'wardrobe-account-restoration.log',93)
+        if reviewed:
+            current=identity
+            for index,region in enumerate(reviewed['regions']):
+                target=clean if index==len(reviewed['regions'])-1 else work/f'overlay-region-{index}.mp4'
+                child([cfg['inpaintPython'],str(repo/'ops/face-quality/remove_overlay.py'),
+                       '--source',str(current),'--output',str(target),'--model',cfg['inpaintModel'],
+                       '--roi',*map(str,region),'--full-roi'],folder,f'wardrobe-account-region-{index}.log',93)
+                current=target
+        else:
+            child([cfg['inpaintPython'],str(repo/'ops/face-quality/remove_overlay.py'),
+                   '--source',str(identity),'--output',str(clean),'--model',cfg['inpaintModel'],
+                   *(['--track-json',str(track)] if overlay.get('boxes') else ['--roi',*map(str,overlay['overlayROI']),'--full-roi'])],folder,'wardrobe-account-restoration.log',93)
         receipt['overlayOutputReview']=scan(clean)
         if receipt['overlayOutputReview']['overlayROI']:raise ValueError('wardrobe_account_overlay_remains')
         identity.rename(work/'face-with-account.mp4')
