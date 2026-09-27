@@ -12,6 +12,12 @@ class OverlayTrackingTests(unittest.TestCase):
   self.assertLessEqual(box[0],68);self.assertGreaterEqual(box[0]+box[2],269)
   with self.assertRaisesRegex(ValueError,'account_overlay_location_uncertain'):
    m.complete_label_bounds([[0,0,400,40]],704,1248)
+ def test_translucent_plate_is_included_above_and_below_glyphs(self):
+  box=m.complete_label_bounds([[20,60,260,42]],704,1248)[0]
+  self.assertLessEqual(box[1],39)
+  self.assertGreaterEqual(box[1]+box[3],123)
+  edge=m.complete_label_bounds([[0,0,100,30]],704,1248)[0]
+  self.assertEqual(edge[1],0)
  def test_local_ocr_is_checked_against_frame_dimensions_and_exact_account(self):
   crop=np.zeros((70,320,3),np.uint8)
   with patch.object(m,'text_lines',return_value=[(40,20,210,25,'@artgentokyo')]):

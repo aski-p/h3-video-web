@@ -163,7 +163,10 @@ def complete_label_bounds(boxes,width,height):
     for x,y,w,h in boxes:
         margin=max(16,round(w*.16));left=max(0,x-margin);right=min(width,x+w+margin)
         if right-left>width*.55 or h>height*.11:raise ValueError('account_overlay_location_uncertain')
-        expanded.append([left,y,right-left,h])
+        # Account stickers include a translucent rounded plate above/below text.
+        # OCR disappearance alone does not mean that plate has been restored.
+        pad=max(12,round(height*.02));top=max(0,y-pad);bottom=min(height,y+h+pad)
+        expanded.append([left,top,right-left,bottom-top])
     return expanded
 
 

@@ -41,7 +41,7 @@ track=json.loads(a.track_json.read_text()) if a.track_json else None
 if track:
     if track['frames']!=len(frames) or (track['width'],track['height'])!=(w,h) or abs(track['fps']-fps)>.01 or len(track['boxes'])!=len(frames):raise ValueError('overlay_track_timing_mismatch')
     for tx,ty,tw,th in track['boxes']:
-        if not (0<=tx<tx+tw<=w and 0<=ty<ty+th<=h) or tw>w*.55 or th>h*.11:raise ValueError('overlay_track_bounds_invalid')
+        if not (0<=tx<tx+tw<=w and 0<=ty<ty+th<=h) or tw>w*.55 or th>h*.16:raise ValueError('overlay_track_bounds_invalid')
     a.roi=track['boxes'][0]
 if not a.roi:p.error('ROI or track required')
 x, y, rw, rh = a.roi
