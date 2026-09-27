@@ -100,7 +100,7 @@ try:
 except BaseException:
     writer.kill()
     raise
-subprocess.run(['ffmpeg','-v','error','-i',str(raw),'-i',str(a.source),'-map','0:v:0','-map','1:a?','-c','copy','-shortest','-movflags','+faststart','-y',str(a.output)],check=True)
+subprocess.run(['ffmpeg','-v','error','-i',str(raw),'-i',str(a.source),'-map','0:v:0','-map','1:a?','-c','copy','-movflags','+faststart','-y',str(a.output)],check=True)
 raw.unlink()
 a.output.with_suffix('.json').write_text(json.dumps({'source':str(a.source),'method':'LaMa per-frame account ROI; estimated texture' if track else 'LaMa screen-fixed ROI; estimated texture' if a.full_roi else 'LaMa tracked glyph mask; estimated texture','tracking':positions,'roi':a.roi,'maskedPixels':int((mask>0).sum()),'frames':a.limit or len(frames),'fps':fps},indent=2))
 cv2.imwrite(str(a.output.with_suffix('.mask.png')),mask)
