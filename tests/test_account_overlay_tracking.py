@@ -32,3 +32,17 @@ class OverlayTrackingTests(unittest.TestCase):
   rng=np.random.default_rng(7);frames=[rng.integers(0,255,(90,90),dtype=np.uint8) for _ in range(5)]
   boxes=[[10,10,20,20],None,None,None,[50,50,20,20]]
   self.assertEqual(m.bridge_text_gaps(frames,boxes),boxes)
+
+class TextAnchorRecoveryTests(unittest.TestCase):
+ def test_pixel_evidence_recovers_missing_ocr_but_not_blank_frame(self):
+  rng=np.random.default_rng(14);label=rng.integers(0,255,(12,40),dtype=np.uint8)
+  frames=[]
+  for x in [30,34,38]:
+   frame=np.zeros((100,160),np.uint8);frame[50:62,x:x+40]=label;frames.append(frame)
+  boxes=[[30,50,40,12],None,[38,50,40,12]]
+  self.assertEqual(m.reacquire_label(frames,boxes)[1],[34,50,40,12])
+  frames[1][:]=0
+  self.assertIsNone(m.reacquire_label(frames,boxes)[1])
+ def test_one_anchor_cannot_invent_missing_observations(self):
+  frame=np.zeros((100,160),np.uint8)
+  self.assertIsNone(m.reacquire_label([frame,frame],[[1,1,20,10],None])[1])

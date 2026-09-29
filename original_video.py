@@ -342,6 +342,27 @@ def retry_recovery(jid):
         schedule_recovery(f,s,recovery)
         return {'ok':True,'job':public(read(f/'state.json'))}
 
+def retry_tracking(jid):
+    """Explicit retry with the text-anchor tracker, one attempt per algorithm revision."""
+    with (ROOT/'.submit.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        f=folder(jid);s=read(f/'state.json')
+        if (f/'cancel').exists() or s.get('sourceReleasedAt') or s.get('policy')!=wardrobe_video.POLICY:
+            raise ValueError('tracking_retry_unavailable')
+        if s['status'] in ('queued','running'):return {'ok':True,'job':public(s)}
+        if s['status']!='error' or not any(code in s.get('error','') for code in ('wardrobe_account_overlay_review_required','wardrobe_account_overlay_remains')):
+            raise ValueError('tracking_retry_requires_visible_target')
+        if any(x.get('revision')=='text-anchors-v2' for x in s.get('recoveryHistory',[])):
+            raise ValueError('tracking_retry_requires_new_evidence')
+        work=f/'render/wardrobe';cp=read(work/'post-checkpoint.json')
+        if sha(work/'post-face.mp4')!=cp['outputSha256']:
+            raise ValueError('post_checkpoint_binding_mismatch')
+        recovery={'attempt':s.get('recoveryCount',0)+1,'reason':s.get('error'),
+                  'strategy':'tracked_overlay','revision':'text-anchors-v2',
+                  'stage':'계정명 글자 모양 재추적 · 제거 후 얼굴 재검수','nextAttemptAt':time.time()}
+        schedule_recovery(f,s,recovery)
+        return {'ok':True,'job':public(read(f/'state.json'))}
+
 def retry_face_mask(jid):
     """Retry pre-generation mask errors after the face-only tracking correction."""
     with (ROOT/'.submit.lock').open('a') as lock:
@@ -503,6 +524,8 @@ def handle(handler,path,send_json,post=False):
             send_json(handler,retry_face_only(jid));return
         if len(parts)==5 and parts[4]=='retry-recovery' and post:
             send_json(handler,retry_recovery(jid));return
+        if len(parts)==5 and parts[4]=='retry-tracking' and post:
+            send_json(handler,retry_tracking(jid));return
         if len(parts)==5 and parts[4]=='retry-face-mask' and post:
             send_json(handler,retry_face_mask(jid));return
         if len(parts)==5 and parts[4]=='retry-face-segment' and post:

@@ -156,6 +156,40 @@ def bridge_text_gaps(frames, boxes):
     return result
 
 
+def reacquire_label(frames, boxes):
+    """Reacquire OCR dropouts from two independent text anchors, never interpolate."""
+    import numpy as np
+    result=list(boxes)
+    known=[i for i,b in enumerate(boxes) if b is not None]
+    for index,box in enumerate(boxes):
+        if box is not None:continue
+        anchors=sorted(known,key=lambda k:abs(k-index))[:6]
+        candidates=[]
+        frame=frames[index]
+        for anchor in anchors:
+            x,y,w,h=map(int,boxes[anchor])
+            template=frames[anchor][y:y+h,x:x+w]
+            if template.size==0 or np.std(template)<8:continue
+            left=max(0,x-96);top=max(0,y-96)
+            crop=frame[top:min(frame.shape[0],y+h+96),left:min(frame.shape[1],x+w+96)]
+            if crop.shape[0]<h or crop.shape[1]<w:continue
+            response=cv2.matchTemplate(crop,template,cv2.TM_CCOEFF_NORMED)
+            _,score,_,loc=cv2.minMaxLoc(response)
+            if score<.85:continue
+            # Reject a second unrelated location with similarly strong text.
+            remaining=response.copy();px,py=loc
+            remaining[max(0,py-h):py+h+1,max(0,px-w//2):px+w//2+1]=-1
+            if remaining.max()>score-.08:continue
+            candidates.append([left+px,top+py,w,h])
+        if len(candidates)<2:continue
+        a=candidates[0]
+        agrees=[b for b in candidates[1:] if abs(a[0]+a[2]/2-b[0]-b[2]/2)<8 and abs(a[1]+a[3]/2-b[1]-b[3]/2)<6]
+        if not agrees:continue
+        b=agrees[0];x=min(a[0],b[0]);y=min(a[1],b[1])
+        result[index]=[x,y,max(a[0]+a[2],b[0]+b[2])-x,max(a[1]+a[3],b[1]+b[3])-y]
+    return result
+
+
 def complete_label_bounds(boxes,width,height):
     # OCR may read "ArtGenToky" but omit @/the final rounded glyph. Include the
     # entire account label, not only the characters recognized in this frame.
@@ -189,6 +223,15 @@ def detect_track(source, username):
                 crop=frame[top:min(height,y+h+8),left:min(width,x+w+16)]
                 local=matching_lines(crop,username,adaptive=True,psm=7,full_size=(width,height))
                 found=[(a+left,b+top,c,d,t) for a,b,c,d,t in local]
+            if not found and last_box is None:
+                # Bootstrap faint white account text using narrow horizontal OCR.
+                # Require the account name, retaining the same size limits.
+                band=max(80,round(height*.14))
+                for top in range(round(height*.34),height,max(40,band//2)):
+                    crop=frame[top:min(height,top+band),:]
+                    local=matching_lines(crop,username,adaptive=True,psm=7,full_size=(width,height))
+                    if local:
+                        found=[(a,b+top,c,d,t) for a,b,c,d,t in local];break
             if found:
                 x=min(v[0] for v in found);y=min(v[1] for v in found)
                 right=max(v[0]+v[2] for v in found);bottom=max(v[1]+v[3] for v in found)
@@ -200,6 +243,7 @@ def detect_track(source, username):
     known=[i for i,b in enumerate(boxes) if b is not None]
     if not known:return {'overlayROI':None,'boxes':[],'frames':total,'fps':fps,'width':width,'height':height,'result':'no_matching_account_mark_detected'}
     boxes=bridge_text_gaps(frames,boxes)
+    boxes=reacquire_label(frames,boxes)
     known=[i for i,b in enumerate(boxes) if b is not None]
     if len(known)<total*.6 or known[0]>3 or total-1-known[-1]>3 or any(b-a>max(4,round(fps*.25)) for a,b in zip(known,known[1:])):
         raise ValueError('account_overlay_tracking_incomplete')

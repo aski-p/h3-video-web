@@ -92,3 +92,24 @@ class SubmissionRecoveryTests(unittest.TestCase):
    with patch.object(w,'OUTPUT',root),patch.object(w,'api',side_effect=resume),patch.object(w,'_sampler_progress_config',return_value=None):
     self.assertEqual(w.render(graph,'14',record,lambda:None),output)
    self.assertEqual(calls.count('/prompt'),1)
+
+class ManualTrackingRetryTests(unittest.TestCase):
+ def test_explicit_new_tracker_is_idempotent_and_preserves_face_checkpoint(self):
+  with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+   jid='orig_'+'a'*32;f=Path(tmp)/jid;work=f/'render/wardrobe';work.mkdir(parents=True)
+   (work/'post-face.mp4').write_bytes(b'verified face')
+   v.save(work/'post-checkpoint.json',{'outputSha256':v.sha(work/'post-face.mp4')})
+   state={'id':jid,'status':'error','policy':w.POLICY,'wardrobe':'portrait_face','error':'wardrobe_account_overlay_review_required','recoveryCount':3,'recoveryHistory':[]}
+   v.save(f/'state.json',state)
+   with patch.object(v,'public',side_effect=lambda s:s):
+    result=v.retry_tracking(jid);self.assertEqual(result['job']['status'],'queued')
+    v.retry_tracking(jid)
+    saved=v.read(f/'state.json');self.assertEqual(len(saved['recoveryHistory']),1)
+    self.assertEqual((work/'post-face.mp4').read_bytes(),b'verified face')
+    saved.update(status='error',error='wardrobe_account_overlay_review_required');v.save(f/'state.json',saved)
+    with self.assertRaisesRegex(ValueError,'new_evidence'):v.retry_tracking(jid)
+ def test_hidden_face_is_not_treated_as_text_recovery(self):
+  with tempfile.TemporaryDirectory() as tmp,patch.object(v,'ROOT',Path(tmp)):
+   jid='orig_'+'b'*32;f=Path(tmp)/jid;f.mkdir()
+   v.save(f/'state.json',{'status':'error','policy':w.POLICY,'error':'hair_tracking_incomplete'})
+   with self.assertRaisesRegex(ValueError,'visible_target'):v.retry_tracking(jid)
