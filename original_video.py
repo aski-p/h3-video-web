@@ -347,7 +347,7 @@ def retry_tracking(jid):
     with (ROOT/'.submit.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         f=folder(jid);s=read(f/'state.json')
-        if (f/'cancel').exists() or s.get('sourceReleasedAt') or s.get('policy')!=wardrobe_video.POLICY:
+        if (f/'cancel').exists() or s.get('policy')!=wardrobe_video.POLICY:
             raise ValueError('tracking_retry_unavailable')
         if s['status'] in ('queued','running'):return {'ok':True,'job':public(s)}
         if s['status']!='error' or not any(code in s.get('error','') for code in ('wardrobe_account_overlay_review_required','wardrobe_account_overlay_remains')):
@@ -357,6 +357,13 @@ def retry_tracking(jid):
         work=f/'render/wardrobe';cp=read(work/'post-checkpoint.json')
         if sha(work/'post-face.mp4')!=cp['outputSha256']:
             raise ValueError('post_checkpoint_binding_mismatch')
+        if s.get('sourceReleasedAt'):
+            for path in ROOT.glob('*/state.json'):
+                other=read(path)
+                if path.parent!=f and other.get('sourceSha256')==s.get('sourceSha256') and not other.get('sourceReleasedAt'):
+                    raise ValueError('source_already_claimed')
+            s['sourceClaimHistory']=(s.get('sourceClaimHistory',[])+[{'releasedAt':s['sourceReleasedAt'],'reclaimedAt':time.time(),'reason':'explicit_tracking_retry'}])[-100:]
+            s['sourceReleasedAt']=None
         recovery={'attempt':s.get('recoveryCount',0)+1,'reason':s.get('error'),
                   'strategy':'tracked_overlay','revision':'text-anchors-v2',
                   'stage':'계정명 글자 모양 재추적 · 제거 후 얼굴 재검수','nextAttemptAt':time.time()}
