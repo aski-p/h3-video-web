@@ -14,6 +14,8 @@ from pathlib import Path
 import cv2
 
 
+EXACT_ACCOUNT_ONLY = False
+
 ALIASES = {'artgentokyo': ('artgentokyo', 'agtstudio'),
            'miacharmsss': ('miacharmsss', 'daki', 'cosplay')}
 
@@ -67,7 +69,7 @@ def matching_lines(image, username, adaptive=False, psm=11, full_size=None):
                           for alias in aliases)
         if adaptive and not alias_match:
             alias_match=any(len(text.lstrip('@'))>=7 and alias.startswith(text.lstrip('@')) for alias in aliases)
-        if not alias_match and (adaptive or not re.search(r'@[a-z0-9_.]{4,}', text)):
+        if not alias_match and (EXACT_ACCOUNT_ONLY or adaptive or not re.search(r'@[a-z0-9_.]{4,}', text)):
             continue
         if y < height * .34 and not adaptive:
             raise ValueError('account_overlay_near_face')
@@ -248,17 +250,20 @@ def detect_track(source, username):
     if len(known)<total*.6 or known[0]>3 or total-1-known[-1]>3 or any(b-a>max(4,round(fps*.25)) for a,b in zip(known,known[1:])):
         raise ValueError('account_overlay_tracking_incomplete')
     values=np.array([[np.interp(i,known,[boxes[k][axis] for k in known]) for axis in range(4)] for i in range(total)]).round().astype(int).tolist()
+    text_boxes=values
     values=complete_label_bounds(values,width,height)
-    return {'overlayROI':values[0],'boxes':values,'frames':total,'fps':fps,'width':width,'height':height,'observedFrames':len(known),'result':'tracked_account_mark'}
+    return {'overlayROI':values[0],'boxes':values,'textBoxes':text_boxes,'frames':total,'fps':fps,'width':width,'height':height,'observedFrames':len(known),'result':'tracked_account_mark'}
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--source', required=True, type=Path)
     parser.add_argument('--username', required=True)
+    parser.add_argument('--exact-account-only', action='store_true', help='Check only the source account after intentional creator branding')
     parser.add_argument('--per-frame',action='store_true')
     parser.add_argument('--report',type=Path)
     args = parser.parse_args()
+    EXACT_ACCOUNT_ONLY = args.exact_account_only
     result=(detect_track if args.per_frame else detect)(args.source,args.username)
     if args.report:args.report.write_text(json.dumps(result))
     print(json.dumps(result))

@@ -497,7 +497,8 @@ def finish_post(folder,repo,cfg,choice,child,check):
         report=work/('overlay-clean-report.json' if video.name=='face-no-account.mp4' else 'overlay-source-report.json')
         try:
             child([cfg['inpaintPython'],str(repo/'ops/face-quality/detect_account_overlay.py'),
-                   '--source',str(video),'--username',username,'--report',str(report),'--per-frame'],
+                   '--source',str(video),'--username',username,'--report',str(report),'--per-frame',
+                   *(['--exact-account-only'] if video.name=='face-no-account.mp4' and (cfg.get('overlayBranding') or {}).get('handle') else [])],
                   folder,'account-check-'+report.stem+'.log',92 if video==identity else 94)
             return json.loads(report.read_text())
         except (ValueError,json.JSONDecodeError) as error:
@@ -510,7 +511,14 @@ def finish_post(folder,repo,cfg,choice,child,check):
     if overlay['overlayROI']:
         clean=work/'face-no-account.mp4'
         track=work/'overlay-track.json';track.write_text(json.dumps(overlay))
-        if reviewed:
+        branding=cfg.get('overlayBranding') or {}
+        if branding.get('handle'):
+            if not overlay.get('boxes'):raise ValueError('branding_requires_verified_tracking')
+            child([cfg['inpaintPython'],str(repo/'ops/face-quality/brand_account_overlay.py'),
+                   '--source',str(identity),'--output',str(clean),'--track-json',str(track),
+                   '--handle',branding['handle']],folder,'wardrobe-account-branding.log',93)
+            receipt['accountBranding']=json.loads(clean.with_suffix('.branding.json').read_text())
+        elif reviewed:
             current=identity
             for index,region in enumerate(reviewed['regions']):
                 target=clean if index==len(reviewed['regions'])-1 else work/f'overlay-region-{index}.mp4'

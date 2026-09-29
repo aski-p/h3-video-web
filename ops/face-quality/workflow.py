@@ -37,10 +37,10 @@ def original_from_manifest(root, manifest):
         raise ValueError('Original integrity check failed')
     return original
 
-def scan_account_overlay(config, video, username):
+def scan_account_overlay(config, video, username, branded=False):
     try:
         result = subprocess.run([config['inpaintPython'], str(HERE/'detect_account_overlay.py'),
-                                 '--source', str(video), '--username', username],
+                                 '--source', str(video), '--username', username, *(['--exact-account-only'] if branded else [])],
                                 capture_output=True, text=True, timeout=90, check=True)
         return json.loads(result.stdout)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
@@ -95,13 +95,21 @@ def main():
         subprocess.run([sys.executable,str(HERE/'trial.py'),'--engine',config['engine'],'--source',str(source),'--portrait',str(r/'portrait.jpg'),'--output',str(swapped),'--model',profile['model'],'--reference-frame',str(reference),'--reference-distance',str(a.reference_distance)],stdout=log,stderr=subprocess.STDOUT,check=True)
     if a.overlay_roi:
         with (r/'restoration.log').open('w') as log:
-            command=[config['inpaintPython'],str(HERE/'remove_overlay.py'),'--source',str(swapped),'--output',str(output),'--model',config['inpaintModel'],'--roi',*map(str,a.overlay_roi)]
-            if a.auto_account_overlay:command.append('--full-roi')
+            branding=config.get('overlayBranding') or {}
+            if branding.get('handle'):
+                if not a.auto_account_overlay:raise ValueError('branding_requires_account_tracking')
+                track=r/'account-branding-track.json'
+                subprocess.run([config['inpaintPython'],str(HERE/'detect_account_overlay.py'),'--source',str(swapped),'--username',username,'--per-frame','--report',str(track)],stdout=log,stderr=subprocess.STDOUT,check=True)
+                command=[config['inpaintPython'],str(HERE/'brand_account_overlay.py'),'--source',str(swapped),'--output',str(output),'--track-json',str(track),'--handle',branding['handle']]
+                record['accountBranding']={'handle':branding['handle'],'method':'tracked_opaque_creator_label_v1','inpainting':False}
+            else:
+                command=[config['inpaintPython'],str(HERE/'remove_overlay.py'),'--source',str(swapped),'--output',str(output),'--model',config['inpaintModel'],'--roi',*map(str,a.overlay_roi)]
+                if a.auto_account_overlay:command.append('--full-roi')
             subprocess.run(command,stdout=log,stderr=subprocess.STDOUT,check=True)
     else:
         shutil.copy2(swapped,output)
     if a.auto_account_overlay and a.overlay_roi:
-        record['overlayOutputReview'] = scan_account_overlay(config, output, username)
+        record['overlayOutputReview'] = scan_account_overlay(config, output, username, branded=bool((config.get('overlayBranding') or {}).get('handle')))
         if record['overlayOutputReview']['overlayROI']:
             raise ValueError('account_overlay_remains')
     meta = video_meta(output)

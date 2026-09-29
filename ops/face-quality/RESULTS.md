@@ -20,3 +20,14 @@ Lower-body mean absolute pixel difference is about 1.63/255 after re-encoding. O
 A diagnostic of five extracted frames compared 1a + tone with/without LivePortrait expression restoration at 80. Restoration improved sampled mouth geometry but lowered mean reference similarity from 0.690 to 0.657 and took about 43 seconds for five frames on CPU. This is not a continuous-video evaluation; the full restoration render was canceled and is not counted as completed. Restoration remains optional, excluded from the selected result.
 
 Validation: three tone unit tests; full-frame count/dimension/fps evaluation; five-frame face and expression diagnostics; visual comparison. Videos and identity assets remain local/NAS and are not committed.
+
+## Creator label option — 2026-09-29
+
+User requested replacing the visibly restored account mark with `@jobutopaki6`.
+`overlayBranding.handle` enables a tracked opaque label on the pre-inpainting
+result. Fixed label dimensions use reliable OCR anchors; uncertain tracks fail.
+Source-account checks after branding target the original name and its aliases,
+so the intentionally added creator handle is not treated as a removal failure.
+Timing, identity, decoding, comparison and manual publication review remain.
+The separate 289-frame, 704×1248, 24fps preview preserves the source audio stream;
+existing completed files and published posts are not overwritten.
