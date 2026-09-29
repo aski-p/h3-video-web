@@ -8,6 +8,15 @@ import server
 
 
 class LoraOptionsTests(unittest.TestCase):
+    def test_cinematic_sample_stack_is_opt_in_and_ordered_last(self):
+        self.assertFalse(server.default_lora_options()['cinematic_realism']['enabled'])
+        options = {'realism': {'enabled': True, 'strength': .65},
+                   'better_motion': {'enabled': True, 'strength': .4},
+                   'cinematic_realism': {'enabled': True, 'strength': .7}}
+        selected = server.selected_loras(options)
+        self.assertEqual([x['id'] for x in selected], ['realism', 'better_motion', 'cinematic_realism'])
+        self.assertEqual(selected[-1]['filename'], 'orangesouth_h3_cinematic_realism_v01.safetensors')
+
     def test_windows_inventory_reports_legacy_camera_aliases_as_canonical(self):
         path = Path(__file__).resolve().parents[1] / "windows-worker" / "h3_worker.py"
         spec = importlib.util.spec_from_file_location("h3_worker_lora_alias_test", path)

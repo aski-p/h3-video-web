@@ -194,6 +194,11 @@ LORA_CATALOG = {
         },
         "default_version": "3000", "default_strength": 0.40,
     },
+    "cinematic_realism": {
+        "label": "Cinematic Realism", "description": "영화 조명·색감 샘플에서 검증한 스타일 LoRA",
+        "filename": "orangesouth_h3_cinematic_realism_v01.safetensors",
+        "default_strength": 0.7,
+    },
 }
 CAMERA_MOVEMENTS = {
     "handheld": "gentle handheld shot",
