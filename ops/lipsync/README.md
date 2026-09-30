@@ -12,13 +12,12 @@ chunks reduce memory; both H3 generation and lip inference retain 20 diffusion s
 
 Only a short, visible speaking interval is processed. Final composition keeps eyes,
 nose, surrounding face/body and background from the source and replaces a feathered
-mouth region. Exact Korean TTS audio replaces H3 audio. Video frame count, dimensions,
+mouth and jaw region. Exact Korean TTS audio replaces H3 audio. Video frame count, dimensions,
 FPS and duration are checked. Detection failures fail closed, never silently revert
 to dubbed footage. Technical completion does not approve or publish a video.
 
 A three-second sample ran successfully. Full output and mouth-only comparison are
-in sample/. Frame contact sheet was visually inspected. Temporal sync measurement
-is pending, and perceptual lip quality remains subject to human review.
+in sample/. Frame contact sheet was visually inspected. SyncNet on a tracked standard face crop measured zero-frame offset on the three-second mouth/jaw composite (confidence 2.026), compared with a search-boundary -10-frame offset in the dubbed source. This short-sample result does not guarantee other videos; perceptual lip quality remains subject to human review.
 
 Deployment must follow Git push. Activation is a one-shot process with a frozen,
 checksummed bundle, only after a 130-second idle interval and final active-job check.

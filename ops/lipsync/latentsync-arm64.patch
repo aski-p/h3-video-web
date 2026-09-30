@@ -1,0 +1,75 @@
+diff --git a/latentsync/pipelines/lipsync_pipeline.py b/latentsync/pipelines/lipsync_pipeline.py
+index 693155e..4e3abee 100644
+--- a/latentsync/pipelines/lipsync_pipeline.py
++++ b/latentsync/pipelines/lipsync_pipeline.py
+@@ -316,7 +316,7 @@ class LipsyncPipeline(DiffusionPipeline):
+         audio_path: str,
+         video_out_path: str,
+         num_frames: int = 16,
+-        video_fps: int = 25,
++        video_fps: int = 24,
+         audio_sample_rate: int = 16000,
+         height: Optional[int] = None,
+         width: Optional[int] = None,
+@@ -365,7 +365,7 @@ class LipsyncPipeline(DiffusionPipeline):
+         whisper_chunks = self.audio_encoder.feature2chunks(feature_array=whisper_feature, fps=video_fps)
+ 
+         audio_samples = read_audio(audio_path)
+-        video_frames = read_video(video_path, use_decord=False)
++        video_frames = read_video(video_path, change_fps=False, use_decord=False)
+ 
+         video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
+ 
+diff --git a/latentsync/utils/face_detector.py b/latentsync/utils/face_detector.py
+index faa55c9..7610a11 100644
+--- a/latentsync/utils/face_detector.py
++++ b/latentsync/utils/face_detector.py
+@@ -10,7 +10,7 @@ class FaceDetector:
+         self.app = FaceAnalysis(
+             allowed_modules=["detection", "landmark_2d_106"],
+             root="checkpoints/auxiliary",
+-            providers=["CUDAExecutionProvider"],
++            providers=["CPUExecutionProvider"],
+         )
+         self.app.prepare(ctx_id=cuda_to_int(device), det_size=(INSIGHTFACE_DETECT_SIZE, INSIGHTFACE_DETECT_SIZE))
+ 
+diff --git a/latentsync/utils/util.py b/latentsync/utils/util.py
+index 6aa9ab3..bc92a84 100644
+--- a/latentsync/utils/util.py
++++ b/latentsync/utils/util.py
+@@ -28,7 +28,10 @@ from torchvision import transforms
+ 
+ from einops import rearrange
+ import cv2
+-from decord import AudioReader, VideoReader
++try:
++    from decord import AudioReader, VideoReader
++except ImportError:
++    AudioReader = VideoReader = None
+ import shutil
+ import subprocess
+ 
+@@ -103,6 +106,10 @@ def read_video_cv2(video_path: str):
+ def read_audio(audio_path: str, audio_sample_rate: int = 16000):
+     if audio_path is None:
+         raise ValueError("Audio path is required.")
++    if AudioReader is None:
++        import librosa
++        samples, _ = librosa.load(audio_path, sr=audio_sample_rate, mono=True)
++        return torch.from_numpy(samples)
+     ar = AudioReader(audio_path, sample_rate=audio_sample_rate, mono=True)
+ 
+     # To access the audio samples
+diff --git a/scripts/inference.py b/scripts/inference.py
+index ae2ff67..76d4fe7 100644
+--- a/scripts/inference.py
++++ b/scripts/inference.py
+@@ -54,7 +54,7 @@ def main(config, args):
+         audio_feat_length=config.data.audio_feat_length,
+     )
+ 
+-    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=dtype)
++    vae = AutoencoderKL.from_pretrained("checkpoints/vae", torch_dtype=dtype)
+     vae.config.scaling_factor = 0.18215
+     vae.config.shift_factor = 0
+ 

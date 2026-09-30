@@ -1,4 +1,4 @@
-"""Local LatentSync 1.6 runner. Only the speaking mouth region is composited."""
+"""Local LatentSync 1.6 runner. Only the speaking mouth and jaw region is composited."""
 import argparse, json, math, os, subprocess, tempfile
 from pathlib import Path
 
@@ -28,10 +28,14 @@ def composite(original, synced, output, start_frame, app, max_frames=None):
                 span=float(np.linalg.norm(face.kps[3]-face.kps[4]));gap=float(mouth[1]-face.kps[2][1])
                 if gap<5 or span<10:raise ValueError('Speaking face angle unsuitable')
                 mask=np.zeros((h,w),np.float32)
-                cv2.ellipse(mask,tuple(mouth.astype(int)),(int(span*.95),int(max(span*.38,gap*.78))),0,0,360,1,-1)
-                # Never replace eyes, brows or nose; feather only around the mouth.
-                mask[:int(face.kps[2][1]+gap*.15)]=0
-                mask=cv2.GaussianBlur(mask,(11,11),2)[:,:,None]
+                center=mouth.copy();center[1]+=gap*.12
+                width=float(face.bbox[2]-face.bbox[0]);height=float(face.bbox[3]-face.bbox[1])
+                cv2.ellipse(mask,tuple(center.astype(int)),(int(width*.46),int(height*.32)),0,0,360,1,-1)
+                # Never replace eyes, brows or nose; include jaw movement with the mouth.
+                mask[:int(face.kps[2][1]+8)]=0
+                mask=cv2.GaussianBlur(mask,(11,11),2)
+                mask[:int(face.kps[2][1]+8)]=0
+                mask=mask[:,:,None]
                 frame=(frame*(1-mask)+lip*mask).clip(0,255).astype(np.uint8)
                 edited+=1
             writer.stdin.write(frame.tobytes())
@@ -40,7 +44,7 @@ def composite(original, synced, output, start_frame, app, max_frames=None):
     finally:
         a.release();b.release()
         if writer.poll() is None:writer.kill()
-    return {'source_frames':count,'edited_frames':edited,'fps':fps,'region':'mouth_only','original_eyes_nose_background_retained':True}
+    return {'source_frames':count,'edited_frames':edited,'fps':fps,'region':'mouth_and_jaw','original_eyes_nose_background_retained':True}
 
 def run(video,voice,out,start,root):
     from insightface.app import FaceAnalysis

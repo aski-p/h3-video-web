@@ -1,0 +1,32 @@
+{
+  "sample_verified": true,
+  "source_job": "88865643",
+  "sample_seconds": 3,
+  "technical": {
+    "source_frames": 72,
+    "edited_frames": 72,
+    "fps": 24.0,
+    "region": "mouth_and_jaw",
+    "original_eyes_nose_background_retained": true
+  },
+  "syncnet": {
+    "source": {
+      "offset_frames_25fps": -10,
+      "confidence": 2.7126035690307617
+    },
+    "verified-sample": {
+      "offset_frames_25fps": 0,
+      "confidence": 2.025820732116699
+    },
+    "synced": {
+      "offset_frames_25fps": 0,
+      "confidence": 2.268975257873535
+    }
+  },
+  "visual_review": "Eye/nose/background retention checked on sampled comparison frames. Per-video human quality review still required.",
+  "language": "ko",
+  "text": "여기 정말 좋네요.",
+  "model": "LatentSync-1.6",
+  "steps": 20,
+  "upstream_commit": "a229c3948406bc2cf6eaf4873e662e70c6a04746"
+}
