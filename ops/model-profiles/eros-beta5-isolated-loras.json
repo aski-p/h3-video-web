@@ -1,0 +1,124 @@
+{
+  "model": "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
+  "reference_path": "/home/aski/ComfyUI/input/h3web_02acfdd2.png",
+  "reference_sha256": "f0e1906a98a7b058e753d60213e9c6c15b37d4407bdc69ba4c3234383fb7796d",
+  "sampler": "res_multistep",
+  "scheduler": "simple",
+  "additional_turbo_lora": false,
+  "purpose": "Compare Realism People alone at 0.65 against Cinematic Realism alone at 0.50, preserving prior five-second cafe scene and seed. Other optional LoRAs disabled.",
+  "status": "planned",
+  "items": [
+    {
+      "variant": "realism-only",
+      "request": {
+        "mode": "i2v",
+        "prompt": "DY. r34l1sm. Five-second live-action vertical phone video at ordinary real-time speed. One fictional adult Korean woman age 27, preserve the supplied reference facial identity. Cafe terrace in morning natural light, stable window frames and high table. Opaque ivory halter crop top and dark denim shorts, braless under opaque clothing, fully covered chest and underwear, no nudity or body-part emphasis. Medium waist-up framing. She looks toward a seated cat beside the table, points briefly toward it, then turns toward camera with a small natural smile. Each movement finishes naturally within one second. Real skin and hair detail, normal blinking, no slow motion, no floating gestures, no camera zoom, no added text, no music or speech, quiet natural ambience without metallic noise.",
+        "negative": "child, minor, nudity, transparent clothing, sexualized pose, identity drift, waxy skin, beauty filter, deformed hands, extra fingers, duplicate objects, background morphing, text, watermark, camera orbit, repeated actions, foreign-language speech, gibberish, metallic ringing, synthetic buzzing, distorted audio, foreign-language speech, English dialogue, gibberish, unintelligible speech, robotic voice, metallic ringing, metallic scraping, electronic whine, distorted audio, clipping, synthetic buzzing, loud background noise",
+        "width": 720,
+        "height": 1280,
+        "seconds": 5.0,
+        "strategy": "single",
+        "seg_seconds": 4,
+        "steps": 8,
+        "seed": 9301301,
+        "worker_target": "pgx",
+        "lora_options": {
+          "realism": {
+            "enabled": true,
+            "strength": 0.65
+          },
+          "better_motion": {
+            "enabled": false,
+            "strength": 0.4
+          },
+          "insta_tiktok": {
+            "enabled": false,
+            "strength": 0.6
+          },
+          "motion_repair": {
+            "enabled": false,
+            "strength": 0.9
+          },
+          "camera_motion": {
+            "enabled": false,
+            "strength": 0.8,
+            "version": "1000",
+            "movement": "handheld"
+          },
+          "spatial_physics": {
+            "enabled": false,
+            "strength": 0.4,
+            "version": "3000"
+          },
+          "cinematic_realism": {
+            "enabled": false,
+            "strength": 0.5
+          }
+        },
+        "realism_lora": true,
+        "realism_strength": 0.65,
+        "client_request_id": "beta5-isolated-loras-20260930-realism-only",
+        "filename": "beta5_realism-only"
+      }
+    },
+    {
+      "variant": "cinematic-only",
+      "request": {
+        "mode": "i2v",
+        "prompt": "DY. r34l1sm. Five-second live-action vertical phone video at ordinary real-time speed. One fictional adult Korean woman age 27, preserve the supplied reference facial identity. Cafe terrace in morning natural light, stable window frames and high table. Opaque ivory halter crop top and dark denim shorts, braless under opaque clothing, fully covered chest and underwear, no nudity or body-part emphasis. Medium waist-up framing. She looks toward a seated cat beside the table, points briefly toward it, then turns toward camera with a small natural smile. Each movement finishes naturally within one second. Real skin and hair detail, normal blinking, no slow motion, no floating gestures, no camera zoom, no added text, no music or speech, quiet natural ambience without metallic noise.",
+        "negative": "child, minor, nudity, transparent clothing, sexualized pose, identity drift, waxy skin, beauty filter, deformed hands, extra fingers, duplicate objects, background morphing, text, watermark, camera orbit, repeated actions, foreign-language speech, gibberish, metallic ringing, synthetic buzzing, distorted audio, foreign-language speech, English dialogue, gibberish, unintelligible speech, robotic voice, metallic ringing, metallic scraping, electronic whine, distorted audio, clipping, synthetic buzzing, loud background noise",
+        "width": 720,
+        "height": 1280,
+        "seconds": 5.0,
+        "strategy": "single",
+        "seg_seconds": 4,
+        "steps": 8,
+        "seed": 9301301,
+        "worker_target": "pgx",
+        "lora_options": {
+          "realism": {
+            "enabled": false,
+            "strength": 0.65
+          },
+          "better_motion": {
+            "enabled": false,
+            "strength": 0.4
+          },
+          "insta_tiktok": {
+            "enabled": false,
+            "strength": 0.6
+          },
+          "motion_repair": {
+            "enabled": false,
+            "strength": 0.9
+          },
+          "camera_motion": {
+            "enabled": false,
+            "strength": 0.8,
+            "version": "1000",
+            "movement": "handheld"
+          },
+          "spatial_physics": {
+            "enabled": false,
+            "strength": 0.4,
+            "version": "3000"
+          },
+          "cinematic_realism": {
+            "enabled": true,
+            "strength": 0.5
+          }
+        },
+        "realism_lora": false,
+        "realism_strength": 0.65,
+        "client_request_id": "beta5-isolated-loras-20260930-cinematic-only",
+        "filename": "beta5_cinematic-only"
+      }
+    }
+  ],
+  "publication_approved": false,
+  "limitations": [
+    "Different LoRA strengths intentionally preserve previous settings; not an equal-strength test.",
+    "Backend canonicalizes Realism trigger position only when enabled; compares supported configurations.",
+    "Same cafe scene as previous comparison; not the new 15-second bedroom script."
+  ]
+}
