@@ -8,6 +8,12 @@ import server
 
 
 class LoraOptionsTests(unittest.TestCase):
+    def setUp(self):
+        # Legacy adapter tests opt in; production now defaults to non-Turbo.
+        patcher = patch.object(server, 'H3_USE_TURBO', True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_non_turbo_profile_does_not_load_or_require_turbo(self):
         with patch.object(server, 'H3_USE_TURBO', False):
             workflow = server.build_workflow('adult woman walking', '', 720, 1280, 360, 20, 1, lora_options=server.default_lora_options() | {'realism': {'enabled': False, 'strength': .65}}, lora_dirs=[], strict_loras=True)
