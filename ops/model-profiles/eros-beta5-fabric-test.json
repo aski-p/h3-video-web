@@ -7,5 +7,9 @@
   "realism": 0.35,
   "better_motion": 0.4,
   "cinematic_realism": false,
-  "wardrobe": "Opaque unpadded cotton jersey halter, braless, no nudity or sexual body-part emphasis"
+  "wardrobe": "Opaque unpadded cotton jersey halter, braless, no nudity or sexual body-part emphasis",
+  "job_id": "0dcb4b2f",
+  "status": "completed_review_hold",
+  "elapsed_seconds": 440.2,
+  "review": "Failed requested opaque-clothing coverage in sampled frames. Do not publish or approve. Not evidence of censorship or its removal."
 }
