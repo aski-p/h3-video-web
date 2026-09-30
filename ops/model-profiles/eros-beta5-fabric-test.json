@@ -1,0 +1,11 @@
+{
+  "request_key": "beta5-turbo-fabric-comparison-20260930",
+  "baseline": "ed4d6ff8",
+  "seconds": 5,
+  "steps": 8,
+  "model": "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
+  "realism": 0.35,
+  "better_motion": 0.4,
+  "cinematic_realism": false,
+  "wardrobe": "Opaque unpadded cotton jersey halter, braless, no nudity or sexual body-part emphasis"
+}
