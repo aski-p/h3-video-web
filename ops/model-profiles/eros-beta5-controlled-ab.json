@@ -6,7 +6,7 @@
   "sampler": "res_multistep",
   "scheduler": "simple",
   "additional_turbo_lora": false,
-  "status": "submitted",
+  "status": "completed_reviewed_samples",
   "items": [
     {
       "variant": "no-extra-lora",
@@ -60,7 +60,85 @@
         "client_request_id": "beta5-controlled-ab-20260930-no-extra-lora",
         "filename": "beta5_ab_no-extra-lora"
       },
-      "job_id": "40071a5b"
+      "job_id": "40071a5b",
+      "status": "done",
+      "elapsed_seconds": 437.0,
+      "probe": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_type": "video",
+            "width": 720,
+            "height": 1280,
+            "r_frame_rate": "24/1",
+            "bit_rate": "3467897"
+          },
+          {
+            "codec_type": "audio",
+            "r_frame_rate": "0/0",
+            "bit_rate": "169533"
+          }
+        ],
+        "format": {
+          "duration": "5.184000"
+        }
+      },
+      "applied_generation_options": {
+        "strategy": "single",
+        "seg_seconds": 4,
+        "segments": 1,
+        "segment_frames": [
+          124
+        ],
+        "worker_target": "pgx",
+        "steps": 8,
+        "lora_options": {
+          "realism": {
+            "enabled": false,
+            "strength": 0.65
+          },
+          "better_motion": {
+            "enabled": false,
+            "strength": 0.4
+          },
+          "insta_tiktok": {
+            "enabled": false,
+            "strength": 0.6
+          },
+          "motion_repair": {
+            "enabled": false,
+            "strength": 0.9
+          },
+          "camera_motion": {
+            "enabled": false,
+            "strength": 0.8,
+            "version": "1000",
+            "movement": "handheld"
+          },
+          "spatial_physics": {
+            "enabled": false,
+            "strength": 0.4,
+            "version": "3000"
+          },
+          "cinematic_realism": {
+            "enabled": false,
+            "strength": 0.5
+          }
+        },
+        "turbo": {
+          "enabled": false,
+          "strength": 0.0,
+          "steps_recommended": [
+            20
+          ]
+        },
+        "sampler": "res_multistep",
+        "scheduler": "simple",
+        "model": "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors"
+      },
+      "public_url": "https://h3-video-web.vercel.app/api/view/40071a5b",
+      "actual_extra_loras": [],
+      "effective_prompt_sha256": "70cfba5edc393954fbf26e6ee4e78b5367b7d691b3855235bf2912599694b438"
     },
     {
       "variant": "existing-loras",
@@ -114,8 +192,121 @@
         "client_request_id": "beta5-controlled-ab-20260930-existing-loras",
         "filename": "beta5_ab_existing-loras"
       },
-      "job_id": "0218e986"
+      "job_id": "0218e986",
+      "status": "done",
+      "elapsed_seconds": 441.9,
+      "probe": {
+        "programs": [],
+        "streams": [
+          {
+            "codec_type": "video",
+            "width": 720,
+            "height": 1280,
+            "r_frame_rate": "24/1",
+            "bit_rate": "2685661"
+          },
+          {
+            "codec_type": "audio",
+            "r_frame_rate": "0/0",
+            "bit_rate": "182711"
+          }
+        ],
+        "format": {
+          "duration": "5.184000"
+        }
+      },
+      "applied_generation_options": {
+        "strategy": "single",
+        "seg_seconds": 4,
+        "segments": 1,
+        "segment_frames": [
+          124
+        ],
+        "worker_target": "pgx",
+        "steps": 8,
+        "lora_options": {
+          "realism": {
+            "enabled": true,
+            "strength": 0.65
+          },
+          "better_motion": {
+            "enabled": true,
+            "strength": 0.4
+          },
+          "insta_tiktok": {
+            "enabled": false,
+            "strength": 0.6
+          },
+          "motion_repair": {
+            "enabled": false,
+            "strength": 0.9
+          },
+          "camera_motion": {
+            "enabled": false,
+            "strength": 0.8,
+            "version": "1000",
+            "movement": "handheld"
+          },
+          "spatial_physics": {
+            "enabled": false,
+            "strength": 0.4,
+            "version": "3000"
+          },
+          "cinematic_realism": {
+            "enabled": true,
+            "strength": 0.5
+          }
+        },
+        "turbo": {
+          "enabled": false,
+          "strength": 0.0,
+          "steps_recommended": [
+            20
+          ]
+        },
+        "sampler": "res_multistep",
+        "scheduler": "simple",
+        "model": "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors"
+      },
+      "public_url": "https://h3-video-web.vercel.app/api/view/0218e986",
+      "actual_extra_loras": [
+        {
+          "model": [
+            "1",
+            0
+          ],
+          "lora_name": "h3-realism-people-t2v-i2v-r2v.safetensors",
+          "strength_model": 0.65
+        },
+        {
+          "model": [
+            "1b",
+            0
+          ],
+          "lora_name": "better_motion_h3_lora_v1_500.safetensors",
+          "strength_model": 0.4
+        },
+        {
+          "model": [
+            "lora_02",
+            0
+          ],
+          "lora_name": "orangesouth_h3_cinematic_realism_v01.safetensors",
+          "strength_model": 0.5
+        }
+      ],
+      "effective_prompt_sha256": "ff414f5bd94265bd4af059c3d101543c52cc4975853dcbc4bc57797000df665a"
     }
   ],
-  "publication_approved": false
+  "publication_approved": false,
+  "comparison_limitations": [
+    "One seed and one scene; not a general model benchmark.",
+    "Identical submitted scene text, negative prompt, reference hash, seed, dimensions, steps and model. Backend canonicalizes r34l1sm to the beginning only when Realism is enabled, so effective token ordering differs. This compares operational LoRA configurations, not a perfectly isolated weight-only ablation.",
+    "Visual review uses five one-second sampled frames per result; audio quality and frame-to-frame motion were not fully assessed."
+  ],
+  "visual_review": {
+    "no-extra-lora": "Stronger contrast and skin highlights, framing tightens toward end; cat-point-turn sequence visible.",
+    "existing-loras": "Softer/darker rendering, framing appears more consistent across samples; cat-point-turn sequence visible.",
+    "conclusion": "Removing extra LoRAs does not clearly eliminate glossy skin in this pair. No automatic production-default change or publication approval."
+  }
 }
