@@ -6,7 +6,7 @@
   "scheduler": "simple",
   "additional_turbo_lora": false,
   "purpose": "Compare Realism People alone at 0.65 against Cinematic Realism alone at 0.50, preserving prior five-second cafe scene and seed. Other optional LoRAs disabled.",
-  "status": "planned",
+  "status": "submitted",
   "items": [
     {
       "variant": "realism-only",
@@ -59,7 +59,8 @@
         "realism_strength": 0.65,
         "client_request_id": "beta5-isolated-loras-20260930-realism-only",
         "filename": "beta5_realism-only"
-      }
+      },
+      "job_id": "deadab17"
     },
     {
       "variant": "cinematic-only",
@@ -112,7 +113,8 @@
         "realism_strength": 0.65,
         "client_request_id": "beta5-isolated-loras-20260930-cinematic-only",
         "filename": "beta5_cinematic-only"
-      }
+      },
+      "job_id": "6cafd7ec"
     }
   ],
   "publication_approved": false,
