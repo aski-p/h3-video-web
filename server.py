@@ -751,6 +751,7 @@ def generation_receipt(job, duplicate=False):
         "segments": segments,
         "total_seconds": total_seconds,
         "audio_policy": cfg.get("audio_policy"),
+        "dialogue_start": cfg.get("dialogue_start"),
         "strategy": cfg.get("strategy"),
         "seg_seconds": cfg.get("seg_seconds"),
         "steps": cfg.get("steps"),
@@ -767,7 +768,7 @@ def _same_idempotent_generation(left, right):
         "seconds", "strategy", "seg_seconds", "steps", "seed", "filename",
         "image_source_sha256", "video_source_sha256", "realism_lora",
         "cam_motion", "realism_strength", "cam_strength", "lora_options",
-        "audio_policy", "dialogue_ko",
+        "audio_policy", "dialogue_ko", "dialogue_start",
     )
     return all(left.get(key) == right.get(key) for key in keys)
 
@@ -3559,6 +3560,7 @@ class Handler(BaseHTTPRequestHandler):
                 "host_memory": host_memory_stats(),
                 "nas_ok": nas_ok(),
                 "audio_policy": studio_audio.POLICY,
+                "audio_policies": [studio_audio.POLICY,studio_audio.LIPSYNC_POLICY],
                 "queue_len": q_len,
                 "active_job": active_id,
                 "queues": {"pgx": queues["pgx"], "rtx5080": queues["rtx5080"]},
@@ -3679,6 +3681,7 @@ class Handler(BaseHTTPRequestHandler):
                 active_id = ACTIVE[0]
             send_json(self, {"ok": True, "comfy_up": comfy_up(),
                              "audio_policy": studio_audio.POLICY,
+                             "audio_policies": [studio_audio.POLICY,studio_audio.LIPSYNC_POLICY],
                              "nas_ok": nas_ok(),
                              "queue_len": q_len,
                              "active_job": active_id})
@@ -4217,18 +4220,24 @@ class Handler(BaseHTTPRequestHandler):
                 return
             audio_policy = data.get("audio_policy")
             dialogue_ko = ""
+            dialogue_start = None
             if audio_policy:
                 if not client_request_id.startswith("reelradar-"):
                     cleanup_job_input_snapshots(image_source_path, video_source_path)
                     send_json(self, {"ok": False, "error": "Studio audio requires a Studio request"}, 400); return
                 try:
                     dialogue_ko = studio_audio.validate(audio_policy, data.get("dialogue_ko", ""), seconds)
-                except ValueError as exc:
+                    if audio_policy == studio_audio.LIPSYNC_POLICY:
+                        dialogue_start = float(data.get("dialogue_start", 8))
+                        if not dialogue_ko or not (0 <= dialogue_start <= seconds-3):
+                            raise ValueError("한국어 립싱크 대사와 시작 시간을 확인해 주세요.")
+                except (ValueError,TypeError) as exc:
                     cleanup_job_input_snapshots(image_source_path, video_source_path)
                     send_json(self, {"ok": False, "error": str(exc)}, 400); return
             cfg = {
                 "audio_policy": audio_policy,
                 "dialogue_ko": dialogue_ko,
+                "dialogue_start": dialogue_start,
                 "client_request_id": client_request_id,
                 "worker_target": worker_target,
                 "mode": mode,
