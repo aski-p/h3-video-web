@@ -1,0 +1,13 @@
+{
+  "repo": "TenStrip/10Eros-Max",
+  "revision": "8a198588c8870ab0d613b3492a3150d091c8c2dd",
+  "rfilename": "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
+  "sha256": "4dd965496e5b1b83cd13c65cbe7a535b8a4d94ae768a7646b4e336d52c4781cf",
+  "size": 20970414464,
+  "baked_turbo": true,
+  "additional_turbo_lora": false,
+  "test_seconds": 5,
+  "test_steps": 8,
+  "request_key": "beta5-turbo-short-comparison-20260930",
+  "reference_job": "02acfdd2"
+}
