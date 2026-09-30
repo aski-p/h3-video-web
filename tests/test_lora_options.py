@@ -8,6 +8,12 @@ import server
 
 
 class LoraOptionsTests(unittest.TestCase):
+    def test_non_turbo_profile_does_not_load_or_require_turbo(self):
+        with patch.object(server, 'H3_USE_TURBO', False):
+            workflow = server.build_workflow('adult woman walking', '', 720, 1280, 360, 20, 1, lora_options=server.default_lora_options() | {'realism': {'enabled': False, 'strength': .65}}, lora_dirs=[], strict_loras=True)
+        self.assertNotIn('1a', workflow)
+        self.assertFalse(any(node.get('inputs', {}).get('lora_name') == server.H3_LORA for node in workflow.values()))
+
     def test_cinematic_sample_stack_is_opt_in_and_ordered_last(self):
         self.assertFalse(server.default_lora_options()['cinematic_realism']['enabled'])
         options = {'realism': {'enabled': True, 'strength': .65},

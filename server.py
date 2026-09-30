@@ -79,6 +79,7 @@ H3_UNET = os.environ.get("H3_UNET", "minimax_h3_fl2va_pruned_int8_convrot.safete
 H3_CLIP = os.environ.get("H3_CLIP", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors")
 H3_VIDEO_VAE = os.environ.get("H3_VIDEO_VAE", "minimax_h3_video_vae_fp16.safetensors")
 H3_AUDIO_VAE = os.environ.get("H3_AUDIO_VAE", "minimax_h3_audio_vae_fp32.safetensors")
+H3_USE_TURBO = os.environ.get("H3_USE_TURBO", "1").lower() not in ("0", "false", "off")
 H3_LORA = os.environ.get("H3_LORA", "minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors")
 REALISM_LORA = os.environ.get("REALISM_LORA", "h3-realism-people-t2v-i2v-r2v.safetensors")
 REALISM_LORA_STRENGTH = float(os.environ.get("REALISM_LORA_STRENGTH", "1.0"))
@@ -363,7 +364,7 @@ def public_lora_catalog(now=None):
         "devices": {"pgx": {"online": True, "inventory_current": True},
                     "rtx5080": {"online": rtx_status["online"], "inventory_current": rtx_status["online"],
                                 "last_seen_age_seconds": rtx_status.get("last_seen_age_seconds")}},
-        "turbo": {"strength": 1.0, "recommended_steps": [6, 8],
+        "turbo": {"enabled": H3_USE_TURBO, "strength": 1.0 if H3_USE_TURBO else 0.0, "recommended_steps": [6, 8] if H3_USE_TURBO else [20],
                   "sampler": "res_multistep", "scheduler": "simple",
                   "compatibility": "기존 운영 워크플로우 유지 · 모델카드 Euler/Beta 조합과 다르므로 다중 LoRA는 실험용"},
         "items": result,
@@ -2155,8 +2156,8 @@ def build_workflow(text, negative, width, height, length, steps, seed, image_nam
 
     if lora_dirs is None:
         lora_dirs = list(PGX_LORA_DIRS)
-    turbo_available = any(os.path.isfile(os.path.join(d, H3_LORA)) for d in lora_dirs)
-    if strict_loras and not turbo_available:
+    turbo_available = H3_USE_TURBO and any(os.path.isfile(os.path.join(d, H3_LORA)) for d in lora_dirs)
+    if strict_loras and H3_USE_TURBO and not turbo_available:
         raise RuntimeError(f"exact H3 Turbo LoRA missing: {H3_LORA}")
     available = []
     for item in chosen:
@@ -4240,7 +4241,7 @@ class Handler(BaseHTTPRequestHandler):
                 "applied_generation_options": {
                     "steps": steps,
                     "lora_options": applied_lora_options(lora_options),
-                    "turbo": {"enabled": True, "strength": 1.0, "steps_recommended": [6, 8]},
+                    "turbo": {"enabled": H3_USE_TURBO, "strength": 1.0 if H3_USE_TURBO else 0.0, "steps_recommended": [6, 8] if H3_USE_TURBO else [20]},
                     "sampler": "res_multistep", "scheduler": "simple",
                 },
                 "lora_combination_experimental": len(selected_loras(lora_options)) > 1,
