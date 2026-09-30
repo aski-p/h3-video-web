@@ -1,0 +1,22 @@
+{
+  "request_key": "beta5-turbo-short-comparison-20260930",
+  "job_id": "ed4d6ff8",
+  "baseline_job": "02acfdd2",
+  "cancelled_job": "edfe5fb6",
+  "model": "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
+  "steps": 8,
+  "seconds": 5,
+  "width": 720,
+  "height": 1280,
+  "sampler": "res_multistep",
+  "scheduler": "simple",
+  "baked_turbo": true,
+  "additional_turbo_lora": false,
+  "reference_sha256": "f0e1906a98a7b058e753d60213e9c6c15b37d4407bdc69ba4c3234383fb7796d",
+  "runtime_configuration": "H3_UNET and H3_USE_TURBO in existing user-owned .env; no secrets stored here",
+  "lora_strengths": {
+    "realism": 0.65,
+    "better_motion": 0.4,
+    "cinematic_realism": 0.5
+  }
+}
