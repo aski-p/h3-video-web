@@ -1,2 +1,5 @@
 # ComfyUI sampler 이벤트 수신 및 끊긴 진행 스트림 재연결용.
 websocket-client>=1.8,<2
+
+# Deterministic Korean Studio dialogue; never reuse generated H3 audio.
+edge-tts==7.2.3

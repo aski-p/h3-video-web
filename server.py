@@ -11,6 +11,7 @@
 - 생성 방식: 연속 단일 생성 / 세그먼트 분할 선택
 """
 import json
+import studio_audio
 from pgx_mode import controller as PGX_MODE, ModeError
 import base64
 import copy
@@ -749,6 +750,7 @@ def generation_receipt(job, duplicate=False):
         "worker_label": job.get("worker_label") or ("RTX 5080" if cfg.get("worker_target") == "rtx5080" else "PGX Spark"),
         "segments": segments,
         "total_seconds": total_seconds,
+        "audio_policy": cfg.get("audio_policy"),
         "strategy": cfg.get("strategy"),
         "seg_seconds": cfg.get("seg_seconds"),
         "steps": cfg.get("steps"),
@@ -765,6 +767,7 @@ def _same_idempotent_generation(left, right):
         "seconds", "strategy", "seg_seconds", "steps", "seed", "filename",
         "image_source_sha256", "video_source_sha256", "realism_lora",
         "cam_motion", "realism_strength", "cam_strength", "lora_options",
+        "audio_policy", "dialogue_ko",
     )
     return all(left.get(key) == right.get(key) for key in keys)
 
@@ -1201,6 +1204,7 @@ def complete_rtx5080_upload(jid, execution_id, lease_token, now=None):
             job = JOBS.get(jid) or {}
             if not _valid_rtx5080_lease_locked(job, execution_id, lease_token, commit_now):
                 raise PermissionError("stale RTX 5080 execution")
+        audio_receipt = studio_audio.apply(path, job.get("cfg") or {})
         archive = archive_final_to_nas(jid, path)
         completion_now = now if fixed_now else time.time()
         stale_after_archive = False
@@ -1211,6 +1215,7 @@ def complete_rtx5080_upload(jid, execution_id, lease_token, now=None):
                 stale_after_archive = True
             else:
                 job.update(
+                    audio_receipt=audio_receipt,
                     status="done", file=os.path.basename(archive["src"]), src=archive["src"],
                     size=archive["size"], sha256=archive["sha256"], nas_saved=True,
                     storage="nas", elapsed=round(max(0.0, completion_now - started), 1),
@@ -2787,6 +2792,7 @@ def run_job(job_id, cfg):
         # NAS 내부 atomic publish가 byte-size/SHA-256 검증을 통과한 뒤에만
         # NAS work/ComfyUI의 작업 전용 중간 영상들을 정리한다.
         update_job(job_id, progress=_prog(job_id, "NAS 저장·검증 중", seg_done=segments, done_phase=3))
+        audio_receipt = studio_audio.apply(final_local, cfg)
         archive = archive_final_to_nas(
             job_id, final_local, cleanup_paths=tuple(seg_files + comfy_source_files)
         )
@@ -2797,6 +2803,7 @@ def run_job(job_id, cfg):
         final_src = archive["src"]
         fsize = int(archive["size"])
         update_job(job_id,
+            audio_receipt=audio_receipt,
             status="done", file=os.path.basename(final_src), src=final_src,
             progress=_prog(job_id, "생성 완료", completed=True, eta=0, seg_done=segments),
             elapsed=round(time.time() - JOBS[job_id].get("started", time.time()), 1),
@@ -3551,6 +3558,7 @@ class Handler(BaseHTTPRequestHandler):
                 } if cstats else None,
                 "host_memory": host_memory_stats(),
                 "nas_ok": nas_ok(),
+                "audio_policy": studio_audio.POLICY,
                 "queue_len": q_len,
                 "active_job": active_id,
                 "queues": {"pgx": queues["pgx"], "rtx5080": queues["rtx5080"]},
@@ -3670,6 +3678,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 active_id = ACTIVE[0]
             send_json(self, {"ok": True, "comfy_up": comfy_up(),
+                             "audio_policy": studio_audio.POLICY,
                              "nas_ok": nas_ok(),
                              "queue_len": q_len,
                              "active_job": active_id})
@@ -4206,7 +4215,20 @@ class Handler(BaseHTTPRequestHandler):
                 cleanup_job_input_snapshots(image_source_path, video_source_path)
                 send_json(self, {"ok": False, "error": "해상도와 시드는 정수여야 합니다"}, 400)
                 return
+            audio_policy = data.get("audio_policy")
+            dialogue_ko = ""
+            if audio_policy:
+                if not client_request_id.startswith("reelradar-"):
+                    cleanup_job_input_snapshots(image_source_path, video_source_path)
+                    send_json(self, {"ok": False, "error": "Studio audio requires a Studio request"}, 400); return
+                try:
+                    dialogue_ko = studio_audio.validate(audio_policy, data.get("dialogue_ko", ""), seconds)
+                except ValueError as exc:
+                    cleanup_job_input_snapshots(image_source_path, video_source_path)
+                    send_json(self, {"ok": False, "error": str(exc)}, 400); return
             cfg = {
+                "audio_policy": audio_policy,
+                "dialogue_ko": dialogue_ko,
                 "client_request_id": client_request_id,
                 "worker_target": worker_target,
                 "mode": mode,
