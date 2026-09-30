@@ -6,7 +6,7 @@
   "sampler": "res_multistep",
   "scheduler": "simple",
   "additional_turbo_lora": false,
-  "status": "planned",
+  "status": "submitted",
   "items": [
     {
       "variant": "no-extra-lora",
@@ -59,7 +59,8 @@
         "realism_strength": 0.65,
         "client_request_id": "beta5-controlled-ab-20260930-no-extra-lora",
         "filename": "beta5_ab_no-extra-lora"
-      }
+      },
+      "job_id": "40071a5b"
     },
     {
       "variant": "existing-loras",
@@ -112,7 +113,8 @@
         "realism_strength": 0.65,
         "client_request_id": "beta5-controlled-ab-20260930-existing-loras",
         "filename": "beta5_ab_existing-loras"
-      }
+      },
+      "job_id": "0218e986"
     }
   ],
   "publication_approved": false
