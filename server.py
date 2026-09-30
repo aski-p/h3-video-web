@@ -75,11 +75,11 @@ OUT_DIR = os.environ.get("H3_OUT_DIR", os.path.join(NAS_DIR, ".h3-web", "work"))
 
 # MiniMax H3 Eros E3 production profile. Override filenames with env vars when
 # the PGX model directory uses a different revision.
-H3_UNET = os.environ.get("H3_UNET", "minimax_h3_fl2va_pruned_int8_convrot.safetensors")
+H3_UNET = os.environ.get("H3_UNET", "10Eros_Max_h3_hybrid_beta5_int8.safetensors")
 H3_CLIP = os.environ.get("H3_CLIP", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors")
 H3_VIDEO_VAE = os.environ.get("H3_VIDEO_VAE", "minimax_h3_video_vae_fp16.safetensors")
 H3_AUDIO_VAE = os.environ.get("H3_AUDIO_VAE", "minimax_h3_audio_vae_fp32.safetensors")
-H3_USE_TURBO = os.environ.get("H3_USE_TURBO", "1").lower() not in ("0", "false", "off")
+H3_USE_TURBO = os.environ.get("H3_USE_TURBO", "0").lower() not in ("0", "false", "off")
 H3_LORA = os.environ.get("H3_LORA", "minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors")
 REALISM_LORA = os.environ.get("REALISM_LORA", "h3-realism-people-t2v-i2v-r2v.safetensors")
 REALISM_LORA_STRENGTH = float(os.environ.get("REALISM_LORA_STRENGTH", "1.0"))
