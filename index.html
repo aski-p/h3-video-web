@@ -1325,8 +1325,12 @@ async function saveCompletedVideo(jid, filename, button){
 }
 function scheduleJobPoll(delay=4000){
   clearTimeout(pollTimer);
-  if(currentJob)pollTimer=setTimeout(pollJob,delay);
+  if(currentJob&&!document.hidden)pollTimer=setTimeout(pollJob,delay);
 }
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){clearTimeout(pollTimer);pollTimer=null;}
+  else if(currentJob)scheduleJobPoll(0);
+});
 function clearActiveJob(){
   clearTimeout(pollTimer); pollTimer=null;
   currentJob=null;
@@ -1983,7 +1987,12 @@ function refreshStatus(){
     $('#csub').textContent='';
   });
 }
-refreshStatus(); setInterval(refreshStatus, 10000);
+function pollWhileVisible(refresh,interval){
+  refresh();
+  setInterval(()=>{if(!document.hidden)refresh();},interval);
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
+}
+pollWhileVisible(refreshStatus,30000);
 
 // Job UI
 function finiteProgressNumber(value,min=0,max=Infinity){
@@ -2168,7 +2177,7 @@ async function cancelWorkerCardJob(worker){
 document.querySelectorAll('.worker-live-cancel').forEach(button=>{
   button.onclick=()=>cancelWorkerCardJob(button.dataset.worker);
 });
-refreshWorkerProgress(); setInterval(refreshWorkerProgress,4000);
+pollWhileVisible(refreshWorkerProgress,12000);
 
 function setSaveStatus(message, state=''){
   const node=$('#saveStatus');
@@ -2749,8 +2758,9 @@ function showJobTracking(j){
   $('#trackingModalClose').focus();
   clearInterval(trackingTimer);
   trackingTimer=setInterval(async()=>{
+    if(document.hidden)return;
     try{const r=await fetch('/api/job/'+jid);const d=await r.json();if(d.job) renderTracking(d.job);}catch(e){}
-  },4000);
+  },12000);
 }
 function closeTracking(){
   clearInterval(trackingTimer); trackingTimer=null;
@@ -3033,9 +3043,9 @@ function loadRecent(){
     });
   }).catch(()=>{});
 }
-loadRecent(); setInterval(loadRecent, 15000);
-refreshWorkerStatus(); setInterval(refreshWorkerStatus, 5000);
-refreshPowerStatus(); setInterval(refreshPowerStatus, 5000);
+pollWhileVisible(loadRecent,60000);
+pollWhileVisible(refreshWorkerStatus,30000);
+pollWhileVisible(refreshPowerStatus,30000);
 
 // 고정 이미지와 동영상을 모두 복원한다.
 refreshReferenceState().then(renderSelectedReference);
@@ -3073,7 +3083,7 @@ if(recoveredJob){
  buttons.forEach(b=>b.onclick=()=>{target=b.dataset.pgxMode;pin.value='';error.textContent='';document.getElementById('pgxModeDescription').textContent=target==='qwen'?'ComfyUI를 종료하고 Qwen 3.8을 불러옵니다. PGX에 생성·대기 작업이 있으면 전환하지 않습니다.':'Qwen 3.8을 종료하고 ComfyUI를 시작합니다. 진행 중인 Qwen 응답은 중단될 수 있습니다.';dialog.showModal();pin.focus();});
  document.getElementById('pgxModeClose').onclick=()=>dialog.close();dialog.addEventListener('close',()=>{pin.value='';});
  document.getElementById('pgxModeForm').onsubmit=async e=>{e.preventDefault();if(pending)return;pending=true;document.getElementById('pgxModeConfirm').disabled=true;try{const m=await request({mode:target,pin:pin.value});pin.value='';dialog.close();render(m);}catch(e){error.textContent=e.message;pin.value='';}finally{pending=false;document.getElementById('pgxModeConfirm').disabled=false;refresh();}};
- refresh();setInterval(refresh,10000);
+ pollWhileVisible(refresh,30000);
 })();
 </script>
 </body>
