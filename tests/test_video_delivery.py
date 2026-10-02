@@ -17,16 +17,92 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from unittest.mock import call, patch
 
 import backend_proxy
+import media_ticket
 import server
 
 
 class VideoDeliveryTests(unittest.TestCase):
     ORIGIN_SECRET = "unit-test-origin-secret"
+
+    def test_media_ticket_is_scoped_short_lived_and_tamper_proof(self):
+        url = media_ticket.issue("https://media.example", self.ORIGIN_SECRET, "view", "job123", now=1000)
+        parsed = urlsplit(url)
+        self.assertTrue(media_ticket.verify(self.ORIGIN_SECRET, parsed.path, parsed.query, now=1000))
+        self.assertFalse(media_ticket.verify(self.ORIGIN_SECRET, parsed.path, parsed.query, now=4601))
+        self.assertFalse(media_ticket.verify(self.ORIGIN_SECRET, parsed.path.replace("view", "download"), parsed.query, now=1000))
+        self.assertFalse(media_ticket.verify("wrong-secret", parsed.path, parsed.query, now=1000))
+        self.assertFalse(media_ticket.verify(self.ORIGIN_SECRET, parsed.path, parsed.query + "&expires=4600", now=1000))
+        with self.assertRaises(ValueError):
+            media_ticket.issue("https://media.example", self.ORIGIN_SECRET, "view", "../private", now=1000)
+
+    def test_media_ticket_redirects_to_direct_origin_and_falls_back_before_backend_upgrade(self):
+        class Ready:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+
+        started = []
+        environ = {"REQUEST_METHOD": "GET", "PATH_INFO": "/api/media-ticket/view/job123"}
+        with patch.object(backend_proxy, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch("urllib.request.urlopen", return_value=Ready()):
+            body = backend_proxy.handler(environ, lambda status, headers: started.extend([status, dict(headers)]))
+        self.assertEqual(body, [b""])
+        self.assertEqual(started[0], "307 Temporary Redirect")
+        self.assertEqual(started[1]["Cache-Control"], "private, no-store")
+        direct = urlsplit(started[1]["Location"])
+        self.assertEqual(direct.hostname, "thinkstationpgx-11d3.tailccac79.ts.net")
+        self.assertTrue(media_ticket.verify(self.ORIGIN_SECRET, direct.path, direct.query))
+        started.clear()
+        with patch.object(backend_proxy, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+             patch("urllib.request.urlopen", side_effect=urllib.error.URLError("not ready")):
+            backend_proxy.handler(environ, lambda status, headers: started.extend([status, dict(headers)]))
+        self.assertEqual(started[1]["Location"], "/api/view/job123")
+
+    def test_signed_direct_media_preserves_ranges_and_does_not_unlock_other_apis(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root, "job123.mp4")
+            source.write_bytes(b"0123456789")
+            job = {"id": "job123", "status": "done", "src": str(source)}
+            with patch.object(server, "ORIGIN_SECRET", self.ORIGIN_SECRET), \
+                 patch.dict(server.JOBS, {"job123": job}, clear=True):
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    url = urlsplit(media_ticket.issue("https://media.example", self.ORIGIN_SECRET, "view", "job123"))
+                    conn = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+                    conn.request("GET", url.path + "?" + url.query, headers={"Range": "bytes=2-5"})
+                    response = conn.getresponse()
+                    self.assertEqual(response.status, 206)
+                    self.assertEqual(response.read(), b"2345")
+                    self.assertEqual(response.getheader("Content-Range"), "bytes 2-5/10")
+                    self.assertEqual(response.getheader("Cache-Control"), "no-store, no-cache, must-revalidate")
+                    conn.close()
+                    download = urlsplit(media_ticket.issue("https://media.example", self.ORIGIN_SECRET, "download", "job123"))
+                    conn = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+                    conn.request("HEAD", download.path + "?" + download.query)
+                    response = conn.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.getheader("Content-Disposition"), 'attachment; filename="job123.mp4"')
+                    self.assertEqual(response.getheader("Content-Length"), "10")
+                    conn.close()
+                    conn = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+                    conn.request("GET", url.path + "?" + url.query.replace("signature=", "signature=0"))
+                    self.assertEqual(conn.getresponse().status, 401)
+                    conn.close()
+                    conn = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+                    conn.request("GET", "/api/health")
+                    self.assertEqual(conn.getresponse().status, 401)
+                    conn.close()
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
 
     def load_windows_worker(self):
         path = Path(__file__).resolve().parents[1] / "windows-worker" / "h3_worker.py"
@@ -3168,10 +3244,10 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertIn('ComfyUI 원본 측정값', html)
         self.assertIn('리얼리즘 LoRA', html)
 
-    def test_completed_video_ui_uses_same_origin_nas_range_routes(self):
+    def test_completed_video_ui_uses_signed_media_ticket_routes(self):
         html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
         self.assertIn("function completedMedia(jid)", html)
-        self.assertIn("return {view:'/api/view/'+encoded+'?v='+MEDIA_STREAM_VERSION,download:'/api/download/'+encoded};", html)
+        self.assertIn("return {view:'/api/media-ticket/view/'+encoded+'?v='+MEDIA_STREAM_VERSION,download:'/api/media-ticket/download/'+encoded};", html)
         self.assertIn("async function openCompletedVideo", html)
         self.assertIn("async function saveCompletedVideo", html)
         self.assertNotIn("/api/media-url/", html)
@@ -3203,7 +3279,7 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertIn('("CDN-Cache-Control", "no-store")', (root / "backend_proxy.py").read_text())
         self.assertIn('("Vercel-CDN-Cache-Control", "no-store")', (root / "backend_proxy.py").read_text())
         self.assertIn("const MEDIA_STREAM_VERSION='20260909-playback2';", html)
-        self.assertIn("view:'/api/view/'+encoded+'?v='+MEDIA_STREAM_VERSION", html)
+        self.assertIn("view:'/api/media-ticket/view/'+encoded+'?v='+MEDIA_STREAM_VERSION", html)
         open_video = html[html.index("async function openCompletedVideo"):html.index("async function saveCompletedVideo")]
         self.assertIn("if($('#recentModal').classList.contains('show')) closeRecentModal();", open_video)
         self.assertLess(open_video.index("closeRecentModal()"), open_video.index("showVideo("))

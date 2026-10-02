@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "ignoreCommand": "node vercel-ignore-build.cjs",
   "builds": [
     {
       "src": "build.sh",

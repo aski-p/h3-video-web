@@ -7,6 +7,7 @@ import os
 import re
 import urllib.request
 import urllib.error
+import media_ticket
 
 # NAS-only production data plane: the stable Tailscale Funnel is authoritative.
 # Do not allow a stale deployment environment variable to revive a retired tunnel.
@@ -139,6 +140,26 @@ def proxy(environ, start_response):
         if not token or not hmac.compare_digest(environ.get("HTTP_X_ASKI_ORIGINAL_TOKEN", ""), token):
             start_response("401 Unauthorized", [("Content-Type", "application/json"), ("Cache-Control", "private, no-store")])
             return [b'{"ok":false,"error":"unauthorized"}']
+    if path.startswith("/api/media-ticket/"):
+        match = re.fullmatch(r"/api/media-ticket/(view|download)/([A-Za-z0-9_-]{1,64})", path)
+        if method not in ("GET", "HEAD") or not match:
+            start_response("404 Not Found", [("Content-Type", "application/json"),
+                                             ("Cache-Control", PRIVATE_CACHE_CONTROL)])
+            return [b'{"ok":false,"error":"not_found"}']
+        fallback = f"/api/{match[1]}/{match[2]}"
+        target = fallback
+        try:
+            check = urllib.request.Request(BACKEND + "/api/direct-media-ready",
+                                           headers={ORIGIN_HEADER: ORIGIN_SECRET}, method="HEAD")
+            with urllib.request.urlopen(check, timeout=5) as response:
+                if response.status == 200:
+                    target = media_ticket.issue(BACKEND, ORIGIN_SECRET, match[1], match[2])
+        except (OSError, ValueError):
+            pass
+        start_response("307 Temporary Redirect", [("Location", target),
+                                                   ("Cache-Control", PRIVATE_CACHE_CONTROL),
+                                                   ("Referrer-Policy", "no-referrer")])
+        return [b""]
     body = b""
     if environ.get("CONTENT_LENGTH"):
         n = int(environ["CONTENT_LENGTH"])

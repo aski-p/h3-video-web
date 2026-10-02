@@ -40,6 +40,7 @@ try:
 except ImportError:
     websocket = None
 from urllib.parse import urlparse
+import media_ticket
 
 HOST = os.environ.get("H3_HOST", "0.0.0.0")
 PORT = int(os.environ.get("H3_PORT") or os.environ.get("PORT") or "8300")
@@ -3277,7 +3278,8 @@ def cancel_queued_job(jid):
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
-        log(format % args)
+        message = format % args
+        log(re.sub(r"([?&]signature=)[a-f0-9]+", r"\1[redacted]", message))
 
     def _origin_authorized(self):
         """Require the Vercel-only secret whenever production configured one.
@@ -3382,6 +3384,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Disposition", f'{disposition}; filename="{jid}.mp4"')
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", cache_control)
+        self.send_header("Referrer-Policy", "no-referrer")
         if byte_range:
             self.send_header("Content-Range", f"bytes {start}-{start + length - 1}/{size}")
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -3437,7 +3440,12 @@ class Handler(BaseHTTPRequestHandler):
         if p.startswith("/api/worker/"):
             if not self._require_worker():
                 return
-        elif p.startswith("/api/") and not self._require_origin():
+        elif p.startswith("/api/"):
+            signed_media = self.command in ("GET", "HEAD") and media_ticket.verify(ORIGIN_SECRET, p, u.query)
+            if not signed_media and not self._require_origin():
+                return
+        if p == "/api/direct-media-ready":
+            send_json(self, {"ok": True})
             return
         if p.startswith("/api/original-video/"):
             import original_video

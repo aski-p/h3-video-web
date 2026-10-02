@@ -1303,12 +1303,11 @@ $('#powerModalConfirm').onclick=async()=>{
   }finally{POWER_REQUESTING=false;$('#powerModalConfirm').disabled=false;}
 };
 
-// Completed video bytes remain on NAS and are streamed only through the
-// same-origin Vercel API proxy.  This preserves Range/seek and iOS save behavior
-// without exposing a second public media origin.
+// The same-origin ticket redirects to a short-lived NAS-backed media URL.
+// Older backend deployments automatically fall back to the existing proxy.
 function completedMedia(jid){
   const encoded=encodeURIComponent(jid);
-  return {view:'/api/view/'+encoded+'?v='+MEDIA_STREAM_VERSION,download:'/api/download/'+encoded};
+  return {view:'/api/media-ticket/view/'+encoded+'?v='+MEDIA_STREAM_VERSION,download:'/api/media-ticket/download/'+encoded};
 }
 async function openCompletedVideo(jid, title){
   const media=completedMedia(jid);
