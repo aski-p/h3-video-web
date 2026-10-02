@@ -28,8 +28,11 @@ def main(bundle,deadline):
             subprocess.run(['patch','-p1'],input=patch,cwd=runtime,check=True)
             for name in ('studio_audio.py','studio_lipsync_worker.py'):shutil.copy2(bundle/name,runtime/name)
             compile((runtime/'server.py').read_text(),'server.py','exec')
-            # No running worker is interrupted if another request arrived during file copying.
-            if health().get('active_job'):raise RuntimeError('New active job appeared; activation paused before restart')
+            # A request can arrive while files are copied; check both queues again.
+            latest=health()
+            comfy=json.load(urllib.request.urlopen('http://127.0.0.1:8188/queue',timeout=10))
+            if latest.get('active_job') or latest.get('queue_len') or comfy.get('queue_running') or comfy.get('queue_pending'):
+                raise RuntimeError('New generation arrived; activation paused before restart')
             subprocess.run(['systemctl','--user','restart','h3-web-backend'],check=True)
             for _ in range(30):
                 try:
