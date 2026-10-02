@@ -3619,7 +3619,9 @@ console.log(JSON.stringify(inputs.map(value=>fmtElapsed(value))));
         self.assertIn('renderWorkerProgressBoard', source)
         self.assertIn("workers[\"studio_original\"] = original_video.active_progress(now=now)", inspect.getsource(server.Handler.do_GET))
         self.assertIn('expected_complete_at', source)
-        self.assertIn('setInterval(refreshWorkerProgress,4000)', source)
+        self.assertIn('pollWhileVisible(refreshWorkerProgress,12000)', source)
+        self.assertIn('if(!document.hidden)refresh();', source)
+        self.assertIn('else if(currentJob)scheduleJobPoll(0);', source)
 
     def test_dual_worker_cards_expose_exact_job_cancel_without_stale_reenable(self):
         source = (Path(__file__).resolve().parents[1] / "index.html").read_text(encoding="utf-8")
