@@ -25,7 +25,7 @@ def main():
         dtype=torch.float32,
     )
     # Forcing Korean hid the unwanted opening in job 891a0782.
-    heard = recognizer(video, generate_kwargs={'task': 'transcribe'})['text'].strip()
+    heard = recognizer(video, return_timestamps=True, generate_kwargs={'task': 'transcribe'})['text'].strip()
     print(json.dumps({'transcript': heard, 'matched': matches_dialogue(heard, expected)}, ensure_ascii=False))
 
 
