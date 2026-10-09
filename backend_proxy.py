@@ -7,6 +7,7 @@ import os
 import re
 import urllib.request
 import urllib.error
+from urllib.parse import parse_qs
 import media_ticket
 
 # NAS-only production data plane: the stable Tailscale Funnel is authoritative.
@@ -179,6 +180,15 @@ def proxy(environ, start_response):
                 or path.startswith("/api/worker/input/") or path.startswith("/api/original-video/jobs/") or path == "/api/refv")
     cache_control = _cache_control_for_path(path)
     query = environ.get("QUERY_STRING", "")
+    jobs_limit = None
+    if path == "/api/jobs" and method == "GET":
+        limits = parse_qs(query, keep_blank_values=True).get("limit")
+        if limits is not None:
+            if len(limits) != 1 or not re.fullmatch(r"\d{1,3}", limits[0]) or int(limits[0]) > 100:
+                start_response("400 Bad Request", [("Content-Type", "application/json"),
+                                                   ("Cache-Control", PRIVATE_CACHE_CONTROL)])
+                return [b'{"ok":false,"error":"invalid jobs limit"}']
+            jobs_limit = int(limits[0])
     source_thumbnail = path.startswith("/api/original-video/source-thumbnail/")
     if source_thumbnail:
         source_sha = path.removeprefix("/api/original-video/source-thumbnail/")
@@ -213,6 +223,22 @@ def proxy(environ, start_response):
         # WSGI iterator that must keep the upstream socket open while bytes
         # are sent to the browser.
         r = urllib.request.urlopen(req, timeout=300)
+        if jobs_limit is not None:
+            # Compatibility with older PGX servers: bound the public response
+            # here without restarting or interrupting an active generation.
+            try:
+                dashboard = json.load(r)
+            finally:
+                r.close()
+            jobs = dashboard.get("jobs")
+            if not isinstance(jobs, list):
+                raise ValueError("invalid jobs response")
+            dashboard.setdefault("jobs_total", len(jobs))
+            dashboard["jobs"] = jobs[:jobs_limit]
+            payload = json.dumps(dashboard, allow_nan=False).encode()
+            start_response("200 OK", [("Content-Type", "application/json"),
+                                      ("Cache-Control", PRIVATE_CACHE_CONTROL)])
+            return [payload]
         if path == "/api/active-progress" and method == "GET":
             try:
                 dashboard = json.load(r)

@@ -1206,7 +1206,7 @@ async function fetchJsonWithTimeout(url, options={}, timeoutMs=15000){
 
 async function refreshWorkerStatus(){
   try{
-    const data=await fetchJsonWithTimeout('/api/jobs',{},10000);
+    const data=await fetchJsonWithTimeout('/api/jobs?limit=0',{},15000);
     WORKER_STATUS=data;
     const workers=data.workers||{}, queues=data.queues||{};
     const rtx=workers.rtx5080||{online:false,eligible:false,generation_verified:false};
@@ -1953,7 +1953,7 @@ document.getElementById('reffile').onchange=e=>{
 
 // ComfyUI 상세 상태
 function refreshStatus(){
-  fetch('/api/jobs').then(r=>r.json()).then(d=>{
+  fetchJsonWithTimeout('/api/jobs?limit=0',{},15000).then(d=>{
     const ci=d.comfy_info;
     const nas=d.nas_ok;
     const q=d.queue_len||0;
@@ -2923,11 +2923,14 @@ function fmtSize(b){
   if(b>1048576*100) return (b/1048576).toFixed(1)+'GB';
   return (b/1048576).toFixed(1)+'MB';
 }
+let recentLoading=false;
 function loadRecent(){
+  if(recentLoading)return;
+  recentLoading=true;
   Promise.all([
-    fetch('/api/jobs').then(async r=>{const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'작업 목록 확인 실패');return d;}),
-    fetch('/api/ref/status').then(r=>r.json()).catch(()=>({ok:false,ref:null})),
-    fetch('/api/refv/status').then(r=>r.json()).catch(()=>({ok:false,ref:null}))
+    fetchJsonWithTimeout('/api/jobs?limit=10',{},15000).then(d=>{if(!d.ok)throw new Error(d.error||'작업 목록 확인 실패');return d;}),
+    fetchJsonWithTimeout('/api/ref/status',{},10000).catch(()=>({ok:false,ref:null})),
+    fetchJsonWithTimeout('/api/refv/status',{},10000).catch(()=>({ok:false,ref:null}))
   ]).then(([d,refD,refvD])=>{
     const jobs=(d.jobs||[]).slice(0,10);
     const badge=$('#recentCountBadge');
@@ -3040,7 +3043,17 @@ function loadRecent(){
       if(delB) delB.onclick=()=>st==='done'?deleteCompleted(j.id):cleanupError(j.id);
       list.appendChild(item);
     });
-  }).catch(()=>{});
+  }).catch(()=>{
+    const list=$('#recentModalList');
+    if(!list)return;
+    const error=document.createElement('div');
+    error.setAttribute('role','alert');
+    error.textContent='최근 작업을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.';
+    const retry=document.createElement('button');
+    retry.type='button';retry.className='rbtn';retry.textContent='다시 불러오기';
+    retry.onclick=loadRecent;
+    list.replaceChildren(error,retry);
+  }).finally(()=>{recentLoading=false;});
 }
 pollWhileVisible(loadRecent,60000);
 pollWhileVisible(refreshWorkerStatus,30000);
