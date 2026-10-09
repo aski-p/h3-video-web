@@ -3,6 +3,7 @@ import hashlib
 import ipaddress
 import json
 import hmac
+import codecs
 import os
 import re
 import urllib.request
@@ -25,6 +26,71 @@ CLIENT_KEY_HEADER = "X-H3-Client-Key"
 PUBLIC_VIDEO_CACHE_CONTROL = "private, no-store"
 PUBLIC_THUMBNAIL_CACHE_CONTROL = "public, max-age=31536000, immutable"
 PRIVATE_CACHE_CONTROL = "private, no-store"
+
+
+def _recent_jobs_prefix(response, limit):
+    """Decode only the requested prefix of the legacy JSON jobs array."""
+    decoder = json.JSONDecoder()
+    utf8 = codecs.getincrementaldecoder("utf-8")()
+    buffer = ""
+    consumed = 0
+    eof = False
+
+    def more():
+        nonlocal buffer, consumed, eof
+        chunk = response.read(4096)
+        consumed += len(chunk)
+        if consumed > 2 * 1024 * 1024:
+            raise ValueError("jobs prefix too large")
+        eof = not chunk
+        buffer += utf8.decode(chunk, final=eof)
+
+    def token(expected):
+        nonlocal buffer
+        while not buffer.strip() and not eof:
+            more()
+        buffer = buffer.lstrip()
+        if not buffer.startswith(expected):
+            raise ValueError("invalid jobs document")
+        buffer = buffer[len(expected):]
+
+    def value():
+        nonlocal buffer
+        while True:
+            buffer = buffer.lstrip()
+            try:
+                result, end = decoder.raw_decode(buffer)
+                buffer = buffer[end:]
+                return result
+            except json.JSONDecodeError:
+                if eof:
+                    raise
+                more()
+
+    token("{")
+    while True:
+        key = value()
+        token(":")
+        if key == "jobs":
+            token("[")
+            jobs = []
+            while len(jobs) < limit:
+                while not buffer.strip() and not eof:
+                    more()
+                if buffer.lstrip().startswith("]"):
+                    break
+                if jobs:
+                    token(",")
+                job = value()
+                if not isinstance(job, dict):
+                    raise ValueError("invalid job")
+                jobs.append(job)
+            # Counts occur after the legacy array and are intentionally unknown;
+            # do not read megabytes of unused history to obtain a badge.
+            return {"ok": True, "jobs": jobs, "jobs_total": None,
+                    "today_completed_count": None, "partial": True}
+        value()
+        token(",")
 
 
 def _private_client_key(environ):
@@ -227,14 +293,9 @@ def proxy(environ, start_response):
             # Compatibility with older PGX servers: bound the public response
             # here without restarting or interrupting an active generation.
             try:
-                dashboard = json.load(r)
+                dashboard = _recent_jobs_prefix(r, jobs_limit)
             finally:
                 r.close()
-            jobs = dashboard.get("jobs")
-            if not isinstance(jobs, list):
-                raise ValueError("invalid jobs response")
-            dashboard.setdefault("jobs_total", len(jobs))
-            dashboard["jobs"] = jobs[:jobs_limit]
             payload = json.dumps(dashboard, allow_nan=False).encode()
             start_response("200 OK", [("Content-Type", "application/json"),
                                       ("Cache-Control", PRIVATE_CACHE_CONTROL)])

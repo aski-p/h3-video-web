@@ -1206,9 +1206,9 @@ async function fetchJsonWithTimeout(url, options={}, timeoutMs=15000){
 
 async function refreshWorkerStatus(){
   try{
-    const data=await fetchJsonWithTimeout('/api/jobs?limit=0',{},15000);
+    const data=await fetchJsonWithTimeout('/api/workers',{},15000);
     WORKER_STATUS=data;
-    const workers=data.workers||{}, queues=data.queues||{};
+    const workers=data.workers||{}, queues=data.queues||workers;
     const rtx=workers.rtx5080||{online:false,eligible:false,generation_verified:false};
     const rtxVerificationPending=rtx.online&&!rtx.generation_verified;
     const workerToggle=$('#workerToggle');
@@ -1953,7 +1953,7 @@ document.getElementById('reffile').onchange=e=>{
 
 // ComfyUI 상세 상태
 function refreshStatus(){
-  fetchJsonWithTimeout('/api/jobs?limit=0',{},15000).then(d=>{
+  fetchJsonWithTimeout('/api/health',{},15000).then(d=>{
     const ci=d.comfy_info;
     const nas=d.nas_ok;
     const q=d.queue_len||0;
@@ -2934,10 +2934,10 @@ function loadRecent(){
   ]).then(([d,refD,refvD])=>{
     const jobs=(d.jobs||[]).slice(0,10);
     const badge=$('#recentCountBadge');
-    const todayCount=Number.isInteger(d.today_completed_count)&&d.today_completed_count>=0?d.today_completed_count:0;
-    if(badge) badge.textContent=todayCount>99?'99+':String(todayCount);
+    const todayCount=Number.isInteger(d.today_completed_count)&&d.today_completed_count>=0?d.today_completed_count:null;
+    if(badge) badge.textContent=todayCount===null?'':todayCount>99?'99+':String(todayCount);
     const handle=$('#recentModalOpen');
-    if(handle) handle.setAttribute('aria-label',`최근 작업 열기 · 오늘 생성 완료 ${todayCount}개`);
+    if(handle) handle.setAttribute('aria-label',todayCount===null?'최근 작업 열기':`최근 작업 열기 · 오늘 생성 완료 ${todayCount}개`);
     const ref=refD.ref||null;
     const refv=refvD.refv||null;
     const list=$('#recentModalList');

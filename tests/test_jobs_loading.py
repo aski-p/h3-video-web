@@ -19,24 +19,39 @@ class JobsLoadingTests(unittest.TestCase):
             payload = b''.join(result)
         return started, payload, opened
 
-    def test_recent_list_is_bounded_without_losing_status_or_daily_count(self):
+    def test_recent_list_stops_reading_before_unused_history(self):
         data = {'ok': True, 'jobs': [{'id': str(n), 'prompt': 'x' * 10000} for n in range(400)],
                 'today_completed_count': 12, 'workers': {'pgx': {'busy': True}}, 'queue_len': 3}
         started, payload, opened = self.request('limit=10', data)
         result = json.loads(payload)
         self.assertEqual(started[0], '200 OK')
         self.assertEqual(len(result['jobs']), 10)
-        self.assertEqual(result['jobs_total'], 400)
-        self.assertEqual(result['today_completed_count'], 12)
-        self.assertEqual(result['workers'], data['workers'])
-        self.assertEqual(result['queue_len'], 3)
+        self.assertIsNone(result['jobs_total'])
+        self.assertIsNone(result['today_completed_count'])
+        self.assertTrue(result['partial'])
         self.assertLess(len(payload), 110000)
         self.assertIn('limit=10', opened.call_args.args[0].full_url)
         self.assertEqual(started[1]['Cache-Control'], 'private, no-store')
 
     def test_status_only_response_excludes_history(self):
         _, payload, _ = self.request('limit=0', {'ok': True, 'jobs': [{'id': 'a'}], 'active_job': 'a'})
-        self.assertEqual(json.loads(payload), {'ok': True, 'jobs': [], 'active_job': 'a', 'jobs_total': 1})
+        self.assertEqual(json.loads(payload)['jobs'], [])
+
+    def test_unicode_braces_and_short_lists_are_parsed_as_json(self):
+        for jobs in [[], [{'id': 'one', 'prompt': '한글 { \"quoted\" }'}]]:
+            _, payload, _ = self.request('limit=10', {'ok': True, 'jobs': jobs})
+            self.assertEqual(json.loads(payload)['jobs'], jobs)
+
+    def test_remaining_history_is_never_consumed(self):
+        class PrefixOnly(io.BytesIO):
+            def read(self, size=-1):
+                if self.tell() >= 8192:
+                    raise AssertionError('Read unused history')
+                return super().read(size)
+        response = PrefixOnly(json.dumps({'ok': True, 'jobs': [{'id': 'a'}] +
+                                         [{'id': 'b', 'prompt': 'x' * 1000000}]}).encode())
+        result = backend_proxy._recent_jobs_prefix(response, 1)
+        self.assertEqual(result['jobs'], [{'id': 'a'}])
 
     def test_invalid_limit_is_rejected_before_upstream(self):
         for query in ['limit=-1', 'limit=101', 'limit=', 'limit=1&limit=2', 'limit=abc']:
@@ -49,6 +64,8 @@ class JobsLoadingTests(unittest.TestCase):
         self.assertNotIn("fetch('/api/jobs')", html)
         self.assertNotIn("fetchJsonWithTimeout('/api/jobs',", html)
         self.assertIn("fetchJsonWithTimeout('/api/jobs?limit=10',{},15000)", html)
+        self.assertIn("fetchJsonWithTimeout('/api/health',{},15000)", html)
+        self.assertNotIn('/api/jobs?limit=0', html)
         self.assertIn("retry.onclick=loadRecent", html)
         self.assertIn("finally(()=>{recentLoading=false;})", html)
 
