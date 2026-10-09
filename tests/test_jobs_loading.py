@@ -63,7 +63,7 @@ class JobsLoadingTests(unittest.TestCase):
         html = (Path(__file__).resolve().parents[1] / 'index.html').read_text()
         self.assertNotIn("fetch('/api/jobs')", html)
         self.assertNotIn("fetchJsonWithTimeout('/api/jobs',", html)
-        self.assertIn("fetchJsonWithTimeout('/api/jobs?limit=10',{},15000)", html)
+        self.assertIn("fetchJsonWithTimeout('/api/jobs?limit=10',{},45000)", html)
         self.assertIn("fetchJsonWithTimeout('/api/health',{},15000)", html)
         self.assertNotIn('/api/jobs?limit=0', html)
         self.assertIn("retry.onclick=loadRecent", html)

@@ -2928,7 +2928,7 @@ function loadRecent(){
   if(recentLoading)return;
   recentLoading=true;
   Promise.all([
-    fetchJsonWithTimeout('/api/jobs?limit=10',{},15000).then(d=>{if(!d.ok)throw new Error(d.error||'작업 목록 확인 실패');return d;}),
+    fetchJsonWithTimeout('/api/jobs?limit=10',{},45000).then(d=>{if(!d.ok)throw new Error(d.error||'작업 목록 확인 실패');return d;}),
     fetchJsonWithTimeout('/api/ref/status',{},10000).catch(()=>({ok:false,ref:null})),
     fetchJsonWithTimeout('/api/refv/status',{},10000).catch(()=>({ok:false,ref:null}))
   ]).then(([d,refD,refvD])=>{
