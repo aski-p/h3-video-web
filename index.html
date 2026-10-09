@@ -2429,7 +2429,7 @@ $('#go').onclick=async()=>{
   });
   const d=await r.json();
   $('#go').disabled=false;
-  if(!d.ok){ alert(d.error||'요청 실패'); $('#jobbox').style.display='none'; return; }
+  if(!d.ok){ if(d.code==='PGX_MODE_BLOCKED')document.dispatchEvent(new Event('pgx-mode-refresh'));alert(d.error||'요청 실패'); if(!currentJob)$('#jobbox').style.display='none'; return; }
 
   currentJob=d.job;
   localStorage.setItem('h3-active-job',currentJob);
@@ -3076,9 +3076,10 @@ if(recoveredJob){
 (()=>{
  const buttons=[...document.querySelectorAll('[data-pgx-mode]')],status=document.getElementById('pgxModeStatus'),dialog=document.getElementById('pgxModeDialog'),pin=document.getElementById('pgxModePin'),error=document.getElementById('pgxModeError');
  let target=null,pending=false,refreshBusy=false;
- const render=m=>{for(const b of buttons){b.disabled=pending||!m.configured||m.switching||b.dataset.pgxMode===m.mode;b.setAttribute('aria-pressed',String(b.dataset.pgxMode===m.mode));}status.textContent=m.message||'서버 상태 확인 필요';};
+ const render=m=>{const selected=m.selected_mode||m.mode;for(const b of buttons){b.disabled=pending||!m.configured||m.switching||b.dataset.pgxMode===selected;b.setAttribute('aria-pressed',String(b.dataset.pgxMode===selected));}status.textContent=m.message||'서버 상태 확인 필요';};
  async function request(body){const r=await fetch('/api/pgx-mode',{method:body?'POST':'GET',cache:'no-store',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(15000)});let d;try{d=await r.json();}catch{throw Error('PGX 모드 전환 서버 설치 또는 연결이 필요합니다.');}if(!r.ok||!d.ok)throw Error(d.error||'서버 연결 실패');return d.mode;}
  async function refresh(){if(pending||refreshBusy)return;refreshBusy=true;try{const m=await request();if(!pending)render(m);}catch(e){if(!pending)render({configured:false,message:e.message});}finally{refreshBusy=false;}}
+ document.addEventListener('pgx-mode-refresh',refresh);
  buttons.forEach(b=>b.onclick=()=>{target=b.dataset.pgxMode;pin.value='';error.textContent='';document.getElementById('pgxModeDescription').textContent=target==='qwen'?'ComfyUI를 종료하고 Qwen 3.8을 불러옵니다. PGX에 생성·대기 작업이 있으면 전환하지 않습니다.':'Qwen 3.8을 종료하고 ComfyUI를 시작합니다. 진행 중인 Qwen 응답은 중단될 수 있습니다.';dialog.showModal();pin.focus();});
  document.getElementById('pgxModeClose').onclick=()=>dialog.close();dialog.addEventListener('close',()=>{pin.value='';});
  document.getElementById('pgxModeForm').onsubmit=async e=>{e.preventDefault();if(pending)return;pending=true;document.getElementById('pgxModeConfirm').disabled=true;try{const m=await request({mode:target,pin:pin.value});pin.value='';dialog.close();render(m);}catch(e){error.textContent=e.message;pin.value='';}finally{pending=false;document.getElementById('pgxModeConfirm').disabled=false;refresh();}};

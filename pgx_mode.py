@@ -53,6 +53,10 @@ class PgxMode:
         except Exception:
             return False
 
+    def _selected_mode(self):
+        video, qwen = self._ctl('is-active', 'video'), self._ctl('is-active', 'qwen')
+        return 'video' if video == 'active' and qwen in ('inactive', 'failed') else 'qwen' if qwen == 'active' and video in ('inactive', 'failed') else 'unknown'
+
     def status(self):
         with self.lock:
             if not self.enabled:
@@ -62,12 +66,13 @@ class PgxMode:
                 return {'configured': True, 'mode': 'switching', 'target': self.target,
                         'switching': True, 'message': '모델 전환 중 · 준비 상태 확인 중'}
             try:
-                video, qwen = self._ctl('is-active', 'video'), self._ctl('is-active', 'qwen')
-                mode = 'video' if video == 'active' and qwen in ('inactive','failed') else 'qwen' if qwen == 'active' and video in ('inactive','failed') else 'unknown'
-                if mode != 'unknown' and not self.healthy(mode):
-                    mode = 'loading'
-                result = {'configured': True, 'mode': mode, 'switching': False,
-                          'message': self.error or {'video':'영상 생성 모드 준비', 'qwen':'Qwen 3.8 Flash Next EXL3 · 262K 컨텍스트 준비', 'loading':'모델 로딩 중', 'unknown':'서버 상태 확인 필요'}.get(mode)}
+                selected = self._selected_mode()
+                ready = selected != 'unknown' and self.healthy(selected)
+                mode = selected if ready or selected == 'unknown' else 'loading'
+                loading_message = '영상 모드 · 서버 응답 확인 중 (생성 요청은 대기열로 접수)' if selected == 'video' else 'Qwen 모델 준비 상태 확인 중'
+                result = {'configured': True, 'mode': mode, 'selected_mode': selected,
+                          'ready': ready, 'switching': False,
+                          'message': self.error or {'video':'영상 생성 모드 준비', 'qwen':'Qwen 3.8 Flash Next EXL3 · 262K 컨텍스트 준비', 'loading':loading_message, 'unknown':'서버 상태 확인 필요'}.get(mode)}
                 if mode == 'qwen':
                     result.update(model=self.qwen_model, context_length=self.qwen_context,
                                   base_url=self.qwen_base_url)
@@ -76,7 +81,17 @@ class PgxMode:
                 return {'configured': True, 'mode':'unknown', 'switching':False, 'message':'PGX 서비스 상태를 확인할 수 없습니다.'}
 
     def video_allowed(self):
-        return not self.enabled or self.status()['mode'] == 'video'
+        # Admission reserves queue capacity, not GPU execution. The worker still
+        # waits for ComfyUI readiness; a busy HTTP probe must not change modes.
+        with self.lock:
+            if not self.enabled:
+                return True
+            if self.switching:
+                return False
+            try:
+                return self._selected_mode() == 'video'
+            except Exception:
+                return False
 
     def request(self, target, busy=False):
         with self.lock:
@@ -86,7 +101,7 @@ class PgxMode:
                 raise ValueError('지원하지 않는 모드입니다.')
             if self.switching:
                 raise ModeError('이미 모델을 전환하고 있습니다.')
-            previous = self.status()['mode']
+            previous = self._selected_mode()
             if target == previous:
                 return self.status()
             if busy:
