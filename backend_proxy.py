@@ -173,6 +173,8 @@ def proxy(environ, start_response):
                CLIENT_KEY_HEADER: _private_client_key(environ)}
     if path.startswith("/api/original-video/"):
         headers["X-Aski-Original-Token"] = os.environ["ORIGINAL_VIDEO_TOKEN"]
+    if path == "/api/ref/set" and environ.get("HTTP_X_REFERENCE_BODY"):
+        headers["X-Reference-Body"] = environ["HTTP_X_REFERENCE_BODY"]
     if is_worker:
         # Authenticate the internet-facing worker with WORKER_SECRET above, then
         # mint the separate Vercel→PGX credential.  The external bearer must

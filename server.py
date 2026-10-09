@@ -2914,15 +2914,19 @@ def _load_ref():
         "name": m.get("name", ""),
         "w": m.get("w", 0), "h": m.get("h", 0),
         "size": m.get("size", 0), "ts": m.get("ts", 0),
+        "body": m.get("body"),
     }
 
 
-def _save_ref(data: bytes, w: int, h: int, name: str):
+def _save_ref(data: bytes, w: int, h: int, name: str, body=None):
     """고정 참조 이미지 영구 저장 (삭제 전까지 유지)."""
+    from fixed_body import normalize_body
+    body = normalize_body(body)
     os.makedirs(REF_DIR, exist_ok=True)
     with open(_ref_path(), "wb") as f:
         f.write(data)
     meta = {"name": name, "w": w, "h": h, "size": len(data), "ts": time.time()}
+    meta["body"] = body
     with open(REF_META, "w") as f:
         json.dump(meta, f, ensure_ascii=False)
     return meta
@@ -3782,6 +3786,12 @@ class Handler(BaseHTTPRequestHandler):
             original_video.handle(self, p, send_json, post=True)
             return
         if p == "/api/ref/set":
+            from fixed_body import decode_body
+            try:
+                reference_body = decode_body(self.headers.get("X-Reference-Body", ""))
+            except (ValueError, TypeError):
+                send_json(self, {"ok": False, "error": "Invalid fixed body settings"}, 400)
+                return
             # 고정 참조 등록 (multipart/form-data: file=이미지)
             ctype = self.headers.get("Content-Type", "")
             clen = int(self.headers.get("Content-Length", 0))
@@ -3836,7 +3846,7 @@ class Handler(BaseHTTPRequestHandler):
                     w, h = im.size
             except Exception:
                 pass
-            meta = _save_ref(data, w, h, fname)
+            meta = _save_ref(data, w, h, fname, reference_body)
             log(f"고정 참조 등록: {fname} ({w}x{h})")
             send_json(self, {"ok": True, "ref": meta})
             return
@@ -4118,6 +4128,8 @@ class Handler(BaseHTTPRequestHandler):
                     meta = snapshot_reference_input(_ref_path(), image_source_path, ref.get("name") or "fixed-reference.png")
                     image_source_sha256 = meta["sha256"]
                     image_source_size = meta["size"]
+                    from fixed_body import fixed_prompt
+                    prompt = fixed_prompt(prompt, ref.get("body"))
                 elif not upload_nonce:
                     refv = _load_refv()
                     if not refv or not os.path.isfile(_refv_video_path()):

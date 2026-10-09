@@ -2950,6 +2950,7 @@ function loadRecent(){
           <div class="rprompt">고정 참조 (인물 고정)</div>
           <div class="rsub">
             <span class="ok">등록됨</span> · ${esc(ref.name||'인물')} · ${(ref.size/1048576).toFixed(1)}MB
+            <div>체형 고정 · ${ref.body?.bust && ref.body.bust!=='reference'?esc(ref.body.bust)+' 크기 기준':'참조 사진 기준'}${ref.body?.heightCm?' · '+esc(String(ref.body.heightCm))+'cm':''}</div>
           </div>
         </div>
         <button class="rbtn del" data-refdel="img">삭제</button>
