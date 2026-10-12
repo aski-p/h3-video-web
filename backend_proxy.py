@@ -104,6 +104,11 @@ def proxy(environ, start_response):
             studio_auth.restrict(environ, context)
         except studio_auth.AuthError as exc:
             return studio_auth.result(start_response, exc.status, {"ok": False, "error": str(exc)})
+    if path == "/api/jobs" and method == "GET" and environ.get("QUERY_STRING") == "recent=1" and context and not context.get("service"):
+        try:
+            return studio_auth.result(start_response, 200, studio_auth.call("recent", session=context["session"]))
+        except studio_auth.AuthError as exc:
+            return studio_auth.result(start_response, exc.status, {"ok": False, "error": str(exc)})
     if is_worker:
         supplied = environ.get("HTTP_AUTHORIZATION", "")
         expected = f"Bearer {WORKER_SECRET}" if WORKER_SECRET else ""

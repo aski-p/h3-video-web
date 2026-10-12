@@ -21,6 +21,15 @@ class StudioAuthTests(unittest.TestCase):
         data = b"".join(backend_proxy.proxy(environ, start))
         return seen, data
 
+    def test_recent_history_uses_session_scoped_store_without_slow_gpu_statistics(self):
+        context = {"service": False, "session": "session", "user": {"id": "owner"}}
+        with patch.object(backend_proxy, "ORIGIN_SECRET", "origin-test"), patch.object(auth, "actor", return_value=context), patch.object(auth, "call", return_value={"ok": True, "jobs": []}) as rpc, patch("urllib.request.urlopen") as gpu:
+            response, body = self.invoke("/api/jobs", method="GET", QUERY_STRING="recent=1")
+            self.assertEqual(response["status"], "200")
+            self.assertTrue(json.loads(body)["ok"])
+            rpc.assert_called_once_with("recent", session="session")
+            gpu.assert_not_called()
+
     def test_anonymous_and_revoked_generation_never_reaches_gpu(self):
         with patch.object(backend_proxy, "ORIGIN_SECRET", "origin-test"), patch.object(auth, "call", side_effect=auth.AuthError("login", 401)), patch("urllib.request.urlopen") as upstream:
             r, _ = self.invoke("/api/generate", body={"prompt": "test"})

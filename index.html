@@ -2932,8 +2932,10 @@ function fmtSize(b){
   return (b/1048576).toFixed(1)+'MB';
 }
 function loadRecent(){
+  const recentList=$('#recentModalList');
+  if(!recentList.children.length) recentList.textContent='최근 작업을 불러오는 중…';
   Promise.all([
-    fetch('/api/jobs').then(async r=>{const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'작업 목록 확인 실패');return d;}),
+    fetch('/api/jobs?recent=1').then(async r=>{const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'작업 목록 확인 실패');return d;}),
     fetch('/api/ref/status').then(r=>r.json()).catch(()=>({ok:false,ref:null})),
     fetch('/api/refv/status').then(r=>r.json()).catch(()=>({ok:false,ref:null}))
   ]).then(([d,refD,refvD])=>{
@@ -2982,7 +2984,7 @@ function loadRecent(){
       rv.querySelector('[data-refvdel]').onclick=refvDelete;
       list.appendChild(rv);
     }
-    if(!jobs.length) return;
+    if(!jobs.length){if(!list.children.length)list.textContent='이 계정의 최근 작업이 없습니다.';return;}
     jobs.forEach(j=>{
       const st=j.status;
       let stTxt,stCls;
@@ -3049,7 +3051,9 @@ function loadRecent(){
       if(delB) delB.onclick=()=>st==='done'?deleteCompleted(j.id):cleanupError(j.id);
       list.appendChild(item);
     });
-  }).catch(()=>{});
+  }).catch(error=>{
+    recentList.textContent=error.message||'최근 작업을 불러오지 못했어요. 잠시 후 다시 열어 주세요.';
+  });
 }
 pollWhileVisible(loadRecent,60000);
 pollWhileVisible(refreshWorkerStatus,30000);
