@@ -4,6 +4,6 @@ rm -rf dist
 mkdir -p dist
 cp index.html dist/index.html
 mkdir -p dist/assets
-cp assets/page-refresh.js assets/page-refresh.css dist/assets/
+cp assets/page-refresh.js assets/page-refresh.css assets/studio-login.js dist/assets/
 cp apple-redesign.css dist/apple-redesign.css
 cp reference-contract.js dist/reference-contract.js

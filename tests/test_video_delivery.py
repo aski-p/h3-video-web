@@ -28,6 +28,13 @@ import server
 class VideoDeliveryTests(unittest.TestCase):
     ORIGIN_SECRET = "unit-test-origin-secret"
 
+    def setUp(self):
+        # Existing delivery/worker tests exercise an authenticated Studio caller;
+        # browser login, approval and ownership are covered in test_studio_auth.
+        auth = patch("studio_auth.actor", return_value={"service": True})
+        auth.start()
+        self.addCleanup(auth.stop)
+
     def load_windows_worker(self):
         path = Path(__file__).resolve().parents[1] / "windows-worker" / "h3_worker.py"
         spec = importlib.util.spec_from_file_location("h3_worker_test", path)

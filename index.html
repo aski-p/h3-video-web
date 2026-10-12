@@ -1,6 +1,8 @@
 <!doctype html>
 <html lang="ko">
 <head>
+<script defer src="/assets/studio-login.js?v=1"></script>
+<style>#studioLoginGate{position:fixed;inset:0;z-index:99999;background:#101014;display:grid;place-content:center;text-align:center;padding:28px;color:#fff}#studioLoginGate a{display:block;padding:14px 20px;background:#397cff;color:white;border-radius:12px;text-decoration:none;margin-top:18px}#studioAccount{padding:10px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:13px}#studioAccount[hidden],#studioLoginGate a[hidden]{display:none}</style>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
@@ -686,6 +688,8 @@ footer{
 <link rel="stylesheet" href="/assets/page-refresh.css?v=3"><script src="/assets/page-refresh.js?v=2" defer></script>
 </head>
 <body>
+<div id="studioLoginGate"><h2>Aski Studio · H3</h2><p id="studioLoginStatus">로그인 확인 중…</p><a href="/api/auth/login" hidden>Google 계정으로 로그인</a><p>Aski Studio에서 승인된 계정만 영상을 만들 수 있어요.</p></div>
+<div id="studioAccount" hidden></div>
 <a class="skip-link" href="#main-controls">생성 설정으로 바로가기</a>
 <div class="wrap">
   <header>
@@ -910,8 +914,8 @@ footer{
         <input type="number" id="seed" value="-1">
       </div>
       <div>
-        <label class="fld">파일 이름</label>
-        <input type="text" id="fname" value="video" placeholder="video">
+        <label class="fld">영상 제목 · 파일 이름</label>
+        <input type="text" id="fname" value="" placeholder="예: 비 오는 밤의 귀가">
       </div>
     </div>
     <div class="hint">분할 생성은 구간마다 시드가 달라집니다. 구간 경계의 동작·인물 연속성은 보장되지 않습니다.</div>
@@ -992,6 +996,7 @@ footer{
 
   <!-- job 상태 -->
   <div class="card" id="jobbox">
+    <p id="trackingOwner" style="font-size:13px;color:var(--muted)"></p>
     <div class="statusline" id="stline"><span class="ready-icon" aria-hidden="true">✓</span><span class="st" id="sttext">생성 준비</span></div>
     <div class="progress-journey" aria-label="영상 생성 진행">
       <div class="bar"><i id="bar"></i></div>
@@ -2385,7 +2390,8 @@ $('#go').onclick=async()=>{
   if(MODE==='i2v' && refKind!=='motion' && !imgNonce && !refActive){ alert('I2V 모드: 이미지를 업로드하거나 고정 참조를 등록해 주세요'); return; }
   const negative=$('#negative').value.trim();
   const seed=parseInt($('#seed').value)||-1;
-  const fname=$('#fname').value.trim()||'video';
+  const fname=$('#fname').value.trim();
+  if(!fname){alert('영상 제목을 입력해 주세요.');return;}
 
   $('#go').disabled=true;
   $('#jobbox').style.display='block';
@@ -2393,7 +2399,7 @@ $('#go').onclick=async()=>{
   $('#bar').style.width='0%'; $('#pct').textContent='—'; $('#eta').textContent='진행 정보 수신 대기';
   setProgressCharacter('request-'+Date.now(),'running',null);
 
-  const body={prompt, negative, width:W, height:H, seconds:S, steps:STEPS, strategy:STRATEGY, strategy_contract:1, seg_seconds:SEG_SECONDS, seed, mode:MODE, filename:fname, realism_lora:REALISM_LORA, cam_motion:CAM_MOTION, lora_options:readH3LoraOptions()};
+  const body={client_request_id:crypto.randomUUID(),title:fname,prompt, negative, width:W, height:H, seconds:S, steps:STEPS, strategy:STRATEGY, strategy_contract:1, seg_seconds:SEG_SECONDS, seed, mode:MODE, filename:fname, realism_lora:REALISM_LORA, cam_motion:CAM_MOTION, lora_options:readH3LoraOptions()};
   if(scriptLora){body.lora_options=scriptLora.options;body.realism_lora=scriptLora.options.realism.enabled;body.realism_strength=scriptLora.options.realism.strength;body.cam_motion=scriptLora.options.camera_motion.enabled?scriptLora.options.camera_motion.version:'';body.cam_strength=scriptLora.options.camera_motion.strength;}
   body.worker_target=WORKER_TARGET;
   if(MODE==='i2v' && refKind==='motion'){
@@ -2716,6 +2722,7 @@ function trackValue(label, value){
   return '<div class="track-kv"><small>'+esc(label)+'</small><span>'+esc(value==null||value===''?'—':value)+'</span></div>';
 }
 function renderTracking(j){
+  const ownerLine=document.getElementById("trackingOwner");if(ownerLine)ownerLine.textContent=j.owner?`${j.title||"H3 영상"} · ${j.owner.name||j.owner.email} (${j.owner.email})`:"";
   const c=j.cfg||{}, p=j.progress||{};
   const measuredPct=finiteProgressNumber(p.pct,0,100);
   const measuredEta=finiteProgressNumber(p.eta,0);
@@ -3004,7 +3011,7 @@ function loadRecent(){
       item.innerHTML=`
         ${thumb}
         <div class="rmeta">
-          <div class="rprompt" title="${esc(j.prompt||'')}">${esc(j.prompt||j.id)}</div>
+          <div class="rprompt" title="${esc(j.prompt||'')}">${esc(j.title||j.prompt||j.id)}</div>${j.owner?'<div class="rmeta">'+esc(j.owner.name||j.owner.email)+' · '+esc(j.owner.email)+'</div>':''}
           <div class="rsub">
             <span class="${stCls}">${stTxt}</span>${queueLabel} · ${fmtCreatedAt(j.created)}
             ${j.status==='running'||j.status==='starting'||j.status==='queued'

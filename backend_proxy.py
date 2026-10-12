@@ -84,7 +84,26 @@ def proxy(environ, start_response):
         return [err]
     path = environ.get("PATH_INFO", "/")
     method = environ.get("REQUEST_METHOD", "GET")
+    import studio_auth
+    if path.startswith("/api/auth/"):
+        try:
+            return studio_auth.auth_route(environ, start_response)
+        except studio_auth.AuthError as exc:
+            return studio_auth.result(start_response, exc.status, {"ok": False, "error": str(exc)})
     is_worker = path.startswith("/api/worker/")
+    context = None
+    # Existing media URLs remain usable by Studio; job metadata and all browser
+    # mutations require a live approved identity. Worker/original APIs retain
+    # their independent server authentication below.
+    public_read = method in ("GET", "HEAD") and (
+        path in ("/api/health", "/api/workers") or
+        path.startswith(("/api/view/", "/api/download/", "/api/thumbnail/", "/api/media-ticket/")))
+    if not is_worker and not path.startswith("/api/original-video/") and not public_read:
+        try:
+            context = studio_auth.actor(environ)
+            studio_auth.restrict(environ, context)
+        except studio_auth.AuthError as exc:
+            return studio_auth.result(start_response, exc.status, {"ok": False, "error": str(exc)})
     if is_worker:
         supplied = environ.get("HTTP_AUTHORIZATION", "")
         expected = f"Bearer {WORKER_SECRET}" if WORKER_SECRET else ""
@@ -144,6 +163,13 @@ def proxy(environ, start_response):
         n = int(environ["CONTENT_LENGTH"])
         body = environ.get("wsgi.input", b"").read(n)
 
+    prepared = None
+    if path == "/api/generate" and method == "POST":
+        try:
+            body, prepared = studio_auth.prepare(body, context)
+        except studio_auth.AuthError as exc:
+            return studio_auth.result(start_response, exc.status, {"ok": False, "error": str(exc)})
+
     if path == "/api/studio-reference-video":
         from studio_reference import handle
         if method != "POST":
@@ -194,6 +220,21 @@ def proxy(environ, start_response):
         # WSGI iterator that must keep the upstream socket open while bytes
         # are sent to the browser.
         r = urllib.request.urlopen(req, timeout=300)
+        if prepared is not None or (context and not context.get("service") and (path == "/api/jobs" or re.fullmatch(r"/api/job/[a-f0-9]{8}", path))):
+            try:
+                payload = json.load(r)
+            finally:
+                r.close()
+            try:
+                if prepared is not None:
+                    payload = studio_auth.bind(payload, prepared)
+                elif path == "/api/jobs":
+                    payload = studio_auth.jobs(payload, context)
+                else:
+                    payload = studio_auth.detail(payload, context)
+            except studio_auth.AuthError as exc:
+                return studio_auth.result(start_response, exc.status, {"ok": False, "error": str(exc)})
+            return studio_auth.result(start_response, 200, payload)
         if path == "/api/active-progress" and method == "GET":
             try:
                 dashboard = json.load(r)
