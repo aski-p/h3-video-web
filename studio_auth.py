@@ -57,7 +57,7 @@ def call(action, **body):
         with urllib.request.urlopen(req, timeout=12) as r:
             return json.load(r)
     except urllib.error.HTTPError as exc:
-        raise AuthError("Aski Studio 가입·승인 및 Google 로그인 상태를 확인해 주세요.", exc.code if exc.code in (400, 401, 403, 409) else 503) from None
+        raise AuthError("비밀번호가 올바르지 않거나 잠시 잠겼습니다." if exc.code in (401, 429) else "Aski Studio 계정을 확인할 수 없습니다.", exc.code if exc.code in (400, 401, 403, 409, 429) else 503) from None
     except (OSError, ValueError):
         raise AuthError("Studio 계정을 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.", 503) from None
 
@@ -91,6 +91,23 @@ def same_origin(environ):
 
 def auth_route(environ, start):
     path, method = environ.get("PATH_INFO"), environ.get("REQUEST_METHOD", "GET")
+    if path == "/api/auth/password" and method == "POST":
+        same_origin(environ)
+        try:
+            length = int(environ.get("CONTENT_LENGTH") or 0)
+            if length < 1 or length > 1024:
+                raise ValueError()
+            body = json.loads(environ["wsgi.input"].read(length))
+            key = body.get("key")
+            if not isinstance(key, str) or not 4 <= len(key) <= 64:
+                raise ValueError()
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise AuthError("비밀번호를 확인해 주세요.", 400) from None
+        response = call("password", key=key)
+        token = response.get("token", "")
+        if not re.fullmatch(r"[a-f0-9]{64}", token):
+            raise AuthError("로그인을 완료할 수 없습니다.", 503)
+        return result(start, 200, {"ok": True, "user": response.get("user")}, [set_cookie(COOKIE, token, 30*86400)])
     if path == "/api/auth/login" and method == "GET":
         p = {"state": secrets.token_hex(32), "verifier": secrets.token_urlsafe(32), "at": time.time()}
         challenge = base64.urlsafe_b64encode(hashlib.sha256(p["verifier"].encode()).digest()).decode().rstrip("=")

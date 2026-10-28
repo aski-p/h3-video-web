@@ -21,6 +21,19 @@ class StudioAuthTests(unittest.TestCase):
         data = b"".join(backend_proxy.proxy(environ, start))
         return seen, data
 
+    def test_password_login_requires_same_origin_and_sets_secure_session(self):
+        token = "a" * 64
+        with patch.object(backend_proxy, "ORIGIN_SECRET", "origin-test"), patch.object(auth, "call", return_value={"token": token, "user": {"id": "admin"}}) as rpc:
+            response, body = self.invoke("/api/auth/password", body={"key": "1234"}, HTTP_ORIGIN=auth.H3)
+            self.assertTrue(response["status"].startswith("200"))
+            self.assertTrue(json.loads(body)["ok"])
+            self.assertIn("HttpOnly", response["headers"]["Set-Cookie"])
+            rpc.assert_called_once_with("password", key="1234")
+        with patch.object(backend_proxy, "ORIGIN_SECRET", "origin-test"), patch.object(auth, "call") as rpc:
+            response, body = self.invoke("/api/auth/password", body={"key": "1234"}, HTTP_ORIGIN="https://evil.invalid")
+            self.assertTrue(response["status"].startswith("403"))
+            rpc.assert_not_called()
+
     def test_recent_history_uses_session_scoped_store_without_slow_gpu_statistics(self):
         context = {"service": False, "session": "session", "user": {"id": "owner"}}
         with patch.object(backend_proxy, "ORIGIN_SECRET", "origin-test"), patch.object(auth, "actor", return_value=context), patch.object(auth, "call", return_value={"ok": True, "jobs": []}) as rpc, patch("urllib.request.urlopen") as gpu:

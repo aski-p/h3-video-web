@@ -1,8 +1,9 @@
 <!doctype html>
 <html lang="ko">
 <head>
-<script defer src="/assets/studio-login.js?v=1"></script>
+<script defer src="/assets/studio-login.js?v=passcode-20261029"></script>
 <style>#studioLoginGate{position:fixed;inset:0;z-index:99999;background:#101014;display:grid;place-content:center;text-align:center;padding:28px;color:#fff}#studioLoginGate a{display:block;padding:14px 20px;background:#397cff;color:white;border-radius:12px;text-decoration:none;margin-top:18px}#studioAccount{padding:10px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:13px}#studioAccount[hidden],#studioLoginGate a[hidden]{display:none}</style>
+<style>#studioPasswordForm{display:grid;gap:12px;margin-top:18px;text-align:left}#studioPasswordForm input{min-height:48px;padding:10px 14px;font-size:16px;border:1px solid #646775;border-radius:8px;background:#20212a;color:white}#studioPasswordForm button{min-height:48px;border:0;border-radius:8px;background:#397cff;color:white;font-size:16px;cursor:pointer}</style>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
@@ -688,7 +689,7 @@ footer{
 <link rel="stylesheet" href="/assets/page-refresh.css?v=3"><script src="/assets/page-refresh.js?v=2" defer></script>
 </head>
 <body>
-<div id="studioLoginGate"><h2>Aski Studio · H3</h2><p id="studioLoginStatus">로그인 확인 중…</p><a href="/api/auth/login" hidden>Google 계정으로 로그인</a><p>Aski Studio에서 승인된 계정만 영상을 만들 수 있어요.</p></div>
+<div id="studioLoginGate"><h2>Aski Studio · H3</h2><p id="studioLoginStatus" role="status">Aski Studio 비밀번호를 입력해 주세요.</p><form id="studioPasswordForm"><label for="studioPassword">비밀번호</label><input id="studioPassword" type="password" autocomplete="current-password" maxlength="64" required><button type="submit">로그인</button></form></div>
 <div id="studioAccount" hidden></div>
 <a class="skip-link" href="#main-controls">생성 설정으로 바로가기</a>
 <div class="wrap">
