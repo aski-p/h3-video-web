@@ -8,9 +8,10 @@ import re
 import urllib.request
 import urllib.error
 
-# NAS-only production data plane: the stable Tailscale Funnel is authoritative.
-# Do not allow a stale deployment environment variable to revive a retired tunnel.
-BACKEND = "https://thinkstationpgx-11d3.tailccac79.ts.net"
+# The Funnel strips its /api mount before forwarding to the H3 server. Keep
+# that prefix here so the server still receives its authenticated /api paths.
+# Do not allow a stale environment variable to revive a retired tunnel.
+BACKEND = "https://thinkstationpgx-11d3.tailccac79.ts.net:10000/api"
 ORIGIN_HEADER = "X-H3-Origin-Token"
 ORIGIN_SECRET = os.environ.get("H3_ORIGIN_SECRET", "")
 WORKER_HEADER = "X-H3-Worker-Token"

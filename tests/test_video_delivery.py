@@ -75,7 +75,7 @@ class VideoDeliveryTests(unittest.TestCase):
         with patch.dict(os.environ, {"H3_BACKEND": "https://retired-quick-tunnel.invalid"}):
             assert spec.loader is not None
             spec.loader.exec_module(module)
-        self.assertEqual(module.BACKEND, "https://thinkstationpgx-11d3.tailccac79.ts.net")
+        self.assertEqual(module.BACKEND, "https://thinkstationpgx-11d3.tailccac79.ts.net:10000/api")
 
     def test_original_thumbnail_uses_private_static_archive_without_backend_restart(self):
         source_sha = "a" * 64
