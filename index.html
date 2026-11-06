@@ -916,7 +916,7 @@ footer{
       </div>
       <div>
         <label class="fld">영상 제목 · 파일 이름</label>
-        <input type="text" id="fname" value="" placeholder="예: 비 오는 밤의 귀가">
+        <input type="text" id="fname" value="" placeholder="비워 두면 스크립트 첫 문장으로 자동 입력">
       </div>
     </div>
     <div class="hint">분할 생성은 구간마다 시드가 달라집니다. 구간 경계의 동작·인물 연속성은 보장되지 않습니다.</div>
@@ -1193,6 +1193,13 @@ function setProgressCharacter(jid,state='running',pct=null){
 }
 setProgressCharacter('ready','idle',0);
 
+function autoVideoTitle(script){
+  const body=String(script||'').replace(/\[LORA\][\s\S]*?\[\/LORA\]/gi,'');
+  const line=body.split(/\n/).map(l=>l.trim()).find(l=>l&&!/^(MiniMax H3|Negative:|LORA)/i.test(l))||'';
+  const first=line.split(/(?<=[.!?。])\s/)[0].replace(/\s+/g,' ').trim();
+  const stamp=new Date().toLocaleString('ko-KR',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+  return (first?first.slice(0,40)+(first.length>40?'…':''):'H3 영상')+' · '+stamp;
+}
 async function fetchJsonWithTimeout(url, options={}, timeoutMs=15000){
   const controller=new AbortController();
   const timeout=setTimeout(()=>controller.abort(),timeoutMs);
@@ -2391,8 +2398,9 @@ $('#go').onclick=async()=>{
   if(MODE==='i2v' && refKind!=='motion' && !imgNonce && !refActive){ alert('I2V 모드: 이미지를 업로드하거나 고정 참조를 등록해 주세요'); return; }
   const negative=$('#negative').value.trim();
   const seed=parseInt($('#seed').value)||-1;
+  // 제목이 비어 있으면 스크립트 첫 문장으로 자동 생성한다([LORA] 블록과 빈 줄은 건너뜀).
+  if(!$('#fname').value.trim()) $('#fname').value=autoVideoTitle($('#prompt').value);
   const fname=$('#fname').value.trim();
-  if(!fname){alert('영상 제목을 입력해 주세요.');return;}
 
   $('#go').disabled=true;
   $('#jobbox').style.display='block';
