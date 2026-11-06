@@ -1219,7 +1219,7 @@ async function fetchJsonWithTimeout(url, options={}, timeoutMs=15000){
 
 async function refreshWorkerStatus(){
   try{
-    const data=await fetchJsonWithTimeout('/api/jobs',{},10000);
+    const data=await fetchJsonWithTimeout('/api/jobs',{},30000);
     WORKER_STATUS=data;
     const workers=data.workers||{}, queues=data.queues||{};
     const rtx=workers.rtx5080||{online:false,eligible:false,generation_verified:false};
@@ -1277,7 +1277,7 @@ function renderPowerState(power){
 }
 async function refreshPowerStatus(){
   try{
-    const data=await fetchJsonWithTimeout('/api/power/rtx5080',{},10000);
+    const data=await fetchJsonWithTimeout('/api/power/rtx5080',{},20000);
     renderPowerState(data.power);
   }catch(_){ renderPowerState({state:'unknown',online:false,busy:false}); }
 }
